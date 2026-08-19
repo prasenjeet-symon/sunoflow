@@ -1,0 +1,50 @@
+# ── macOS ───────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+
+# ── Logs ─────────────────────────────────────────────────
+*.log
+app-debug.log
+app-launchd.log
+sidecar.log
+
+# ── Python (sidecar) ────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+
+# Sidecar runtime state — these are user data, not source
+sidecar/config.json
+sidecar/corrections.json
+
+# ── Swift build artifacts ───────────────────────────────
+SunoFlowApp/.build/
+SunoFlowApp/SunoFlow.app
+SunoFlowApp/signing/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+DerivedData/
+
+# ── Secrets / signing keys ──────────────────────────────
+*.p12
+*.cer
+*.certSigningRequest
+*.pem
+
+# ── Editor / IDE ────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── Local project memory (not for distribution) ─────────
+.ogcode/
+MEMORY.md
