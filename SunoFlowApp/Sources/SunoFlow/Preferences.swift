@@ -4,12 +4,6 @@ import Foundation
 extension Notification.Name {
     /// Posted when the dictation hotkey changes so the AppDelegate can re-register it.
     static let sunoHotkeyChanged = Notification.Name("suno.hotkeyChanged")
-    /// Posted by SettingsView when there are unsaved AI-config changes.
-    static let sunoAIConfigDirty = Notification.Name("suno.aiConfigDirty")
-    /// Posted when AI-config changes have been saved or discarded.
-    static let sunoAIConfigClean = Notification.Name("suno.aiConfigClean")
-    /// Posted by the window controller when the user chose "Save" in the close prompt.
-    static let sunoSaveAndClose = Notification.Name("suno.saveAndClose")
 }
 
 /// Cross-process notifications (delivered via DistributedNotificationCenter).
@@ -22,8 +16,9 @@ enum AppNotifications {
 ///
 /// These back the values that used to be hardcoded across the app: the mic device,
 /// the dictation hotkey, the auto-stop duration, and whether the AI cleanup pass
-/// runs. The AI *instruction* and Ollama *model* live in the sidecar (see
-/// `TranscriptionClient` `/config`), since that's where cleanup actually happens.
+/// runs. The cleanup instruction and LLM model are owned by the hosted cleanup
+/// gateway (see `TranscriptionClient.checkCleanupGateway`); the app only toggles
+/// whether the cleanup pass runs and probes the gateway's reachability.
 final class Preferences: ObservableObject {
     static let shared = Preferences()
 

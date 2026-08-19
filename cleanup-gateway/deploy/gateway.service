@@ -1,0 +1,34 @@
+# SunoFlow cleanup gateway — systemd unit
+#
+# Install at /etc/systemd/system/sunoflow-gateway.service, then:
+#   systemctl daemon-reload
+#   systemctl enable --now sunoflow-gateway
+#
+# The binary is a single static artifact. Adjust ExecStart path as needed.
+# Environment is loaded from /etc/sunoflow/gateway.env (EnvironmentFile).
+
+[Unit]
+Description=SunoFlow cleanup gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sunoflow
+Group=sunoflow
+ExecStart=/usr/local/bin/sunoflow-gateway
+EnvironmentFile=/etc/sunoflow/gateway.env
+Restart=on-failure
+RestartSec=2
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/sunoflow-gateway
+# Ollama runs on loopback; no outbound needed beyond the host.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

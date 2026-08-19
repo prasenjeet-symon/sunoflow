@@ -10,17 +10,18 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     private var hasCentered = false
 
-    /// Set by `SettingsView` when there are unsaved AI-config edits. When true,
-    /// closing the window prompts the user to save first.
-    var hasUnsavedAIChanges = false
-
     private init() {
         let hosting = NSHostingController(rootView: SettingsView())
         let window = NSWindow(contentViewController: hosting)
         window.title = "SunoFlow"
-        window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-        window.setContentSize(NSSize(width: 920, height: 620))
-        window.minSize = NSSize(width: 760, height: 540)
+        window.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
+        // Hide the title bar and let the content run under it, so the sidebar
+        // reaches the top of the window and the traffic lights float over it.
+        // `SettingsView` reserves the top-left space for them.
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        window.setContentSize(NSSize(width: 980, height: 700))
+        window.minSize = NSSize(width: 880, height: 620)
         window.isReleasedWhenClosed = false
         super.init(window: window)
         window.delegate = self
@@ -41,31 +42,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        guard hasUnsavedAIChanges else { return true }
-
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = "Save AI settings?"
-        alert.informativeText = "You have unsaved changes to the AI cleanup settings. Do you want to save them before closing?"
-        alert.addButton(withTitle: "Save")
-        alert.addButton(withTitle: "Discard")
-        alert.addButton(withTitle: "Cancel")
-
-        let response = alert.runModal()
-        switch response {
-        case .alertFirstButtonReturn:
-            // Save, then close. The actual save is triggered via notification;
-            // SettingsView will call back when done. For now, block the close —
-            // SettingsView saves synchronously-ish and will close.
-            NotificationCenter.default.post(name: .sunoSaveAndClose, object: nil)
-            return false
-        case .alertSecondButtonReturn:
-            hasUnsavedAIChanges = false
-            NotificationCenter.default.post(name: .sunoAIConfigClean, object: nil)
-            return true
-        default:
-            return false
-        }
+        // No unsaved-state to guard anymore: the cleanup model + instruction are
+        // server-owned (the hosted gateway), so the settings window has nothing
+        // that needs a save-before-close prompt.
+        true
     }
 
     func windowWillClose(_ notification: Notification) {

@@ -1,0 +1,56 @@
+# SunoFlow cleanup gateway — one-command local stack.
+#
+#   cp .env.example .env  &&  edit ADMIN_TOKEN
+#   docker compose up -d --build
+#
+# Then expose it via the Cloudflare tunnel (see deploy/README.md).
+# Host port 8081 is published only so the local tunnel can reach nginx.
+# Nothing here is internet-facing directly.
+
+services:
+  # --- The Go gateway. Talks to the HOST Ollama via host.docker.internal.
+  # Your existing host Ollama (with glm-5.2) is reused — no in-container
+  # Ollama, no model re-download. NOTE: for a production/server deployment
+  # you'd reintroduce the isolated `ollama` service, since the server has
+  # no host Ollama to borrow. This compose file is tuned for local dev. ---
+  gateway:
+    build: .
+    container_name: sunoflow-gateway
+    restart: unless-stopped
+    extra_hosts:
+      # lets the container resolve `host.ollama` to the Mac's localhost
+      - "host.ollama:host-gateway"
+    environment:
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?ADMIN_TOKEN is required — set it in .env}
+      GATEWAY_ADDR: "0.0.0.0:8080"
+      OLLAMA_URL: "http://host.ollama:11434/api/generate"
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-glm-5.2:cloud}
+      BACKEND: ollama
+      OLLAMA_TIMEOUT: 30s
+      DB_PATH: /data/keys.db
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DEFAULT_QUOTA_RPM: ${DEFAULT_QUOTA_RPM:-60}
+      DEFAULT_QUOTA_DAILY: ${DEFAULT_QUOTA_DAILY:-5000}
+    volumes:
+      - gateway-data:/data
+    networks: [sunoflow-internal]
+
+  # --- Nginx: edge proxy with rate limiting. HTTP only — the Cloudflare
+  # tunnel terminates TLS upstream of this. Publishes 127.0.0.1:8081 only. ---
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: sunoflow-nginx
+    restart: unless-stopped
+    depends_on: [gateway]
+    ports:
+      - "127.0.0.1:8081:80"
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    networks: [sunoflow-internal]
+
+volumes:
+  gateway-data:
+
+networks:
+  sunoflow-internal:
+    driver: bridge

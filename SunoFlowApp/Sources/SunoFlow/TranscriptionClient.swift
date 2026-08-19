@@ -22,18 +22,10 @@ private struct LearnResponse: Decodable {
     let learned: [Correction]
 }
 
-/// AI-cleanup settings owned by the sidecar (where cleanup actually runs).
-/// `default_*` carry the built-in values so the UI can offer "Restore default"
-/// without duplicating the prompt text on the Swift side.
-struct SidecarConfig: Decodable {
-    let ollama_model: String
-    let cleanup_instruction: String
-    let default_model: String
-    let default_instruction: String
-}
-
-private struct ModelsResponse: Decodable {
-    let models: [String]
+/// Response shape of the cleanup gateway's unauthenticated `/ready` probe.
+/// `backend_ok` is true only when the gateway's LLM backend is reachable.
+private struct ReadyResponse: Decodable {
+    let backend_ok: Bool
 }
 
 /// Progress/state of the STT model, reported by the sidecar's `/model/status`.
@@ -74,6 +66,11 @@ private func formURLEncoded(_ fields: [String: String]) -> Data {
 
 enum TranscriptionClient {
     static let baseURL = URL(string: "http://127.0.0.1:8765")!
+
+    /// Base URL of the hosted cleanup gateway (transcript polishing service).
+    /// The gateway owns the cleanup instruction and LLM backend; the app only
+    /// probes its `/ready` for the settings connectivity status.
+    static let gatewayURL = URL(string: "https://cleanup.mirrorli.art")!
 
     static func health(completion: @escaping (Bool) -> Void) {
         var request = URLRequest(url: baseURL.appendingPathComponent("health"))
@@ -213,40 +210,26 @@ enum TranscriptionClient {
         return resp.corrections
     }
 
-    /// Check whether the Ollama daemon is reachable (independent of the sidecar).
-    static func checkOllama(completion: @escaping (Bool) -> Void) {
-        var request = URLRequest(url: URL(string: "http://127.0.0.1:11434/api/tags")!)
-        request.timeoutInterval = 2
-        URLSession.shared.dataTask(with: request) { _, response, _ in
-            let ok = (response as? HTTPURLResponse)?.statusCode == 200
-            completion(ok)
-        }.resume()
-    }
+    // MARK: - Hosted cleanup gateway
 
-    // MARK: - AI cleanup config (model + instruction)
-
-    static func fetchConfig(completion: @escaping (SidecarConfig?) -> Void) {
-        var request = URLRequest(url: baseURL.appendingPathComponent("config"))
-        request.timeoutInterval = 3
-        URLSession.shared.dataTask(with: request) { data, _, _ in
-            let config = data.flatMap { try? JSONDecoder().decode(SidecarConfig.self, from: $0) }
-            completion(config)
-        }.resume()
-    }
-
-    static func saveConfig(model: String, instruction: String, completion: @escaping (Bool) -> Void) {
-        post("config", fields: ["ollama_model": model, "cleanup_instruction": instruction]) { data in
-            completion(data != nil)
+    /// Reachability of the hosted cleanup service. Replaces the old local-Ollama
+    /// probe — cleanup no longer runs on the user's machine. The gateway's
+    /// `/ready` is unauthenticated and reports whether its LLM backend is up.
+    static func checkCleanupGateway(completion: @escaping (Bool) -> Void) {
+        guard let url = URL(string: gatewayURL.appendingPathComponent("ready").absoluteString) else {
+            completion(false)
+            return
         }
-    }
-
-    /// Ollama models installed on the machine, for the model picker.
-    static func fetchModels(completion: @escaping ([String]) -> Void) {
-        var request = URLRequest(url: baseURL.appendingPathComponent("models"))
+        var request = URLRequest(url: url)
         request.timeoutInterval = 4
         URLSession.shared.dataTask(with: request) { data, _, _ in
-            let models = data.flatMap { try? JSONDecoder().decode(ModelsResponse.self, from: $0) }?.models ?? []
-            completion(models)
+            // `/ready` returns {"backend_ok": true|false}. Treat any 200 with a
+            // truthy backend_ok as reachable; fall back to false otherwise so the
+            // UI shows "offline" rather than a misleading green dot.
+            let ok = data
+                .flatMap { try? JSONDecoder().decode(ReadyResponse.self, from: $0) }
+                .map { $0.backend_ok } ?? false
+            completion(ok)
         }.resume()
     }
 

@@ -1,0 +1,15 @@
+# Build output
+/sunoflow-gateway
+/bin/
+
+# SQLite databases (local dev only)
+*.db
+*.db-journal
+
+# Secrets / env — never commit
+.env
+.env.*
+
+# Editor / OS cruft
+.DS_Store
+*.swp

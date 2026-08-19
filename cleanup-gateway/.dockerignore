@@ -1,0 +1,22 @@
+# Build output
+build/
+bin/
+sunoflow-gateway
+
+# Local databases
+*.db
+*.db-journal
+
+# Secrets / env
+.env
+.env.*
+
+# Editor / OS cruft
+.DS_Store
+*.swp
+
+# Docs and deploy artifacts not needed in the image
+README.md
+deploy/
+.git
+.gitignore
