@@ -460,6 +460,7 @@ struct SettingsView: View {
     // Permission status.
     @State private var micPermission: Bool = false
     @State private var accessibilityPermission: Bool = false
+    @State private var screenRecordingPermission: Bool = false
 
     // Corrections list.
     @State private var corrections: [Correction] = []
@@ -686,6 +687,7 @@ struct SettingsView: View {
                     summaryRow("Microphone", value: micDisplayName)
                     summaryRow("Auto-stop", value: "\(prefs.maxRecordingSeconds) s")
                     summaryRow("AI cleanup", value: prefs.cleanupEnabled ? "On" : "Off")
+                    summaryRow("Screen context", value: prefs.screenContextEnabled ? "On" : "Off")
                     summaryRow("Launch at login", value: launchAtLogin ? "Enabled" : "Disabled")
                     summaryRow("Learned corrections", value: "\(corrections.count)")
                 }
@@ -728,7 +730,7 @@ struct SettingsView: View {
             }
 
             // Permission warnings
-            if !micPermission || !accessibilityPermission {
+            if !micPermission || !accessibilityPermission || (prefs.screenContextEnabled && !screenRecordingPermission) {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Action needed")
                         .font(.headline)
@@ -740,6 +742,11 @@ struct SettingsView: View {
                     if !accessibilityPermission {
                         permissionWarning(
                             "Grant Accessibility permission in System Settings → Privacy & Security → Accessibility for text insertion to work."
+                        )
+                    }
+                    if prefs.screenContextEnabled, !screenRecordingPermission {
+                        permissionWarning(
+                            "Grant Screen Recording permission in System Settings → Privacy & Security → Screen Recording for screen context to work."
                         )
                     }
                 }
@@ -814,6 +821,33 @@ struct SettingsView: View {
                 }
                 Text("Stops a runaway recording automatically so you don't have to.")
                     .font(.caption).foregroundStyle(.secondary)
+            }
+
+            settingsCard {
+                Toggle("Use screen context for cleanup", isOn: $prefs.screenContextEnabled)
+                    .onChange(of: prefs.screenContextEnabled) { newValue in
+                        if newValue, !ScreenContext.hasPermission {
+                            ScreenContext.openSystemSettings()
+                        }
+                    }
+                Text("When on, a screenshot is taken and OCR'd on-device when dictation stops. The recognized words give the cleanup AI rough context about the app you're typing into (better names, terms, and phrasing). Accuracy is not the goal — only the on-screen vocabulary is extracted.")
+                    .font(.caption).foregroundStyle(.secondary)
+
+                if prefs.screenContextEnabled, !screenRecordingPermission {
+                    Label(
+                        "Screen Recording permission is required. Grant it in System Settings → Privacy & Security → Screen Recording, then restart SunoFlow.",
+                        systemImage: "exclamationmark.triangle.fill"
+                    )
+                    .font(.caption).foregroundStyle(.orange)
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+                    Button("Open System Settings") {
+                        ScreenContext.openSystemSettings()
+                    }
+                    .buttonStyle(.bordered).controlSize(.small)
+                    .padding(.top, 2)
+                }
             }
         }
     }
@@ -1231,6 +1265,7 @@ struct SettingsView: View {
     private func checkPermissions() {
         micPermission = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
         accessibilityPermission = TextInjector.hasAccessibilityPermission
+        screenRecordingPermission = ScreenContext.hasPermission
     }
 
     private func refreshStatus() {

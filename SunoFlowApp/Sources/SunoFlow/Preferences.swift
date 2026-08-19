@@ -35,6 +35,7 @@ final class Preferences: ObservableObject {
         static let hotkeyModifiers = "hotkeyModifiers"
         static let maxRecordingSeconds = "maxRecordingSeconds"
         static let cleanupEnabled = "cleanupEnabled"
+        static let screenContextEnabled = "screenContextEnabled"
     }
 
     /// Core Audio device UID to record from. Empty means "system default input".
@@ -62,6 +63,14 @@ final class Preferences: ObservableObject {
         didSet { defaults.set(cleanupEnabled, forKey: Key.cleanupEnabled) }
     }
 
+    /// Capture the screen and run on-device OCR when dictation stops, so the
+    /// cleanup LLM gets heuristic context about the app/field being typed
+    /// into. Requires the Screen Recording permission. Off by default because
+    /// it needs an extra permission the user must grant explicitly.
+    @Published var screenContextEnabled: Bool {
+        didSet { defaults.set(screenContextEnabled, forKey: Key.screenContextEnabled) }
+    }
+
     private init() {
         defaults.register(defaults: [
             Key.micDeviceUID: "",
@@ -69,6 +78,7 @@ final class Preferences: ObservableObject {
             Key.hotkeyModifiers: Int(DefaultHotkey.modifiers),
             Key.maxRecordingSeconds: 60,
             Key.cleanupEnabled: true,
+            Key.screenContextEnabled: false,
         ])
         // didSet does not fire for assignments inside init, so these load the
         // stored values without redundantly writing them back.
@@ -77,6 +87,7 @@ final class Preferences: ObservableObject {
         hotkeyModifiers = UInt32(defaults.integer(forKey: Key.hotkeyModifiers))
         maxRecordingSeconds = defaults.integer(forKey: Key.maxRecordingSeconds)
         cleanupEnabled = defaults.bool(forKey: Key.cleanupEnabled)
+        screenContextEnabled = defaults.bool(forKey: Key.screenContextEnabled)
     }
 
     private func persistHotkey() {

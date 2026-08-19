@@ -291,9 +291,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             AppLog.log("Captured \(context.count) chars of cursor context")
         }
 
+        // Optionally capture the screen and run on-device OCR for heuristic
+        // context (window titles, labels, nearby text). This needs the Screen
+        // Recording permission and is gated by a user toggle. Best-effort:
+        // nil means we skip it and proceed with cursor context only.
+        let captureScreen = Preferences.shared.cleanupEnabled
+            && Preferences.shared.screenContextEnabled
+        if captureScreen {
+            guard ScreenContext.hasPermission else {
+                AppLog.log("Screen context enabled but Screen Recording permission missing — skipping")
+                sendForTranscription(fileURL: fileURL, context: context, screenContext: "")
+                return
+            }
+            ScreenContext.captureAndRecognize { [weak self] screenText in
+                guard let self = self else { return }
+                if let screenText = screenText, !screenText.isEmpty {
+                    AppLog.log("Captured \(screenText.count) chars of screen OCR context")
+                }
+                self.sendForTranscription(
+                    fileURL: fileURL, context: context, screenContext: screenText ?? ""
+                )
+            }
+        } else {
+            sendForTranscription(fileURL: fileURL, context: context, screenContext: "")
+        }
+    }
+
+    private func sendForTranscription(fileURL: URL, context: String, screenContext: String) {
         TranscriptionClient.transcribe(
             fileURL: fileURL,
             context: context,
+            screenContext: screenContext,
             cleanup: Preferences.shared.cleanupEnabled
         ) { [weak self] result in
             DispatchQueue.main.async {

@@ -178,8 +178,9 @@ for. You only return a cleaned copy of the same words. You ONLY:
 - fix punctuation and capitalization
 - fix clear grammatical errors
 - correct a word that is clearly a mis-transcription of a name or technical term
-  that appears in the CONTEXT or RECENT DICTATION, changing it to match that
-  spelling (e.g. transcript "cavach" -> "Kavach" if the reference uses "Kavach")
+  that appears in the CONTEXT, RECENT DICTATION, or SCREEN, changing it to match
+  that spelling (e.g. transcript "cavach" -> "Kavach" if the reference uses
+  "Kavach")
 
 FORMATTING CUES — these are the ONLY spoken words you are ever allowed to act on,
 and acting on them only changes how the text is LAID OUT, never what it says nor
@@ -230,12 +231,17 @@ already correct, even if a different phrasing would sound better. If the
 transcript already has no filler words and is already grammatically correct,
 output it unchanged. Never add or remove information or change the meaning.
 
-You may be given CONTEXT (text already written just before the cursor) and
-RECENT DICTATION (the user's last few dictations). Use them ONLY as reference to
-get names, terminology, capitalization, and sentence continuation right. NEVER
-repeat, quote, include, or edit that reference material — it is already written.
-Output ONLY the cleaned version of the NEW TRANSCRIPT, with no preamble, quotes,
-or commentary."""
+You may be given CONTEXT (text already written just before the cursor), RECENT
+DICTATION (the user's last few dictations), and SCREEN (words OCR-extracted from
+what is currently visible on the user's screen — app names, field labels, menu
+items, document text, etc.). Use them ONLY as reference to get names, terminology,
+capitalization, phrasing, and sentence continuation right. For example, if the
+SCREEN shows you are in a code editor or a terminal, prefer the technical
+spelling of names/identifiers that appear there; if it shows a form with labeled
+fields, match the vocabulary of those labels. NEVER repeat, quote, include, or
+edit that reference material — it is already written or already on screen. Output
+ONLY the cleaned version of the NEW TRANSCRIPT, with no preamble, quotes, or
+commentary."""
 
 DEFAULT_CLEANUP_INSTRUCTION = CLEANUP_RULES
 
@@ -267,8 +273,12 @@ def _save_config(cfg: dict) -> None:
 config_state = _load_config()
 
 
-def build_cleanup_prompt(text: str, context: str, recent: list) -> str:
+def build_cleanup_prompt(text: str, context: str, recent: list, screen: str = "") -> str:
     parts = [config_state["cleanup_instruction"], ""]
+    if screen:
+        parts.append("[SCREEN — words visible on screen near the input field; reference only, do NOT repeat or edit]")
+        parts.append(screen)
+        parts.append("")
     if context:
         parts.append("[CONTEXT — already written before the cursor; reference only, do NOT repeat or edit]")
         parts.append(context)
@@ -432,10 +442,11 @@ def _ollama_generate(prompt: str) -> str:
     return resp.json().get("response", "").strip()
 
 
-def _looks_like_echo(cleaned: str, text: str, context: str, recent: list) -> bool:
-    """True if the output likely includes the reference material (context/history)
-    rather than only the cleaned new transcript. Cleanup only ever removes filler
-    and lightly edits, so real output is never much longer than the input."""
+def _looks_like_echo(cleaned: str, text: str, context: str, recent: list, screen: str = "") -> bool:
+    """True if the output likely includes the reference material (context/history/
+    screen text) rather than only the cleaned new transcript. Cleanup only ever
+    removes filler and lightly edits, so real output is never much longer than
+    the input."""
     if len(cleaned) > int(len(text) * 1.5) + 30:
         return True
     for r in recent:
@@ -444,27 +455,31 @@ def _looks_like_echo(cleaned: str, text: str, context: str, recent: list) -> boo
             return True
     if len(context) >= 20 and context[-40:] in cleaned:
         return True
+    # Screen OCR words are short and noisy, so only flag a long verbatim chunk.
+    if len(screen) >= 40 and screen[-40:] in cleaned:
+        return True
     return False
 
 
-def clean_with_ollama(text: str, context: str = "", recent: list = None) -> str:
+def clean_with_ollama(text: str, context: str = "", recent: list = None, screen: str = "") -> str:
     if not text.strip():
         return text
     recent = recent or []
     context = (context or "").strip()
+    screen = (screen or "").strip()
 
     try:
         # First pass: context-aware cleanup (better name/term correction).
-        cleaned = _ollama_generate(build_cleanup_prompt(text, context, recent))
-        if cleaned and not _looks_like_echo(cleaned, text, context, recent):
+        cleaned = _ollama_generate(build_cleanup_prompt(text, context, recent, screen))
+        if cleaned and not _looks_like_echo(cleaned, text, context, recent, screen):
             return cleaned
 
         # The small model echoed the reference material. Retry with NO context or
         # history — it can't repeat what it was never given. This guarantees we
         # only ever return the current transcript, never previous text.
-        if context or recent:
+        if context or recent or screen:
             print("Cleanup echoed reference material; retrying context-free.")
-            cleaned = _ollama_generate(build_cleanup_prompt(text, "", []))
+            cleaned = _ollama_generate(build_cleanup_prompt(text, "", [], ""))
             if cleaned and len(cleaned) <= int(len(text) * 1.5) + 30:
                 return cleaned
 
@@ -479,6 +494,7 @@ async def transcribe(
     file: UploadFile = File(...),
     cleanup: bool = Query(True),
     context: str = Form(""),
+    screen: str = Form(""),
 ):
     fd, tmp_path = tempfile.mkstemp(suffix=".wav")
     try:
@@ -517,7 +533,7 @@ async def transcribe(
 
     if cleanup:
         cleaned_text = await run_in_threadpool(
-            clean_with_ollama, raw_text, context, list(recent_transcripts)
+            clean_with_ollama, raw_text, context, list(recent_transcripts), screen
         )
     else:
         cleaned_text = raw_text

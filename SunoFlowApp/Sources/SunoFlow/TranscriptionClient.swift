@@ -87,6 +87,7 @@ enum TranscriptionClient {
     static func transcribe(
         fileURL: URL,
         context: String = "",
+        screenContext: String = "",
         cleanup: Bool = true,
         completion: @escaping (Result<TranscriptionResult, Error>) -> Void
     ) {
@@ -117,6 +118,10 @@ enum TranscriptionClient {
         body.append("--\(boundary)\r\n".data(using: .utf8)!)
         body.append("Content-Disposition: form-data; name=\"context\"\r\n\r\n".data(using: .utf8)!)
         body.append(context.data(using: .utf8) ?? Data())
+        body.append("\r\n".data(using: .utf8)!)
+        body.append("--\(boundary)\r\n".data(using: .utf8)!)
+        body.append("Content-Disposition: form-data; name=\"screen\"\r\n\r\n".data(using: .utf8)!)
+        body.append(screenContext.data(using: .utf8) ?? Data())
         body.append("\r\n".data(using: .utf8)!)
         body.append("--\(boundary)--\r\n".data(using: .utf8)!)
         request.httpBody = body
