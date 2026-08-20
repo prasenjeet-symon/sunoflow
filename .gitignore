@@ -11,18 +11,29 @@ app-debug.log
 app-launchd.log
 sidecar.log
 
-# ── Python (sidecar) ────────────────────────────────────
+# ── Python (sidecars) ────────────────────────────────────
 __pycache__/
 *.py[cod]
 *.egg-info/
 .venv/
+.venv-*/
 venv/
 env/
 .pytest_cache/
 
+# Downloaded STT model weights (~2.5GB) — user data, never commit
+sidecar/model/
+sidecars/*/model/
+
 # Sidecar runtime state — these are user data, not source
 sidecar/config.json
 sidecar/corrections.json
+sidecars/*/corrections.json
+
+# PyInstaller build output (frozen Windows sidecar)
+sidecars/windows/.venv-build/
+sidecars/windows/build/
+sidecars/windows/dist/
 
 # ── Swift build artifacts ───────────────────────────────
 SunoFlowApp/.build/
@@ -31,6 +42,11 @@ SunoFlowApp/signing/
 *.xcodeproj/xcuserdata/
 *.xcworkspace/xcuserdata/
 DerivedData/
+
+# ── .NET (Windows tray app) ────────────────────────────
+apps/windows/SunoFlow/bin/
+apps/windows/SunoFlow/obj/
+apps/windows/SunoFlow/.vs/
 
 # ── Secrets / signing keys ──────────────────────────────
 *.p12

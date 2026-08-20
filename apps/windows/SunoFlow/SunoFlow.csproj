@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- Pin to x64: the target is modern Windows GPUs (all 64-bit). Pinning the
+         platform means the SendInput INPUT-union's x64 layout (FieldOffset(8))
+         is unambiguous and the marshal size is the expected 40 bytes. -->
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <AssemblyName>SunoFlow</AssemblyName>
+    <RootNamespace>SunoFlow</RootNamespace>
+    <Version>1.0.0</Version>
+    <Company>SunoFlow</Company>
+    <Product>SunoFlow</Product>
+    <Description>On-device voice dictation for Windows. Talk to your computer and it types for you.</Description>
+    <!-- No console window when launched from Explorer. -->
+    <DisableWinExeOutputCheck>false</DisableWinExeOutputCheck>
+  </PropertyGroup>
+
+  <!-- NAudio: mic capture + WAV writing. The only third-party dep. -->
+  <ItemGroup>
+    <PackageReference Include="NAudio" Version="2.2.1" />
+  </ItemGroup>
+
+  <!-- Tray icons. The three states mirror the macOS SF Symbols (mic, recording, error). -->
+  <ItemGroup>
+    <EmbeddedResource Include="Assets\mic-idle.ico" />
+    <EmbeddedResource Include="Assets\mic-recording.ico" />
+    <EmbeddedResource Include="Assets\mic-offline.ico" />
+    <EmbeddedResource Include="Assets\mic-processing.ico" />
+    <EmbeddedResource Include="Assets\app-icon.ico" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,28 @@
+# SunoFlow Windows sidecar — Python dependencies.
+#
+# Install on the target Windows box (Python 3.10+):
+#   python -m pip install -r sidecars/windows/requirements.txt
+#
+# GPU is mandatory in production. DirectML serves NVIDIA / AMD / Intel GPUs via
+# DirectX 12 — one package, all three vendors, no CUDA toolkit needed.
+#
+# IMPORTANT: onnxruntime-directml, onnxruntime-gpu, and onnxruntime are mutually
+# exclusive — they all provide the ``onnxruntime`` module but with different
+# execution providers compiled in. Install exactly one. This file pins
+# onnxruntime-directml.
+#
+# onnx-asr is the STT engine wrapper (preprocessor + encoder + TDT decoder loop
+# on top of onnxruntime). The [hub] extra pulls huggingface-hub so onnx-asr can
+# resolve the model from HF on first run if no local model dir is given.
+
+onnxruntime-directml>=1.18.1
+onnx-asr[hub]
+uvicorn>=0.29
+fastapi>=0.110
+python-multipart>=0.0.9
+requests>=2.31
+
+# Build-time only (not a runtime dep). The frozen bundle is produced by
+# build.ps1 via sidecar.spec; end users run the frozen exe and do not need
+# PyInstaller installed.
+#   pip install pyinstaller
