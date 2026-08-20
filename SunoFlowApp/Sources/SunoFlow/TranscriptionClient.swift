@@ -18,8 +18,18 @@ private struct CorrectionsResponse: Decodable {
     let corrections: [Correction]
 }
 
+/// A single learned pair returned by `POST /learn`. The server does NOT send a
+/// `key` field (unlike `GET /corrections`), so this is a lighter struct than
+/// `Correction` — decoding `learned` into `[Correction]` fails silently and the
+/// learned count always reads 0.
+private struct LearnedItem: Decodable {
+    let from: String
+    let to: String
+    let count: Int
+}
+
 private struct LearnResponse: Decodable {
-    let learned: [Correction]
+    let learned: [LearnedItem]
 }
 
 /// Response shape of the cleanup gateway's unauthenticated `/ready` probe.
@@ -188,16 +198,18 @@ enum TranscriptionClient {
     }
 
     /// Manually add a correction (from/to pair). The completion receives the
-    /// updated full corrections list.
+    /// updated full corrections list. The wire field is `frm` (not `from`)
+    /// because `from` is a Python keyword and the FastAPI endpoint names the
+    /// parameter `frm` — sending `from` gets a silent 422.
     static func addCorrection(from: String, to: String, completion: @escaping ([Correction]) -> Void) {
-        post("corrections/add", fields: ["from": from, "to": to]) { data in
+        post("corrections/add", fields: ["frm": from, "to": to]) { data in
             completion(Self.decodeCorrections(data))
         }
     }
 
-    /// Edit an existing correction's from/to text.
+    /// Edit an existing correction's from/to text. Wire field is `frm` (see above).
     static func updateCorrection(key: String, from: String, to: String, completion: @escaping ([Correction]) -> Void) {
-        post("corrections/update", fields: ["key": key, "from": from, "to": to]) { data in
+        post("corrections/update", fields: ["key": key, "frm": from, "to": to]) { data in
             completion(Self.decodeCorrections(data))
         }
     }
