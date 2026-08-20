@@ -37,20 +37,33 @@ func main() {
 	}
 	defer st.Close()
 
-	// Build the active backend (v1: ollama only; openai/claude are interface-only).
+	// Build the active backend (openai/claude remain interface-only).
 	var be backend.Backend
+	var activeModel string
 	switch cfg.Backend {
 	case "ollama":
+		activeModel = cfg.OllamaModel
 		be = &backend.OllamaBackend{
 			URL:     cfg.OllamaURL,
 			Model:   cfg.OllamaModel,
 			Timeout: cfg.OllamaTimeout,
 			Client:  &http.Client{Timeout: cfg.OllamaTimeout + 5*time.Second},
 		}
+	case "gemini":
+		activeModel = cfg.GeminiModel
+		be = &backend.GeminiBackend{
+			APIKey:        cfg.GeminiAPIKey,
+			Model:         cfg.GeminiModel,
+			BaseURL:       cfg.GeminiURL,
+			Timeout:       cfg.GeminiTimeout,
+			ThinkingLevel: cfg.GeminiThinking,
+			Client:        &http.Client{Timeout: cfg.GeminiTimeout + 5*time.Second},
+		}
 	default:
-		logger.Error("unsupported backend in v1", "backend", cfg.Backend)
+		logger.Error("unsupported backend", "backend", cfg.Backend)
 		os.Exit(1)
 	}
+	logger.Info("backend selected", "backend", be.Name(), "model", activeModel)
 
 	srv := &server.Server{
 		Backend:    be,
@@ -77,7 +90,7 @@ func main() {
 	}
 
 	go func() {
-		logger.Info("gateway listening", "addr", cfg.GatewayAddr, "backend", be.Name(), "model", cfg.OllamaModel)
+		logger.Info("gateway listening", "addr", cfg.GatewayAddr, "backend", be.Name(), "model", activeModel)
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Error("server error", "err", err)
 			os.Exit(1)

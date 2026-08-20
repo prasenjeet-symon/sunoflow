@@ -8,7 +8,8 @@
 
 # Secrets / env — never commit
 .env
-.env.*
+.env.local
+.env.*.local
 
 # Editor / OS cruft
 .DS_Store

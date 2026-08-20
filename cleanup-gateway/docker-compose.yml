@@ -25,8 +25,13 @@ services:
       GATEWAY_ADDR: "0.0.0.0:8080"
       OLLAMA_URL: "http://host.ollama:11434/api/generate"
       OLLAMA_MODEL: ${OLLAMA_MODEL:-glm-5.2:cloud}
-      BACKEND: ollama
+      BACKEND: ${BACKEND:-ollama}
       OLLAMA_TIMEOUT: 30s
+      # Gemini backend (BACKEND=gemini). The key comes from .env only.
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.5-flash-lite}
+      GEMINI_TIMEOUT: ${GEMINI_TIMEOUT:-20s}
+      GEMINI_THINKING_LEVEL: ${GEMINI_THINKING_LEVEL:-low}
       DB_PATH: /data/keys.db
       LOG_LEVEL: ${LOG_LEVEL:-info}
       DEFAULT_QUOTA_RPM: ${DEFAULT_QUOTA_RPM:-60}

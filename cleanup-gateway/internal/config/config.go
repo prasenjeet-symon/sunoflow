@@ -15,13 +15,23 @@ type Config struct {
 	GatewayAddr   string        // listen address (loopback; Nginx proxies to it)
 	OllamaURL     string        // Ollama /api/generate endpoint
 	OllamaModel   string        // model name (server-controlled)
-	Backend       string        // active backend: ollama|openai|claude
+	Backend       string        // active backend: ollama|gemini|openai|claude
 	OllamaTimeout time.Duration // per-call timeout
-	DBPath        string        // SQLite path
-	AdminToken    string        // token for /admin/* endpoints (required)
-	LogLevel      string        // debug|info|warn|error
-	QuotaRPM      int           // default per-key requests/minute
-	QuotaDaily    int           // default per-key requests/day
+
+	// Gemini backend. GeminiAPIKey comes from the environment only — it is
+	// never written to source or logged.
+	GeminiAPIKey  string
+	GeminiModel   string
+	GeminiURL     string
+	GeminiTimeout time.Duration
+	// How hard the model may reason before answering: minimal|low|medium|high.
+	// Empty omits the field (needed for older 2.5-era models).
+	GeminiThinking string
+	DBPath         string // SQLite path
+	AdminToken     string // token for /admin/* endpoints (required)
+	LogLevel       string // debug|info|warn|error
+	QuotaRPM       int    // default per-key requests/minute
+	QuotaDaily     int    // default per-key requests/day
 }
 
 // Load reads configuration from the environment. Fatal on missing ADMIN_TOKEN.
@@ -32,17 +42,30 @@ func Load() (Config, error) {
 		OllamaModel:   envStr("OLLAMA_MODEL", "llama3.2:3b"),
 		Backend:       envStr("BACKEND", "ollama"),
 		OllamaTimeout: envDuration("OLLAMA_TIMEOUT", 20*time.Second),
-		DBPath:        envStr("DB_PATH", "/var/lib/sunoflow-gateway/keys.db"),
-		AdminToken:    envStr("ADMIN_TOKEN", ""),
-		LogLevel:      envStr("LOG_LEVEL", "info"),
-		QuotaRPM:      envInt("DEFAULT_QUOTA_RPM", 60),
-		QuotaDaily:    envInt("DEFAULT_QUOTA_DAILY", 5000),
+
+		GeminiAPIKey:   envStr("GEMINI_API_KEY", ""),
+		GeminiModel:    envStr("GEMINI_MODEL", "gemini-3.5-flash-lite"),
+		GeminiURL:      envStr("GEMINI_URL", "https://generativelanguage.googleapis.com/v1beta"),
+		GeminiTimeout:  envDuration("GEMINI_TIMEOUT", 20*time.Second),
+		GeminiThinking: envStr("GEMINI_THINKING_LEVEL", "low"),
+		DBPath:         envStr("DB_PATH", "/var/lib/sunoflow-gateway/keys.db"),
+		AdminToken:     envStr("ADMIN_TOKEN", ""),
+		LogLevel:       envStr("LOG_LEVEL", "info"),
+		QuotaRPM:       envInt("DEFAULT_QUOTA_RPM", 60),
+		QuotaDaily:     envInt("DEFAULT_QUOTA_DAILY", 5000),
 	}
 	if cfg.AdminToken == "" {
 		return Config{}, fmt.Errorf("ADMIN_TOKEN is required")
 	}
-	if cfg.Backend != "ollama" && cfg.Backend != "openai" && cfg.Backend != "claude" {
-		return Config{}, fmt.Errorf("BACKEND must be ollama|openai|claude, got %q", cfg.Backend)
+	switch cfg.Backend {
+	case "ollama", "gemini", "openai", "claude":
+	default:
+		return Config{}, fmt.Errorf("BACKEND must be ollama|gemini|openai|claude, got %q", cfg.Backend)
+	}
+	// Fail at startup rather than on the first user request: a gateway that
+	// boots without a key would soft-fail every cleanup to raw text silently.
+	if cfg.Backend == "gemini" && cfg.GeminiAPIKey == "" {
+		return Config{}, fmt.Errorf("GEMINI_API_KEY is required when BACKEND=gemini")
 	}
 	return cfg, nil
 }
