@@ -484,3 +484,31 @@ footer { border-top: 1px solid var(--line); padding-block: clamp(40px, 5vw, 58px
 .trial-step.now .when { color: var(--accent); }
 .trial-step h3 { margin: 10px 0 8px; }
 .trial-step p { color: var(--body); font-size: 15.5px; line-height: 1.6; }
+
+/* ============================================================
+   Use cases (dedicated page)
+   ============================================================ */
+
+.case-n {
+  display: inline-block;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+  margin-right: 10px;
+}
+.case-lede { margin-top: 18px; }
+.case-note { margin-top: 20px; font-size: 15px; color: var(--faint); line-height: 1.6; max-width: 46ch; }
+
+/* single-column feature moment, used to break the left/right rhythm */
+.standout {
+  text-align: center;
+  max-width: 720px;
+  margin-inline: auto;
+}
+.standout .lede { margin: 20px auto 0; }
+
+/* compact "and also" list */
+.more { display: grid; gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: var(--r-lg); overflow: hidden; }
+@media (min-width: 700px)  { .more { grid-template-columns: repeat(2, 1fr); } }
+.more-item { background: var(--paper); padding: clamp(24px, 3vw, 30px); }
+.more-item h3 { margin-bottom: 8px; }
+.more-item p { color: var(--body); font-size: 15.3px; line-height: 1.6; }

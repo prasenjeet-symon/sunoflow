@@ -1,0 +1,406 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>In practice — SunoFlow</title>
+<meta name="description" content="Eight jobs SunoFlow does better than a keyboard — from prompting AI tools and writing pull requests to clearing the inbox and taking notes after a call.">
+<meta name="theme-color" content="#ffffff">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="canonical" href="https://prasenjeet-symon.github.io/sunoflow-site/use-cases.html">
+
+<meta property="og:type" content="website">
+<meta property="og:title" content="In practice — SunoFlow">
+<meta property="og:description" content="Eight jobs SunoFlow does better than a keyboard, one at a time.">
+<meta property="og:url" content="https://prasenjeet-symon.github.io/sunoflow-site/use-cases.html">
+<meta name="twitter:card" content="summary_large_image">
+
+<link rel="stylesheet" href="assets/styles.css">
+</head>
+<body>
+
+<header class="masthead">
+  <div class="shell">
+    <a class="wordmark" href="index.html" aria-label="SunoFlow home">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M8.9 4.3c2.8 0 4.7 2 4.7 4.8 0 2.5-1.8 3.7-2.9 5.1-.7.9-.9 1.8-.9 2.9 0 1.5-1.2 2.6-2.6 2.6s-2.6-1.2-2.6-2.6c0-1.2.4-2 .4-3.1 0-1.6-1-2.8-1-4.9 0-2.8 2.1-4.8 4.9-4.8z"/><path d="M8.9 7.4c1.4 0 2.2 1 2.2 2.1 0 1.3-1.1 1.9-1.7 2.8-.4.6-.5 1.2-.5 1.9"/><path d="M16.6 10.2a3.6 3.6 0 0 0 0 5.2"/><path d="M19.9 8.2a6.8 6.8 0 0 0 0 9.2"/>
+      </svg>
+      SunoFlow
+    </a>
+
+    <nav class="nav-links" aria-label="Primary">
+      <a href="index.html#how">How it works</a>
+      <a href="use-cases.html" aria-current="page">Use cases</a>
+      <a href="pricing.html">Pricing</a>
+      <a href="index.html#privacy">Privacy</a>
+      <a href="index.html#faq">FAQ</a>
+    </nav>
+
+    <a class="btn btn-primary" href="pricing.html">Start free trial</a>
+  </div>
+</header>
+
+<main id="top">
+
+<section class="hero" style="padding-bottom:0">
+  <div class="shell">
+    <h1>One shortcut.<br><em class="hl">Eight different jobs.</em></h1>
+    <p class="lede">
+      Dictation sounds like one feature. In a working day it turns out to be a
+      dozen small ones — and a few of them aren’t the ones you’d expect.
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="shell">
+    <div class="split">
+      <div class="reveal">
+        <p class="kicker"><span class="case-n">01</span>Working with AI</p>
+        <h2>Better prompts, because you <em class="hl">stop economising.</em></h2>
+        <p class="lede case-lede">When you type a prompt you cut corners. You write “fix the login bug” because spelling out the whole situation is another two minutes of typing. So the model guesses, gets it wrong, and you spend those two minutes anyway — plus the round trip.</p>
+        <p class="case-note">Speaking costs you nothing extra, so you say the whole thing: what’s broken, what you already ruled out, and what you don’t want touched.</p>
+      </div>
+      <div class="media reveal">
+        <div class="panel">
+          <div class="mock-bar">
+            <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
+            <span class="title">Prompt</span>
+          </div>
+          <div class="panel-body">
+            <div class="take raw">
+              <span class="label">Typed in a hurry</span>
+              <p class="text">fix the login bug</p>
+            </div>
+            <div class="divider" aria-hidden="true">
+              <span class="rule"></span><span class="tag">becomes</span><span class="rule"></span>
+            </div>
+            <div class="take clean">
+              <span class="label">Said out loud</span>
+              <p class="text">The login form returns a 500 whenever the email address has a plus sign in it. I think it’s the validation regex in the auth middleware — I’ve already checked the database and the record is fine. Don’t touch the schema, just the validation.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+<section class="tinted">
+  <div class="shell">
+    <div class="split flip">
+      <div class="reveal">
+        <p class="kicker"><span class="case-n">02</span>Code review</p>
+        <h2>The pull request description <em class="hl">you’d otherwise skip.</em></h2>
+        <p class="lede case-lede">Everyone knows a good description makes review faster, and nearly everyone still writes “minor refactor” and hits create. It’s not laziness — it’s that explaining a change in writing takes longer than making it.</p>
+        <p class="case-note">Talk through the diff while it’s fresh and reviewers get the reasoning, the risk, and the bit you actually want them to look at.</p>
+      </div>
+      <div class="media reveal">
+        <div class="panel">
+          <div class="mock-bar">
+            <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
+            <span class="title">Pull request</span>
+          </div>
+          <div class="panel-body">
+            <div class="take raw">
+              <span class="label">Typed in a hurry</span>
+              <p class="text">small refactor</p>
+            </div>
+            <div class="divider" aria-hidden="true">
+              <span class="rule"></span><span class="tag">becomes</span><span class="rule"></span>
+            </div>
+            <div class="take clean">
+              <span class="label">Said out loud</span>
+              <p class="text">This splits the payment handler in two so the retry logic can be tested on its own — behaviour is unchanged. The one risky part is the timeout default dropping from thirty seconds to ten, so that’s worth a second pair of eyes.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+<section>
+  <div class="shell">
+    <div class="split">
+      <div class="reveal">
+        <p class="kicker"><span class="case-n">03</span>Email</p>
+        <h2>Answer email about as fast <em class="hl">as you read it.</em></h2>
+        <p class="lede case-lede">Most replies aren’t hard. They’re short, polite, and there are forty of them. The thinking takes seconds; the typing is what turns the inbox into an afternoon.</p>
+        <p class="case-note">Say the reply the way you’d say it to the person, and send what comes out.</p>
+      </div>
+      <div class="media reveal">
+        <div class="panel">
+          <div class="mock-bar">
+            <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
+            <span class="title">Mail — Reply</span>
+          </div>
+          <div class="panel-body">
+            <div class="take raw">
+              <span class="label">What you said</span>
+              <p class="text">hi ravi <span class="fill">um</span> thanks for the invoice i’ve passed it to finance and they’ll get it paid this week <span class="fill">uh</span> sorry about the delay we had a change of process</p>
+            </div>
+            <div class="divider" aria-hidden="true">
+              <span class="rule"></span><span class="tag">becomes</span><span class="rule"></span>
+            </div>
+            <div class="take clean">
+              <span class="label">What SunoFlow wrote</span>
+              <p class="text">Hi Ravi — thanks for the invoice. I’ve passed it to Finance and they’ll get it paid this week. Apologies for the delay, we’ve had a change of process.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+<section class="tinted">
+  <div class="shell">
+    <div class="split flip">
+      <div class="reveal">
+        <p class="kicker"><span class="case-n">04</span>Chat</p>
+        <h2>Reply without leaving <em class="hl">what you were doing.</em></h2>
+        <p class="lede case-lede">A message arrives while you’re mid-thought. Answering it means unloading everything you were holding in your head, typing four lines, and trying to find your place again.</p>
+        <p class="case-note">Say it, send it, carry on. The context switch is the expensive part, not the message.</p>
+      </div>
+      <div class="media reveal">
+        <div class="panel">
+          <div class="mock-bar">
+            <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
+            <span class="title">Slack</span>
+          </div>
+          <div class="panel-body">
+            <div class="take raw">
+              <span class="label">What you said</span>
+              <p class="text">can you push the deploy to tomorrow <span class="fill">um</span> the migration is still running and i don’t want to risk it going out half done</p>
+            </div>
+            <div class="divider" aria-hidden="true">
+              <span class="rule"></span><span class="tag">becomes</span><span class="rule"></span>
+            </div>
+            <div class="take clean">
+              <span class="label">What SunoFlow wrote</span>
+              <p class="text">Can you push the deploy to tomorrow? The migration is still running and I don’t want to risk it going out half-done.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+<section>
+  <div class="shell">
+    <div class="split">
+      <div class="reveal">
+        <p class="kicker"><span class="case-n">05</span>First drafts</p>
+        <h2>Talk your way past <em class="hl">the blank page.</em></h2>
+        <p class="lede case-lede">You can explain the proposal perfectly well to a colleague over coffee. It’s only when the cursor starts blinking that it becomes hard.</p>
+        <p class="case-note">Explain it out loud, get a messy draft in a couple of minutes, then edit. Editing something is a far easier job than starting something.</p>
+      </div>
+      <div class="media reveal">
+        <div class="panel">
+          <div class="mock-bar">
+            <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
+            <span class="title">Doc — Draft</span>
+          </div>
+          <div class="panel-body">
+            <div class="take raw">
+              <span class="label">What you said</span>
+              <p class="text"><span class="fill">so</span> the idea is basically we let people try it for a week <span class="fill">um</span> and then we ask for the card at the end i think that converts better than asking up front but we should measure it</p>
+            </div>
+            <div class="divider" aria-hidden="true">
+              <span class="rule"></span><span class="tag">becomes</span><span class="rule"></span>
+            </div>
+            <div class="take clean">
+              <span class="label">What SunoFlow wrote</span>
+              <p class="text">The idea is that we let people try it for a week and ask for the card at the end. I think that converts better than asking up front, but we should measure it.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+<section class="tinted">
+  <div class="shell">
+    <div class="split flip">
+      <div class="reveal">
+        <p class="kicker"><span class="case-n">06</span>Notes and recaps</p>
+        <h2>Write it up while it’s <em class="hl">still in your head.</em></h2>
+        <p class="lede case-lede">The five minutes after a call is when you remember everything and have the least patience for typing. An hour later you remember the gist and have lost the specifics.</p>
+        <p class="case-note">Talk the recap out before the next meeting starts, and the details survive.</p>
+      </div>
+      <div class="media reveal">
+        <div class="panel">
+          <div class="mock-bar">
+            <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
+            <span class="title">Notes</span>
+          </div>
+          <div class="panel-body">
+            <div class="take raw">
+              <span class="label">What you said</span>
+              <p class="text">okay so from the call <span class="fill">um</span> they want a decision by friday they’re happy with the pricing but not the timeline and <span class="fill">uh</span> priya is going to send the revised scope on wednesday</p>
+            </div>
+            <div class="divider" aria-hidden="true">
+              <span class="rule"></span><span class="tag">becomes</span><span class="rule"></span>
+            </div>
+            <div class="take clean">
+              <span class="label">What SunoFlow wrote</span>
+              <p class="text">From the call: they want a decision by Friday. They’re happy with the pricing but not the timeline. Priya will send the revised scope on Wednesday.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+<section>
+  <div class="shell">
+    <div class="split">
+      <div class="reveal">
+        <p class="kicker"><span class="case-n">07</span>Bugs and tickets</p>
+        <h2>Repro steps nobody <em class="hl">has to chase you for.</em></h2>
+        <p class="lede case-lede">A good bug report is mostly detail, and detail is exactly what gets dropped when you’re typing it out for the third time that morning.</p>
+        <p class="case-note">Describe what happened out loud, in order, the way you’d tell the person sitting next to you.</p>
+      </div>
+      <div class="media reveal">
+        <div class="panel">
+          <div class="mock-bar">
+            <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
+            <span class="title">Linear — New issue</span>
+          </div>
+          <div class="panel-body">
+            <div class="take raw">
+              <span class="label">Typed in a hurry</span>
+              <p class="text">checkout broken on safari</p>
+            </div>
+            <div class="divider" aria-hidden="true">
+              <span class="rule"></span><span class="tag">becomes</span><span class="rule"></span>
+            </div>
+            <div class="take clean">
+              <span class="label">Said out loud</span>
+              <p class="text">On Safari 17, adding a second item to the basket clears the first one. It only happens when you’re signed out — signed in it’s fine — and I couldn’t reproduce it in Chrome or Firefox.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+<section class="tinted">
+  <div class="shell">
+    <div class="split flip">
+      <div class="reveal">
+        <p class="kicker"><span class="case-n">08</span>Writing in English</p>
+        <h2>Write English as fluently <em class="hl">as you speak it.</em></h2>
+        <p class="lede case-lede">Plenty of people speak English confidently all day and still slow right down when they have to write it. Word order, articles, tense — the things that never trip you up out loud are the things that make writing take three times as long.</p>
+        <p class="case-note">Say what you mean in your own words and let the grammar and punctuation sort themselves out.</p>
+      </div>
+      <div class="media reveal">
+        <div class="panel">
+          <div class="mock-bar">
+            <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
+            <span class="title">Mail — Reply</span>
+          </div>
+          <div class="panel-body">
+            <div class="take raw">
+              <span class="label">What you said</span>
+              <p class="text">i want to say that the report is ready and he can check it and if any change needed then tell me</p>
+            </div>
+            <div class="divider" aria-hidden="true">
+              <span class="rule"></span><span class="tag">becomes</span><span class="rule"></span>
+            </div>
+            <div class="take clean">
+              <span class="label">What SunoFlow wrote</span>
+              <p class="text">The report is ready — please take a look and let me know if anything needs changing.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="shell">
+    <div class="section-head center reveal">
+      <p class="kicker">And a few more</p>
+      <h2>It keeps turning up <em class="hl">in odd corners.</em></h2>
+    </div>
+    <div class="more reveal">
+      <article class="more-item">
+        <h3>Documentation</h3>
+        <p>Explain how the thing works out loud once, then tidy it up — rather than putting it off for another quarter.</p>
+      </article>
+      <article class="more-item">
+        <h3>Customer replies</h3>
+        <p>High volume, high repetition, and every one needs to sound like a person wrote it. That’s exactly the shape of work speaking is good at.</p>
+      </article>
+      <article class="more-item">
+        <h3>Days your hands have had enough</h3>
+        <p>If typing all day has started to hurt, this is a way to keep working without adding to it.</p>
+      </article>
+      <article class="more-item">
+        <h3>Thinking out loud</h3>
+        <p>Journals, half-formed ideas, the thing you want to remember before it disappears. Catch it while it’s still there.</p>
+      </article>
+    </div>
+  </div>
+</section>
+
+<section class="tinted">
+  <div class="shell">
+    <div class="finale reveal">
+      <h2>Find the ones <em class="hl">that are yours.</em></h2>
+      <p class="lede">
+        Most people install it for one job and end up using it for six. Seven days
+        free is long enough to find out which six are yours.
+      </p>
+      <div class="hero-cta">
+        <a class="btn btn-primary btn-lg" href="https://github.com/prasenjeet-symon/sunoflow/releases/latest">Start your free trial</a>
+        <a class="btn btn-quiet btn-lg" href="pricing.html">See pricing</a>
+      </div>
+      <p class="hero-note"><span>₹99 a month after the trial &middot; Cancel any time</span></p>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="shell">
+    <div class="foot-grid">
+      <div class="foot-brand">
+        <a class="wordmark" href="index.html">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M8.9 4.3c2.8 0 4.7 2 4.7 4.8 0 2.5-1.8 3.7-2.9 5.1-.7.9-.9 1.8-.9 2.9 0 1.5-1.2 2.6-2.6 2.6s-2.6-1.2-2.6-2.6c0-1.2.4-2 .4-3.1 0-1.6-1-2.8-1-4.9 0-2.8 2.1-4.8 4.9-4.8z"/><path d="M8.9 7.4c1.4 0 2.2 1 2.2 2.1 0 1.3-1.1 1.9-1.7 2.8-.4.6-.5 1.2-.5 1.9"/><path d="M16.6 10.2a3.6 3.6 0 0 0 0 5.2"/><path d="M19.9 8.2a6.8 6.8 0 0 0 0 9.2"/>
+      </svg>
+          SunoFlow
+        </a>
+        <p>Talk instead of typing. Anywhere on your Mac.</p>
+      </div>
+
+      <div class="foot-links">
+        <div class="foot-col">
+          <span class="h">Product</span>
+          <a href="index.html#how">How it works</a>
+          <a href="use-cases.html">Use cases</a>
+          <a href="pricing.html">Pricing</a>
+          <a href="index.html#privacy">Privacy</a>
+          <a href="index.html#faq">FAQ</a>
+        </div>
+        <div class="foot-col">
+          <span class="h">Get it</span>
+          <a href="https://github.com/prasenjeet-symon/sunoflow/releases/latest">Download for Mac</a>
+          <a href="pricing.html">Pricing &amp; trial</a>
+          <a href="https://github.com/prasenjeet-symon/sunoflow">Project on GitHub</a>
+        </div>
+      </div>
+    </div>
+
+    <div class="foot-base">
+      <span>&copy; <span data-year>2026</span> SunoFlow</span>
+      <span>Not affiliated with Apple.</span>
+    </div>
+  </div>
+</footer>
+
+<script src="assets/app.js" defer></script>
+</body>
+</html>
