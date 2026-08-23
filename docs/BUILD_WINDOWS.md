@@ -286,6 +286,74 @@ python -m pip install pytest
 python -m pytest sidecars/shared/tests sidecars/windows/tests
 ```
 
+## 10. Shipping a release (automated)
+
+Everything above is the manual path. For an actual release nothing is built by
+hand: push a tag and `.github/workflows/release.yml` produces the installer and
+publishes it.
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+That runs, on a Windows runner: `dotnet publish` (self-contained, so users need
+no .NET runtime) → `build.ps1` (the frozen sidecar) → **Inno Setup** over both
+→ a SHA256 → `gh release create`, attaching the installer and its checksum to a
+GitHub Release with install instructions. The tag is the single source of the
+version: it stamps the assembly, the installer's `AppVersion` and the release
+title together.
+
+**Test before you tag.** Run the workflow manually from the Actions tab with a
+version like `0.0.0-test`: everything runs *except* the publish step, and the
+installer is left as a workflow artifact to download and try.
+
+### What the installer does
+
+`apps/windows/installer/SunoFlow.iss` builds a **per-user** setup — lowest
+privileges, no UAC prompt, nothing outside the user's profile. That is not a
+convenience; it is what the app already assumes (`SidecarSupervisor` resolves a
+fixed `%LOCALAPPDATA%` path, `AutoStart` writes `HKCU`). A machine-wide MSI
+would demand rights the app never uses and break the sidecar path contract.
+
+| Where | What |
+|---|---|
+| `%LOCALAPPDATA%\SunoFlow\app\` | the tray app (`{app}`) |
+| `%LOCALAPPDATA%\SunoFlow\sidecar\SunoFlowSidecar\` | the frozen sidecar, exactly where `SidecarSupervisor` looks |
+| `%LOCALAPPDATA%\SunoFlow\` | model, `corrections.json`, preferences, logs — untouched by upgrades |
+
+Two things it handles that are easy to miss: it stops `SunoFlowSidecar.exe`
+before copying (the tray app deliberately leaves the sidecar running, so an
+upgrade would otherwise hit a locked exe), and on uninstall it clears the HKCU
+`Run` value however it was set, then *asks* before deleting the ~2.5 GB model
+and your dictionary rather than assuming.
+
+The model is **not** bundled — it stays a first-run download, which keeps the
+installer around 130 MB instead of 2.6 GB.
+
+## 11. Code signing (not yet done)
+
+The installer is unsigned, so Windows SmartScreen shows *"Windows protected
+your PC — unknown publisher"* and the user must click **More info → Run
+anyway**. Nothing is broken, but it costs trust on first install, which is why
+the release notes explain the warning and publish a SHA256 to check against.
+
+Fixing it needs a certificate, and since June 2023 an OV certificate's key must
+live on hardware — which a CI runner cannot hold. The practical options:
+
+| Option | Cost | SmartScreen | CI-friendly |
+|---|---|---|---|
+| **Azure Trusted Signing** | ~$10/month | Reputation builds over time | Yes — `azure/trusted-signing-action` |
+| OV cert + cloud signing (SSL.com eSigner, DigiCert KeyLocker) | ~$200–400/yr | Reputation builds over time | Yes, via the vendor's service |
+| EV cert on a hardware token | ~$300–600/yr | Immediate, no warning | Awkward — the token must be reachable |
+
+Azure Trusted Signing is the cheapest workable route and needs a verified
+identity (an organisation 3+ years old, or an individual). Whichever is chosen,
+signing slots into `release.yml` as one step after the installer is built and
+before the checksum, plus a second signing pass over `SunoFlow.exe` itself
+before it is staged — sign the exe *and* the installer, or the warning simply
+moves from one to the other.
+
 ## Troubleshooting cheat sheet
 
 | Symptom | Likely cause | Fix |

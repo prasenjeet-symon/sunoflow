@@ -1,0 +1,161 @@
+# Windows release pipeline: tag -> installer -> GitHub Release.
+#
+# Push a tag like v1.0.0 and this builds both halves of the Windows app on a
+# Windows runner, wraps them in a per-user Inno Setup installer, and publishes
+# it as a downloadable GitHub Release. Nothing is built on a developer machine.
+#
+# Dry runs: trigger it manually with a version string. Everything runs except
+# the publish step, and the installer is left as a workflow artifact so you can
+# download and test it before committing to a tag.
+#
+# The installer is currently UNSIGNED — see docs/BUILD_WINDOWS.md §11 for what
+# that means for users and how to add signing when a certificate exists.
+name: Release (Windows)
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version for a dry-run build (nothing is published)"
+        required: true
+        default: "0.0.0-dev"
+
+permissions:
+  contents: write
+
+jobs:
+  installer:
+    name: Build installer
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # One version string drives the assembly metadata, the installer's
+      # AppVersion and the release title, so they can never disagree.
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF -like 'refs/tags/v*') {
+            $v = $env:GITHUB_REF -replace '^refs/tags/v', ''
+            $publish = 'true'
+          } else {
+            $v = '${{ inputs.version }}'
+            $publish = 'false'
+          }
+          if (-not $v) { throw "No version resolved" }
+          $numeric = ($v -split '-')[0]
+          "version=$v"  | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "numeric=$numeric" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "publish=$publish" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "Building version $v (publish=$publish)"
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: "x64"
+
+      # Self-contained so the download works on a machine with no .NET runtime.
+      - name: Publish tray app
+        shell: pwsh
+        run: >
+          dotnet publish apps\windows\SunoFlow\SunoFlow.csproj
+          -c Release -r win-x64 --self-contained true -p:Platform=x64
+          -p:Version=${{ steps.version.outputs.version }}
+          --nologo -o apps\windows\installer\stage\app
+
+      - name: Freeze sidecar
+        shell: pwsh
+        working-directory: sidecars/windows
+        run: .\build.ps1
+
+      - name: Stage the sidecar bundle
+        shell: pwsh
+        run: |
+          $dst = "apps\windows\installer\stage\sidecar"
+          New-Item -ItemType Directory -Force -Path $dst | Out-Null
+          Copy-Item -Recurse -Force sidecars\windows\dist\SunoFlowSidecar\* $dst
+          "{0:N0} files staged" -f (Get-ChildItem -Recurse $dst -File).Count
+
+      # Inno Setup ships on the hosted Windows images, but install it rather
+      # than assume it — a runner image change should not break releases.
+      - name: Ensure Inno Setup
+        id: inno
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            Write-Host "Inno Setup not on the image; installing via Chocolatey"
+            choco install innosetup -y --no-progress
+          }
+          if (-not (Test-Path $iscc)) { throw "ISCC.exe not found at $iscc" }
+          "iscc=$iscc" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Build installer
+        shell: pwsh
+        working-directory: apps/windows/installer
+        run: >
+          & "${{ steps.inno.outputs.iscc }}"
+          /DMyAppVersion=${{ steps.version.outputs.version }}
+          /DMyAppVersionNumeric=${{ steps.version.outputs.numeric }}
+          SunoFlow.iss
+
+      # A checksum is the only integrity signal an unsigned download has, so it
+      # is published alongside the installer rather than left implicit.
+      - name: Checksum
+        shell: pwsh
+        working-directory: apps/windows/installer/output
+        run: |
+          $exe = Get-ChildItem -Filter *.exe | Select-Object -First 1
+          if (-not $exe) { throw "No installer produced" }
+          $hash = (Get-FileHash $exe.FullName -Algorithm SHA256).Hash
+          "$hash  $($exe.Name)" | Out-File -Encoding ascii "$($exe.Name).sha256"
+          "{0}  ({1:N1} MB)" -f $exe.Name, ($exe.Length / 1MB)
+          Write-Host "SHA256: $hash"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SunoFlow-installer-${{ steps.version.outputs.version }}
+          path: apps/windows/installer/output/*
+          retention-days: 30
+
+      - name: Publish GitHub Release
+        if: steps.version.outputs.publish == 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $v = "${{ steps.version.outputs.version }}"
+          $notes = @"
+          ## Install
+
+          Download **SunoFlow-Setup-$v.exe** below and run it. It installs for
+          your user account only — no administrator rights, nothing written
+          outside your profile.
+
+          Windows will warn that the publisher is unknown, because this build is
+          not code-signed yet. Choose **More info -> Run anyway** to continue.
+          Verify the download against the published SHA256 file if you would
+          rather not take that on trust.
+
+          ## First run
+
+          1. Open **Settings -> Account** and connect this PC.
+          2. Open **Settings -> Speech Model** and download the model (~2.5 GB,
+             one time). Speech recognition runs entirely on your machine.
+          3. Press **Alt+Space** anywhere to dictate.
+
+          ## Requirements
+
+          - Windows 10 (21H2+) or 11, 64-bit
+          - A DirectX 12 GPU (NVIDIA, AMD or Intel)
+          "@
+          gh release create "v$v" `
+            (Get-ChildItem apps\windows\installer\output\* | ForEach-Object { $_.FullName }) `
+            --title "SunoFlow $v" --notes $notes --verify-tag

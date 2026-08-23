@@ -55,6 +55,10 @@ apps/windows/SunoFlow/bin/
 apps/windows/SunoFlow/obj/
 apps/windows/SunoFlow/.vs/
 
+# Windows installer staging + output (built by .github/workflows/release.yml)
+apps/windows/installer/stage/
+apps/windows/installer/output/
+
 # ── Secrets / signing keys ──────────────────────────────
 *.p12
 *.cer
