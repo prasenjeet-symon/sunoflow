@@ -7,9 +7,15 @@ end users run without a Python install.
 
 > The two parts are independent and can be built in any order. The tray app
 > talks to the sidecar over HTTP (`127.0.0.1:8765`) — see `docs/CONTRACT.md` for
-> the wire format. Neither part can be built on macOS (`net8.0-windows` SDK and
-> the DirectML provider are Windows-only), so everything below assumes a Windows
-> host.
+> the wire format. Neither part can be built on macOS (the Windows Desktop SDK
+> and the DirectML provider are Windows-only), so everything below assumes a
+> Windows host.
+>
+> **Not at a Windows box?** `.github/workflows/windows.yml` runs everything in
+> this guide except the GPU work on a `windows-latest` runner — the tray-app
+> build and publish (§2), the sidecar tests (§9), and the PyInstaller freeze
+> plus a boot-and-`/health` check (§5). Both builds are uploaded as run
+> artifacts, so a Windows machine can test them with no toolchain installed.
 
 ## Prerequisites (one-time)
 
@@ -57,8 +63,8 @@ automatically by the first build.
 
 ```powershell
 cd apps\windows\SunoFlow
-dotnet build -c Release
-# → bin\x64\Release\net8.0-windows\SunoFlow.exe
+dotnet build -c Release -p:Platform=x64
+# → bin\x64\Release\net8.0-windows10.0.19041.0\SunoFlow.exe
 ```
 
 Notes:
@@ -75,7 +81,7 @@ Notes:
 Smoke test it launches a tray icon:
 
 ```powershell
-.\bin\x64\Release\net8.0-windows\SunoFlow.exe
+.\bin\x64\Release\net8.0-windows10.0.19041.0\SunoFlow.exe
 ```
 
 (At this point the sidecar isn't running, so the tray icon will show "offline"
@@ -181,7 +187,7 @@ PyInstaller, and runs `sidecar.spec`. Pass `-Clean:$false` to reuse the venv
 across rebuilds.
 
 Why one-folder (not `--onefile`): `onnxruntime` discovers its execution-provider
-DLLs (`onnxruntime_providers_directml.dll`, `DirectML.dll`) by path at runtime.
+DLLs (`DirectML.dll`, `onnxruntime_providers_shared.dll`) by path at runtime.
 A onefile build extracts to a temp dir not on `PATH`, so provider loading fails.
 One-folder keeps every DLL next to the exe. `upx=False` for the same reason —
 UPX corrupts onnxruntime DLLs.
@@ -200,10 +206,13 @@ small; downloaded on first run per §4).
 2. `curl http://127.0.0.1:8765/health` → `model_loaded:false`.
 3. Trigger a model download and confirm `/health` flips to `model_loaded:true`.
 4. Dictate a short phrase; confirm a transcript comes back.
-5. Confirm `dist\SunoFlowSidecar\` contains `onnxruntime_providers_directml.dll`
-   and `DirectML.dll`. If missing, DirectML won't bind and inference falls back
-   to CPU — add the DLL explicitly to `sidecar.spec`'s manual DLL scan and
-   rebuild.
+5. Confirm `dist\SunoFlowSidecar\` contains `DirectML.dll` (~18 MB) next to
+   `onnxruntime.dll` and `onnxruntime_pybind11_state.pyd`. Do **not** go looking
+   for `onnxruntime_providers_directml.dll` — the current wheel links the
+   DirectML provider into the core binary and ships no such file, so its absence
+   is normal. If `DirectML.dll` itself is missing, DirectML can't bind and
+   inference falls back to CPU — add it explicitly to `sidecar.spec`'s manual
+   DLL scan and rebuild.
 6. **SSL sanity:** trigger `POST /model/download` and confirm files stream from
    `huggingface.co`. An `SSL: CERTIFICATE_VERIFY_FAILED` means the `certifi`
    `cacert.pem` data file wasn't collected — check
@@ -241,8 +250,8 @@ Then place the **published** tray app `SunoFlow.exe` wherever you like (e.g.
 
 ```powershell
 cd apps\windows\SunoFlow
-dotnet publish -c Release -r win-x64 --self-contained true
-# → bin\x64\Release\net8.0-windows\win-x64\publish\SunoFlow.exe (+ runtime files)
+dotnet publish -c Release -r win-x64 --self-contained true -p:Platform=x64 -o publish\SunoFlow
+# → publish\SunoFlow\SunoFlow.exe (+ runtime files)
 ```
 
 When the tray app finds the sidecar at the path above, it **auto-spawns and

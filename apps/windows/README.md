@@ -61,9 +61,15 @@ engine differs (ONNX/DirectML instead of MLX).
 
 ```powershell
 cd apps\windows\SunoFlow
-dotnet build -c Release
-# → bin\x64\Release\net8.0-windows\SunoFlow.exe
+dotnet build -c Release -p:Platform=x64
+# → bin\x64\Release\net8.0-windows10.0.19041.0\SunoFlow.exe
 ```
+
+`-p:Platform=x64` is what puts the build under `bin\x64\`; without it MSBuild
+falls back to `AnyCPU` and the output lands in `bin\Release\` instead. The
+target framework is versioned (`net8.0-windows10.0.19041.0`) because the
+screen-context OCR needs the Win10 2004 SDK contract — so the framework folder
+carries that version, not a bare `net8.0-windows`.
 
 The project is pinned to x64 (`<PlatformTarget>x64</PlatformTarget>`). This keeps
 the `SendInput` `INPUT` union's memory layout unambiguous (FieldOffset(8) after
@@ -92,7 +98,7 @@ bundle (no Python needed) is built once on a Windows box — see
 
 2. Launch the tray app:
    ```powershell
-   .\bin\x64\Release\net8.0-windows\SunoFlow.exe
+   .\bin\x64\Release\net8.0-windows10.0.19041.0\SunoFlow.exe
    ```
 
 3. Press **Alt+Space** (default hotkey) to start/stop dictation. The transcript
@@ -207,14 +213,29 @@ node tools\make-icons.js
 
 ## Status
 
-Built but **not yet validated on a Windows GPU box**. The sidecar's DirectML
-binding + GPU latency is the last go/no-go gate (run
-`sidecars/windows/validate_onnx.py` on the target box). See `MEMORY.md` for the
-full de-risking status. The C# tray app itself can't be compiled on macOS
-(no `net8.0-windows` SDK), so it's reviewed-only until built on Windows. The
-PyInstaller sidecar bundle (`sidecars/windows/sidecar.spec`) is likewise
-reviewed-only until the first `build.ps1` run on Windows. Sidecar auto-spawn /
-auto-restart and boot auto-start are implemented in code but await the first
-Windows build to confirm end-to-end. Screen-context OCR (`ScreenContext.cs`,
-WinRT `Windows.Media.Ocr`) is implemented and likewise awaits the first Windows
-`dotnet build` to confirm end-to-end.
+**Compiles and packages; not yet validated on a Windows GPU box.**
+
+Neither half can be built on the macOS box this repo is developed on, so both
+are built in CI instead — `.github/workflows/windows.yml` runs on a
+`windows-latest` runner and is the authority on whether this tree builds:
+
+- the tray app compiles clean (no warnings) and publishes a self-contained
+  `SunoFlow.exe`;
+- the sidecar's shared + Windows tests pass on Windows;
+- the PyInstaller bundle freezes, and the frozen exe boots and answers
+  `/health`.
+
+Both builds are downloadable as run artifacts, so a Windows box can test them
+without a toolchain installed.
+
+What CI cannot reach, and what therefore remains open:
+
+- **DirectML — the go/no-go gate.** GitHub's runners have no DX12 GPU. The
+  provider is compiled into the bundle and enumerates, but binding and latency
+  are unproven; run `sidecars/windows/validate_onnx.py` on the target box.
+- **Anything interactive.** A runner has no desktop session, so the hotkey,
+  the dictation bubble, clipboard paste, focused-field reading, screen-context
+  OCR, sidecar auto-spawn and boot auto-start are compiled but unexercised.
+- **Distribution.** There is no installer, no code signing and no update
+  channel yet; installation is the manual copy described in
+  `docs/BUILD_WINDOWS.md` §6.
