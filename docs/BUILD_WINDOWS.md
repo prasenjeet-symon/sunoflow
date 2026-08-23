@@ -306,7 +306,37 @@ title together.
 
 **Test before you tag.** Run the workflow manually from the Actions tab with a
 version like `0.0.0-test`: everything runs *except* the publish step, and the
-installer is left as a workflow artifact to download and try.
+installer is left as a workflow artifact to download and try. Ordinary pushes
+do the same thing automatically via the `installer` job in `windows.yml`.
+
+### Where the build ends up
+
+Each release carries the same installer under two names, plus checksums:
+
+| Asset | Purpose |
+|---|---|
+| `SunoFlow-Setup-1.0.0.exe` | the versioned build, what the checksums identify |
+| `SunoFlow-Setup.exe` | byte-identical copy under a name that never changes |
+| `SHA256SUMS.txt` | one hash, listed against both names |
+
+**The URL to put on the website** — permanent, always resolves to the newest
+release, never needs editing:
+
+```
+https://github.com/prasenjeet-symon/sunoflow/releases/latest/download/SunoFlow-Setup.exe
+```
+
+That redirect matches on the *exact* asset name, which is the whole reason the
+unversioned copy exists — a versioned filename alone would mean editing the
+site's download link on every release. To point at one specific version
+instead, use the tag in place of `latest/download`:
+
+```
+https://github.com/prasenjeet-symon/sunoflow/releases/download/v1.0.0/SunoFlow-Setup-1.0.0.exe
+```
+
+The human-facing release page, if you would rather link that than a direct
+download, is `https://github.com/prasenjeet-symon/sunoflow/releases/latest`.
 
 ### What the installer does
 

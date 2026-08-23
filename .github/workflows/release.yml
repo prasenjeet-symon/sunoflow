@@ -115,16 +115,27 @@ jobs:
           /DMyAppVersionNumeric=${{ steps.version.outputs.numeric }}
           SunoFlow.iss
 
-      # A checksum is the only integrity signal an unsigned download has, so it
-      # is published alongside the installer rather than left implicit.
-      - name: Checksum
+      # Two names for one file, deliberately. The versioned name is what people
+      # archive and what the checksums identify. The unversioned copy exists so
+      # the website can link a URL that never has to be edited:
+      #
+      #   https://github.com/<owner>/<repo>/releases/latest/download/SunoFlow-Setup.exe
+      #
+      # That redirect resolves by exact asset name, so a versioned filename on
+      # its own would mean editing the site on every release.
+      #
+      # A checksum is also the only integrity signal an unsigned download has,
+      # so it ships next to the installer rather than being left implicit.
+      - name: Stable copy + checksums
         shell: pwsh
         working-directory: apps/windows/installer/output
         run: |
-          $exe = Get-ChildItem -Filter *.exe | Select-Object -First 1
+          $exe = Get-ChildItem -Filter "SunoFlow-Setup-*.exe" | Select-Object -First 1
           if (-not $exe) { throw "No installer produced" }
+          Copy-Item $exe.FullName "SunoFlow-Setup.exe"
           $hash = (Get-FileHash $exe.FullName -Algorithm SHA256).Hash
-          "$hash  $($exe.Name)" | Out-File -Encoding ascii "$($exe.Name).sha256"
+          @("$hash  $($exe.Name)", "$hash  SunoFlow-Setup.exe") |
+            Out-File -Encoding ascii "SHA256SUMS.txt"
           "{0}  ({1:N1} MB)" -f $exe.Name, ($exe.Length / 1MB)
           Write-Host "SHA256: $hash"
 
@@ -150,8 +161,11 @@ jobs:
 
           Windows will warn that the publisher is unknown, because this build is
           not code-signed yet. Choose **More info -> Run anyway** to continue.
-          Verify the download against the published SHA256 file if you would
-          rather not take that on trust.
+          Verify the download against SHA256SUMS.txt if you would rather not
+          take that on trust.
+
+          (SunoFlow-Setup.exe is the same file under a name that stays the same
+          from release to release, for linking.)
 
           ## First run
 
