@@ -36,6 +36,11 @@ internal sealed class TrayApp : IDisposable
     private State _state = State.SidecarOffline;
     private string? _lastTranscript;
 
+    // Read from /health every poll. The engine being up says nothing about
+    // whether it can produce words: with no model downloaded it answers every
+    // clip with an empty transcript.
+    private bool _modelLoaded;
+
     /// <summary>The running tray app. The dashboard reads it to start the engine
     /// and to ask whether starting it is even possible on this install.</summary>
     internal static TrayApp? Shared { get; private set; }
@@ -193,11 +198,14 @@ internal sealed class TrayApp : IDisposable
 
     private async Task CheckHealth()
     {
-        var ok = await TranscriptionClient.HealthAsync();
+        var health = await TranscriptionClient.HealthDetailAsync();
         _ui.Post(_ =>
         {
+            // Tracked even mid-dictation: a download that finishes while the
+            // user is talking should unblock the next press, not the one after.
+            _modelLoaded = health?.ModelLoaded ?? false;
             if (CurrentState is State.Recording or State.Processing) return;
-            if (ok)
+            if (health != null)
             {
                 CurrentState = State.Idle;
             }
@@ -251,6 +259,19 @@ internal sealed class TrayApp : IDisposable
             AppLog.Log("Dictation blocked — no account connected on this PC");
             _lastItem.Text = "Connect your account to dictate";
             OpenSettings();
+            return;
+        }
+
+        // The model is what turns speech into words. Without it the sidecar
+        // answers every clip with an empty transcript, so a press would record,
+        // upload and then paste nothing at all — a failure with no symptom.
+        // Say so, and open the page that fixes it.
+        if (!_modelLoaded)
+        {
+            SystemSounds.Beep.Play();
+            AppLog.Log("Dictation blocked — speech model not downloaded");
+            _lastItem.Text = "Download the speech model to dictate";
+            OpenSettings(onModelPage: true);
             return;
         }
 
@@ -447,6 +468,8 @@ internal sealed class TrayApp : IDisposable
             State.SidecarOffline => "Status: sidecar offline (start the sidecar)",
             State.Idle when AccountManager.Shared.DeviceKey == null
                 => "Status: connect your account to dictate",
+            State.Idle when !_modelLoaded
+                => "Status: download the speech model to dictate",
             State.Idle => $"Status: idle — press {HotkeyLabel} to dictate",
             State.Recording => $"Status: recording… press {HotkeyLabel} to stop",
             State.Processing => "Status: transcribing…",
@@ -474,7 +497,10 @@ internal sealed class TrayApp : IDisposable
 
     private SettingsForm? _settings;
 
-    internal void OpenSettings()
+    /// <summary>Bring the dashboard up. <paramref name="onModelPage"/> lands
+    /// straight on Speech Model, for the case where a dictation was refused
+    /// because the model is missing.</summary>
+    internal void OpenSettings(bool onModelPage = false)
     {
         // May be invoked from the SingleInstance listener's threadpool thread.
         _ui.Post(_ =>
@@ -486,11 +512,13 @@ internal sealed class TrayApp : IDisposable
                 if (_settings.WindowState == FormWindowState.Minimized)
                     _settings.WindowState = FormWindowState.Normal;
                 _settings.Activate();
+                if (onModelPage) _settings.GoToModelPage();
                 return;
             }
             _settings = new SettingsForm();
             _settings.FormClosed += (s, e) => _settings = null;
             _settings.Show();
+            if (onModelPage) _settings.GoToModelPage();
         }, null);
     }
 

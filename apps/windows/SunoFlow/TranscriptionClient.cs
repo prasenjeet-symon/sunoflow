@@ -163,6 +163,13 @@ internal static class TranscriptionClient
         public static TranscribeOutcome Failed() => new();
     }
 
+    public sealed class Health
+    {
+        [JsonPropertyName("status")] public string Status { get; set; } = "";
+        [JsonPropertyName("model_loaded")] public bool ModelLoaded { get; set; }
+        [JsonPropertyName("model_present")] public bool ModelPresent { get; set; }
+    }
+
     public sealed class ModelStatus
     {
         [JsonPropertyName("model_present")] public bool ModelPresent { get; set; }
@@ -181,17 +188,25 @@ internal static class TranscriptionClient
 
     // --- Health -------------------------------------------------------------------
 
-    /// <summary>Lightweight liveness probe (GET /health). Polled every 3s.</summary>
-    public static async Task<bool> HealthAsync()
+    /// <summary>GET /health. Liveness plus the model flags, because "the engine
+    /// answers" and "dictation can produce words" are different questions — a
+    /// sidecar with no model downloaded is healthy and returns empty
+    /// transcripts forever.</summary>
+    public static async Task<Health?> HealthDetailAsync()
     {
         try
         {
             using var cts = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(2));
             using var resp = await Http.GetAsync($"{BaseUrl}/health", cts.Token);
-            return resp.IsSuccessStatusCode;
+            if (!resp.IsSuccessStatusCode) return null;
+            var json = await resp.Content.ReadAsStringAsync(cts.Token);
+            return JsonSerializer.Deserialize<Health>(json, JsonOpts);
         }
-        catch { return false; }
+        catch { return null; }
     }
+
+    /// <summary>Lightweight liveness probe (GET /health). Polled every 3s.</summary>
+    public static async Task<bool> HealthAsync() => await HealthDetailAsync() != null;
 
     // --- Transcribe (multipart) ---------------------------------------------------
 

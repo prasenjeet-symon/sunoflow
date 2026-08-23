@@ -301,6 +301,11 @@ internal sealed class SettingsForm : Form
 
     // MARK: - Navigation
 
+    /// <summary>Open straight to Speech Model. The tray app calls this when it
+    /// blocks a dictation for a missing model, so the fix is already on screen
+    /// rather than a page away.</summary>
+    internal void GoToModelPage() => ShowPage(Page.Model);
+
     private void ShowPage(Page page)
     {
         _page = page;
@@ -369,12 +374,11 @@ internal sealed class SettingsForm : Form
     /// nulls rather than dead handles.</summary>
     private void ForgetPageControls()
     {
-        _ovEngineRow = _ovMicRow = _ovAccountRow = null;
-        _ovEngineStatus = _ovMicStatus = _ovAccountStatus = null;
-        _ovEngineButton = null;
+        _ovEngineRow = _ovMicRow = _ovAccountRow = _ovModelRow = null;
+        _ovEngineStatus = _ovMicStatus = _ovAccountStatus = _ovModelStatus = null;
+        _ovEngineButton = _ovModelButton = null;
         _ovStatusHeader = null;
         _ovLead = _ovLeadDetail = null;
-        _ovModelNotice = null;
         _ovHotkey = _ovMicValue = _ovAutoStop = _ovScreen = _ovLogin = _ovCorrections = null;
         _gwStatus = null;
         _gwRow = null;
@@ -505,15 +509,25 @@ internal sealed class SettingsForm : Form
     private void RefreshHeaderStatus()
     {
         int healthy = HealthyCount;
-        bool ready = healthy == 3;
-        _header.SetStatus(ready ? "All systems ready" : $"{3 - healthy} need attention",
+        bool ready = healthy == SubsystemCount;
+        _header.SetStatus(ready ? "All systems ready" : $"{SubsystemCount - healthy} need attention",
                           ready ? Theme.Success : Theme.Warning);
     }
 
     private bool AccountConnected => AccountManager.Shared.DeviceKey != null;
 
+    /// <summary>Subsystems the overview tracks. The model is one of them: an app
+    /// that calls itself ready while it cannot transcribe a single word is
+    /// lying to the user.</summary>
+    private const int SubsystemCount = 4;
+
+    /// <summary>The model is only "ready" when it is loaded in memory — present
+    /// on disk but unloaded still cannot transcribe.</summary>
+    private bool ModelReady => _modelStatus?.ModelLoaded == true;
+
     private int HealthyCount =>
-        (_sidecarOnline ? 1 : 0) + (_micAvailable ? 1 : 0) + (AccountConnected ? 1 : 0);
+        (_sidecarOnline ? 1 : 0) + (_micAvailable ? 1 : 0) + (AccountConnected ? 1 : 0)
+        + (ModelReady ? 1 : 0);
 
     private static string[] SafeDeviceNames()
     {
@@ -540,22 +554,19 @@ internal sealed class SettingsForm : Form
 
     // MARK: - Overview
 
-    private SunoRow? _ovEngineRow, _ovMicRow, _ovAccountRow;
-    private StatusText? _ovEngineStatus, _ovMicStatus, _ovAccountStatus;
-    private SunoButton? _ovEngineButton;
+    private SunoRow? _ovEngineRow, _ovMicRow, _ovAccountRow, _ovModelRow;
+    private StatusText? _ovEngineStatus, _ovMicStatus, _ovAccountStatus, _ovModelStatus;
+    private SunoButton? _ovEngineButton, _ovModelButton;
     private SectionHeader? _ovStatusHeader;
     private TextBlock? _ovLead, _ovLeadDetail;
-    private SunoNotice? _ovModelNotice;
     private ValueText? _ovHotkey, _ovMicValue, _ovAutoStop, _ovScreen, _ovLogin, _ovCorrections;
 
     private void BuildOverview()
     {
         _ovLead = new TextBlock("", Theme.Lead, Theme.Ink) { Margin = new Padding(0, 28, 0, 5) };
         _ovLeadDetail = new TextBlock("", Theme.BodyText, Theme.Body);
-        _ovModelNotice = new SunoNotice("", Glyph.Download) { Margin = new Padding(0, 14, 0, 0), Visible = false };
         _content.Controls.Add(_ovLead);
         _content.Controls.Add(_ovLeadDetail);
-        _content.Controls.Add(_ovModelNotice);
 
         _ovStatusHeader = new SectionHeader("Status", "");
         _content.Controls.Add(_ovStatusHeader);
@@ -575,8 +586,20 @@ internal sealed class SettingsForm : Form
 
         _ovAccountStatus = new StatusText("Checking…", Theme.Faint);
         _ovAccountRow = new SunoRow("Account", "", Glyph.Person, Theme.Faint,
-                                    divider: false, trailing: _ovAccountStatus);
+                                    divider: true, trailing: _ovAccountStatus);
         _content.Controls.Add(_ovAccountRow);
+
+        // The model row carries its own Download button rather than pointing at
+        // another page. This is the first thing a new install is missing, and
+        // the overview is the page they land on — telling them to go elsewhere
+        // was the whole reason nobody found it.
+        _ovModelStatus = new StatusText("Checking…", Theme.Faint);
+        _ovModelButton = new SunoButton("Download", ButtonKind.Primary) { Visible = false };
+        _ovModelButton.Click += (s, e) => StartDownload();
+        _ovModelRow = new SunoRow("Speech model", "", Glyph.Waveform, Theme.Faint,
+                                  divider: false,
+                                  trailing: new Row(_ovModelButton, _ovModelStatus));
+        _content.Controls.Add(_ovModelRow);
         _content.Controls.Add(new RuleLine(strong: true));
 
         _content.Controls.Add(new SectionHeader("Current setup"));
@@ -604,14 +627,14 @@ internal sealed class SettingsForm : Form
         if (_page != Page.Overview || _ovEngineRow == null) return;
 
         int healthy = HealthyCount;
-        bool ready = healthy == 3;
+        bool ready = healthy == SubsystemCount;
         _ovLead!.SetText(ready ? "Everything's ready" : "Almost there");
         _ovLeadDetail!.SetText(ready
             ? $"Press {HotkeyDisplay} anywhere to dictate."
-            : healthy == 2
+            : healthy == SubsystemCount - 1
                 ? "1 item still needs attention before dictation works."
-                : $"{3 - healthy} items still need attention before dictation works.");
-        _ovStatusHeader!.SetTrailing($"{healthy} of 3 ready");
+                : $"{SubsystemCount - healthy} items still need attention before dictation works.");
+        _ovStatusHeader!.SetTrailing($"{healthy} of {SubsystemCount} ready");
 
         // Engine.
         _ovEngineRow.SetSubtitle(_sidecarOnline
@@ -642,16 +665,31 @@ internal sealed class SettingsForm : Form
         _ovAccountStatus!.Set(connected ? "Connected" : "Not connected",
                               connected ? Theme.Success : Theme.Warning);
 
-        // The model banner, when the engine is up but the model is not.
-        bool showModel = _sidecarOnline && _modelStatus is { ModelLoaded: false };
-        _ovModelNotice!.Visible = showModel;
-        if (showModel)
-        {
-            var st = _modelStatus!;
-            _ovModelNotice.SetText(st.Active
-                ? $"Downloading the speech model — {st.OverallDone} of {st.OverallTotal} files. See Speech Model."
-                : "The speech model hasn't been downloaded yet. See Speech Model.");
-        }
+        // Speech model. Four shapes, and only one of them is an invitation to
+        // act — the button appears exactly when downloading is the thing to do.
+        var ms = _modelStatus;
+        bool modelKnown = _sidecarOnline && ms != null;
+        bool downloading = ms is { Active: true };
+        bool canDownload = modelKnown && !ModelReady && !downloading;
+
+        _ovModelRow!.SetSubtitle(
+            !_sidecarOnline ? "Start the engine to see whether the model is installed."
+            : ms == null ? "Checking whether the model is on this PC…"
+            : ModelReady ? "Speech is transcribed on this PC, with no internet connection."
+            : downloading ? "Downloading now — you can leave this page."
+            : "Dictation cannot work until this is downloaded. About 2.5 GB, once.");
+        _ovModelRow.SetIcon(Glyph.Waveform, ModelReady ? Theme.Success : Theme.Warning);
+        _ovModelStatus!.Set(
+            !modelKnown ? "Checking…"
+            : ModelReady ? "Ready"
+            : downloading ? $"{ms!.OverallDone} of {ms.OverallTotal} files"
+            : "Not downloaded",
+            !modelKnown ? Theme.Faint : ModelReady ? Theme.Success
+            : downloading ? Theme.Accent : Theme.Warning);
+        _ovModelButton!.Visible = canDownload;
+        _ovModelButton.SetText(_downloadStarting ? "Starting…" : "Download");
+        _ovModelButton.Enabled = !_downloadStarting;
+        (_ovModelRow.Trailing as Row)?.Refit();
 
         _ovHotkey!.Set(HotkeyDisplay);
         _ovMicValue!.Set(MicDisplayName);
@@ -1135,10 +1173,12 @@ internal sealed class SettingsForm : Form
         _downloadStarting = true;
         _modelShape = "";           // force the body to redraw with "Starting…"
         RefreshModel();
+        RefreshOverview();          // the overview has its own button now
         var started = await TranscriptionClient.StartModelDownloadAsync();
         _downloadStarting = false;
         if (!started) AppLog.Log("Model download did not start");
         _modelShape = "";
+        RefreshOverview();
         await PollModel();
     }
 
