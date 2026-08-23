@@ -7,7 +7,16 @@ PROJECT_DIR="$(pwd -P)"
 
 VENV_PY="$PROJECT_DIR/sidecar/.venv/bin/python"
 SERVER_PY="$PROJECT_DIR/sidecar/server.py"
-APP_BIN="$PROJECT_DIR/SunoFlowApp/SunoFlow.app/Contents/MacOS/SunoFlow"
+DEV_APP_BIN="$PROJECT_DIR/SunoFlowApp/SunoFlow.app/Contents/MacOS/SunoFlow"
+INSTALLED_APP_BIN="/Applications/SunoFlow.app/Contents/MacOS/SunoFlow"
+# Prefer the installed /Applications copy when present (it's what the user and
+# launchd should run). Fall back to the dev build under the repo for first-run
+# / CI use where the app hasn't been installed yet.
+if [ -e "$INSTALLED_APP_BIN" ]; then
+    APP_BIN="$INSTALLED_APP_BIN"
+else
+    APP_BIN="$DEV_APP_BIN"
+fi
 AGENTS_DIR="$HOME/Library/LaunchAgents"
 DOMAIN="gui/$(id -u)"
 
@@ -24,10 +33,17 @@ APP_PLIST="$AGENTS_DIR/$APP_LABEL.plist"
 
 for f in "$VENV_PY" "$SERVER_PY" "$APP_BIN"; do
     if [ ! -e "$f" ]; then
-        echo "ERROR: missing $f. Build the app (SunoFlowApp/build.sh) and set up the venv first." >&2
+        echo "ERROR: missing $f." >&2
+        if [ "$f" = "$APP_BIN" ]; then
+            echo "  Build the app (cd SunoFlowApp && ./build.sh) and optionally copy it to /Applications." >&2
+        else
+            echo "  Build the app (SunoFlowApp/build.sh) and set up the venv first." >&2
+        fi
         exit 1
     fi
 done
+
+echo "App binary: $APP_BIN"
 
 mkdir -p "$AGENTS_DIR"
 

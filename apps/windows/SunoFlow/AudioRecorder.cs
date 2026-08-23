@@ -103,7 +103,22 @@ internal sealed class AudioRecorder
         try { _writer?.Flush(); _writer?.Dispose(); }
         catch { /* best-effort */ }
         _writer = null;
+
+        // Close the capture device. WaveInEvent owns an unmanaged WinMM handle and
+        // a callback thread; dropping the reference without disposing leaks both,
+        // and after enough dictations the driver runs out of handles and the next
+        // StartRecording throws — with the mic-in-use indicator stuck on the whole
+        // time. A new recorder is built per utterance, so this runs every time.
+        var device = _waveIn;
         _waveIn = null;
+        if (device != null)
+        {
+            device.DataAvailable -= OnDataAvailable;
+            device.RecordingStopped -= OnRecordingStopped;
+            try { device.Dispose(); }
+            catch (Exception ex) { AppLog.Log($"Closing the capture device failed: {ex.Message}"); }
+        }
+
         _stopped?.Set();
         if (e.Exception != null)
             AppLog.Log($"Recording stopped with error: {e.Exception.Message}");

@@ -36,6 +36,10 @@ internal sealed class TrayApp : IDisposable
     private State _state = State.SidecarOffline;
     private string? _lastTranscript;
 
+    /// <summary>The running tray app. The dashboard reads it to start the engine
+    /// and to ask whether starting it is even possible on this install.</summary>
+    internal static TrayApp? Shared { get; private set; }
+
     /// <summary>Current recording/dictation state. Setting it refreshes the
     /// tray icon and status menu text, mirroring the macOS <c>didSet</c>.</summary>
     private State State
@@ -47,16 +51,26 @@ internal sealed class TrayApp : IDisposable
     // Status menu items kept as fields so we can update their text.
     private ToolStripMenuItem _statusItem = new("(disabled)") { Enabled = false };
     private ToolStripMenuItem _lastItem = new("Last: (nothing yet)") { Enabled = false };
-    private ToolStripMenuItem _correctionsItem = new("Learned Corrections");
+    private ToolStripMenuItem _correctionsItem = new("Dictionary");
     private readonly ToolStripDropDown _correctionsMenu = new ToolStripDropDownMenu();
+    private readonly ToolStripMenuItem _toggleItem = new("Toggle Dictation");
+
+    /// <summary>The shortcut as the user has it right now. Everything that names
+    /// the hotkey reads this, so rebinding it in Settings updates the tray menu,
+    /// the status line and the recording overlay together — rather than leaving
+    /// three places claiming Alt+Space long after it stopped being true.</summary>
+    private static string HotkeyLabel =>
+        KeyCombo.Display(Preferences.Instance.HotkeyCode, Preferences.Instance.HotkeyModifiers);
 
     public TrayApp()
     {
         _ui = SynchronizationContext.Current ?? throw new InvalidOperationException(
             "TrayApp must be constructed on the UI thread.");
+        Shared = this;
         BuildMenu();
         UpdateIcon();
         UpdateStatusText();
+        UpdateHotkeyLabels();
 
         _hotkey.HotkeyPressed += (s, e) => ToggleRecording();
         var prefs = Preferences.Instance;
@@ -84,6 +98,7 @@ internal sealed class TrayApp : IDisposable
                 var p = Preferences.Instance;
                 _hotkey.Reregister(p.HotkeyCode, p.HotkeyModifiers);
                 AppLog.Log($"Hotkey re-registered: {KeyCombo.Display(p.HotkeyCode, p.HotkeyModifiers)}");
+                UpdateHotkeyLabels();
             }
         };
 
@@ -105,9 +120,8 @@ internal sealed class TrayApp : IDisposable
         menu.Items.Add(_lastItem);
         menu.Items.Add(new ToolStripSeparator());
 
-        var toggleItem = new ToolStripMenuItem("Toggle Dictation (Alt+Space)");
-        toggleItem.Click += (s, e) => ToggleRecording();
-        menu.Items.Add(toggleItem);
+        _toggleItem.Click += (s, e) => ToggleRecording();
+        menu.Items.Add(_toggleItem);
 
         menu.Items.Add(new ToolStripSeparator());
         _correctionsItem.DropDown = _correctionsMenu;
@@ -123,7 +137,7 @@ internal sealed class TrayApp : IDisposable
         quitItem.Click += (s, e) => Application.Exit();
         menu.Items.Add(quitItem);
 
-        _tray.Icon = LoadIcon("mic-idle.ico");
+        _tray.Icon = LoadIcon("tray-idle.ico");
         _tray.Text = "SunoFlow";
         _tray.ContextMenuStrip = menu;
         _tray.Visible = true;
@@ -135,12 +149,12 @@ internal sealed class TrayApp : IDisposable
         var corrections = await TranscriptionClient.FetchCorrectionsAsync();
         _correctionsMenu.Items.Clear();
         _correctionsItem.Text = corrections.Length == 0
-            ? "Learned Corrections"
-            : $"Learned Corrections ({corrections.Length})";
+            ? "Dictionary"
+            : $"Dictionary ({corrections.Length})";
 
         if (corrections.Length == 0)
         {
-            var none = new ToolStripMenuItem("None yet — edit pasted text to teach it") { Enabled = false };
+            var none = new ToolStripMenuItem("Empty — edit pasted text to teach it a spelling") { Enabled = false };
             _correctionsMenu.Items.Add(none);
             return;
         }
@@ -150,8 +164,12 @@ internal sealed class TrayApp : IDisposable
 
         foreach (var c in corrections)
         {
+            // Only shorthand is tagged. Spellings are the default and the bulk of
+            // the list, so labelling them too would be noise in a menu this size.
+            var kindTag = c.ResolvedKind == TranscriptionClient.CorrectionKind.Expansion
+                ? "  · Shorthand" : "";
             var suffix = c.Count > 1 ? $"  (×{c.Count})" : "";
-            var item = new ToolStripMenuItem($"“{c.From}” → “{c.To}”{suffix}") { Tag = c.Key };
+            var item = new ToolStripMenuItem($"“{c.From}” → “{c.To}”{suffix}{kindTag}") { Tag = c.Key };
             item.Click += async (s, e) =>
             {
                 var key = (string)((ToolStripMenuItem)s!).Tag!;
@@ -223,6 +241,19 @@ internal sealed class TrayApp : IDisposable
 
     private void StartRecording()
     {
+        // SunoFlow is a subscription product: without a connected account there
+        // is no device key, nothing would authenticate to the cleanup service,
+        // and the sidecar would refuse the dictation anyway. Say so up front
+        // rather than recording something we cannot finish.
+        if (AccountManager.Shared.DeviceKey == null)
+        {
+            SystemSounds.Beep.Play();
+            AppLog.Log("Dictation blocked — no account connected on this PC");
+            _lastItem.Text = "Connect your account to dictate";
+            OpenSettings();
+            return;
+        }
+
         // Before recording the next utterance, learn from any edits the user
         // made to the previously pasted text.
         _editLearner.CaptureIfNeeded();
@@ -260,11 +291,13 @@ internal sealed class TrayApp : IDisposable
         }
     }
 
-    private void StopAndTranscribe()
+    private async void StopAndTranscribe()
     {
         _maxRecTimer?.Stop();
+        _maxRecTimer?.Dispose();
         _maxRecTimer = null;
         _levelTimer?.Stop();
+        _levelTimer?.Dispose();
         _levelTimer = null;
 
         var fileURL = _recorder.CurrentFile;
@@ -278,9 +311,37 @@ internal sealed class TrayApp : IDisposable
         State = State.Processing;
         _overlay.UpdateMode(DictationOverlay.Mode.Processing);
 
-        // Screen-context OCR is deferred to a later Windows-specific implementation;
-        // the sidecar already handles empty `screen` gracefully. Send empty for now.
-        SendForTranscription(fileURL, context: "", screenContext: "");
+        // Read the text just before the cursor while the field is still focused
+        // and unmodified, so the cleanup pass has the names, terminology and
+        // half-finished sentence already on screen to match. Best-effort: an
+        // unreadable field (or any password field) simply yields nothing.
+        var context = FocusedField.TextBeforeCursor();
+        if (context.Length > 0)
+            AppLog.Log($"Captured {context.Length} chars of cursor context");
+
+        // Screen-context OCR — gated identically to the macOS app: only run
+        // when cleanup is on (the words go to the cleanup LLM) AND the user
+        // opted into screen context. Best-effort: CaptureAndRecognizeAsync
+        // returns "" on any failure, so dictation never breaks.
+        var prefs = Preferences.Instance;
+        string screenContext = "";
+        if (prefs.CleanupEnabled && prefs.ScreenContextEnabled)
+        {
+            try
+            {
+                // Off the UI thread: the capture, the downscale and the pixel copy
+                // are all synchronous, and running them here would freeze the
+                // message pump — including the overlay — for the whole capture.
+                screenContext = await Task.Run(ScreenContext.CaptureAndRecognizeAsync);
+                if (!string.IsNullOrEmpty(screenContext))
+                    AppLog.Log($"Captured {screenContext.Length} chars of screen OCR context");
+            }
+            catch (Exception ex)
+            {
+                AppLog.Log($"Screen context capture failed: {ex.Message}");
+            }
+        }
+        SendForTranscription(fileURL, context, screenContext);
     }
 
     private void SendForTranscription(string wavPath, string context, string screenContext)
@@ -288,7 +349,7 @@ internal sealed class TrayApp : IDisposable
         var prefs = Preferences.Instance;
         Task.Run(async () =>
         {
-            var result = await TranscriptionClient.TranscribeAsync(wavPath, context, screenContext, prefs.CleanupEnabled);
+            var outcome = await TranscriptionClient.TranscribeAsync(wavPath, context, screenContext, prefs.CleanupEnabled);
             _ui.Post(_ =>
             {
                 // If the user cancelled while we were transcribing, drop the result.
@@ -299,8 +360,23 @@ internal sealed class TrayApp : IDisposable
                 }
                 _overlay.HideOverlay();
                 State = State.Idle;
-                if (result != null)
-                    HandleTranscript(result);
+                if (outcome.NotEntitled != null)
+                {
+                    // Nothing is pasted. The account has lapsed, so this is a
+                    // stop, not a degraded result — say so and point at the
+                    // place it can be fixed.
+                    SystemSounds.Beep.Play();
+                    AccountManager.Shared.NoteEntitlementProblem(outcome.NotEntitled);
+                    ShowDictationBlocked(outcome.NotEntitledCode);
+                }
+                else if (outcome.Result != null)
+                {
+                    // Served, so the account is in good standing: clear any
+                    // stale lapse notice and re-arm it for a future one.
+                    AccountManager.Shared.ClearEntitlementNotice();
+                    _shownLapseNotice = false;
+                    HandleTranscript(outcome.Result);
+                }
                 else
                 {
                     SystemSounds.Beep.Play();
@@ -338,6 +414,30 @@ internal sealed class TrayApp : IDisposable
         _editLearner.NoteInsertion();
     }
 
+    /// <summary>Tells the user why nothing was typed.
+    ///
+    /// Only surfaces the window once per lapse, so repeated hotkey presses do
+    /// not keep yanking Settings to the front.</summary>
+    private void ShowDictationBlocked(string code)
+    {
+        // An outage and a lapsed subscription both stop dictation, but they are
+        // not the same news and must not read the same in the tray.
+        var summary = code == "unreachable"
+            ? "Paused — can't reach SunoFlow"
+            : "Paused — subscription inactive";
+        _lastItem.Text = summary;
+        _statusItem.Text = $"Status: {summary.ToLowerInvariant()}";
+        // The icon carries the news as well: the tray is where the user is looking
+        // when nothing appeared in their document.
+        _tray.Icon = LoadIcon("tray-offline.ico");
+        _tray.Text = $"SunoFlow — {summary}";
+        if (_shownLapseNotice) return;
+        _shownLapseNotice = true;
+        OpenSettings();
+    }
+
+    private bool _shownLapseNotice;
+
     // --- UI updates ---------------------------------------------------------------
 
     private void UpdateStatusText()
@@ -345,33 +445,66 @@ internal sealed class TrayApp : IDisposable
         _statusItem.Text = _state switch
         {
             State.SidecarOffline => "Status: sidecar offline (start the sidecar)",
-            State.Idle => "Status: idle — press Alt+Space to dictate",
-            State.Recording => "Status: recording… press Alt+Space to stop",
+            State.Idle when AccountManager.Shared.DeviceKey == null
+                => "Status: connect your account to dictate",
+            State.Idle => $"Status: idle — press {HotkeyLabel} to dictate",
+            State.Recording => $"Status: recording… press {HotkeyLabel} to stop",
             State.Processing => "Status: transcribing…",
             _ => "Status: unknown",
         };
+    }
+
+    private void UpdateHotkeyLabels()
+    {
+        _toggleItem.Text = $"Toggle Dictation ({HotkeyLabel})";
+        UpdateStatusText();
     }
 
     private void UpdateIcon()
     {
         _tray.Icon = _state switch
         {
-            State.SidecarOffline => LoadIcon("mic-offline.ico"),
-            State.Idle => LoadIcon("mic-idle.ico"),
-            State.Recording => LoadIcon("mic-recording.ico"),
-            State.Processing => LoadIcon("mic-processing.ico"),
-            _ => LoadIcon("mic-idle.ico"),
+            State.SidecarOffline => LoadIcon("tray-offline.ico"),
+            State.Idle => LoadIcon("tray-idle.ico"),
+            State.Recording => LoadIcon("tray-recording.ico"),
+            State.Processing => LoadIcon("tray-processing.ico"),
+            _ => LoadIcon("tray-idle.ico"),
         };
     }
+
+    private SettingsForm? _settings;
 
     internal void OpenSettings()
     {
         // May be invoked from the SingleInstance listener's threadpool thread.
         _ui.Post(_ =>
         {
-            var form = new SettingsForm();
-            form.Show();
+            // One dashboard, brought forward. Opening a second copy would leave two
+            // windows polling the same endpoints and disagreeing about the answers.
+            if (_settings is { IsDisposed: false })
+            {
+                if (_settings.WindowState == FormWindowState.Minimized)
+                    _settings.WindowState = FormWindowState.Normal;
+                _settings.Activate();
+                return;
+            }
+            _settings = new SettingsForm();
+            _settings.FormClosed += (s, e) => _settings = null;
+            _settings.Show();
         }, null);
+    }
+
+    /// <summary><see langword="true"/> when a bundled sidecar exists for us to
+    /// start. In dev mode there is none and the dashboard hides the button rather
+    /// than offering an action that would do nothing.</summary>
+    internal bool CanStartEngine => _sidecar.IsAvailable;
+
+    /// <summary>Starts the bundled sidecar if it isn't already up.</summary>
+    internal void StartEngine()
+    {
+        AppLog.Log("Engine start requested from Settings");
+        _sidecar.EnsureRunning();
+        _ = CheckHealth();
     }
 
     // --- Helpers ------------------------------------------------------------------
@@ -380,6 +513,10 @@ internal sealed class TrayApp : IDisposable
     {
         try { File.Delete(path); } catch { /* best-effort */ }
     }
+
+    /// <summary>The app icon — the brand mark on the violet chip — for windows.</summary>
+    internal static Icon AppIcon => _appIcon ??= LoadIcon("app-icon.ico");
+    private static Icon? _appIcon;
 
     /// <summary>Load a tray icon from the embedded resource.</summary>
     private static Icon LoadIcon(string name)
@@ -394,9 +531,12 @@ internal sealed class TrayApp : IDisposable
 
     public void Dispose()
     {
+        Shared = null;
         _healthTimer.Stop();
+        _healthTimer.Dispose();
         _maxRecTimer?.Dispose();
         _levelTimer?.Dispose();
+        _overlay.Dispose();
         _hotkey.Dispose();
         // SidecarSupervisor.Dispose() intentionally leaves the sidecar running.
         _sidecar.Dispose();

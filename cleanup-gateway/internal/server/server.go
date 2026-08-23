@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sunoflow/cleanup-gateway/internal/account"
 	"github.com/sunoflow/cleanup-gateway/internal/auth"
 	"github.com/sunoflow/cleanup-gateway/internal/backend"
 	"github.com/sunoflow/cleanup-gateway/internal/cleanup"
@@ -18,32 +19,47 @@ import (
 
 // Server holds the dependencies injected into handlers.
 type Server struct {
-	Backend     backend.Backend
-	Store       *store.Store
-	Logger      *slog.Logger
-	QuotaRPM    int
-	QuotaDaily  int
+	Backend    backend.Backend
+	Store      *store.Store
+	Logger     *slog.Logger
+	QuotaRPM   int
+	QuotaDaily int
+	// LeaseSecret signs the offline entitlement leases handed to entitled
+	// callers. Empty falls back to account.DefaultLeaseSecret.
+	LeaseSecret string
 }
 
 // now is overridable for tests.
 var now = func() time.Time { return time.Now() }
 
 // cleanupRequest mirrors the /cleanup API contract (§5.1).
+//
+// `dictionary` is the user's own saved terms. It is stored only on their
+// machine; the sidecar sends just the entries that look relevant to this one
+// transcript, and the gateway keeps them for the length of the request — they
+// are never persisted and never logged.
 type cleanupRequest struct {
-	Text    string   `json:"text"`
-	Context string   `json:"context"`
-	Recent  []string `json:"recent"`
-	Screen  string   `json:"screen"`
+	Text       string          `json:"text"`
+	Context    string          `json:"context"`
+	Recent     []string        `json:"recent"`
+	Screen     string          `json:"screen"`
+	Dictionary []cleanup.Entry `json:"dictionary"`
 }
 
 // cleanupResponse is the single response shape.
+//
+// `lease` rides along on the normal cleanup path so a device in daily use keeps
+// a fresh offline lease without ever making an extra request for one. Older
+// sidecars ignore the field; it is omitted entirely when no account was
+// resolved (the legacy key table issues no leases).
 type cleanupResponse struct {
 	Cleaned string `json:"cleaned"`
+	Lease   string `json:"lease,omitempty"`
 }
 
 // NewMux builds the full router with the middleware chain applied in order:
 // request-id + logging → (per-route) auth → rate-limit → handler.
-func NewMux(s *Server, limiter *ratelimit.Limiter, adminToken string) http.Handler {
+func NewMux(s *Server, limiter *ratelimit.Limiter, adminToken string, accounts *account.Resolver) http.Handler {
 	mux := http.NewServeMux()
 
 	// Unauthenticated endpoints.
@@ -51,12 +67,32 @@ func NewMux(s *Server, limiter *ratelimit.Limiter, adminToken string) http.Handl
 	mux.HandleFunc("GET /ready", s.handleReady)
 
 	// Authenticated + rate-limited cleanup endpoint.
+	// Device keys are issued by the pairing function and checked against
+	// Firestore, which is also where entitlement lives. Where no Firebase
+	// project is configured the gateway falls back to its own key table, so
+	// existing installs keep working while devices migrate across.
+	keyCheck := auth.Middleware(s.Store)
+	if accounts != nil {
+		// nil: no legacy fallback. The migration window is over — a key that
+		// Firestore does not know is refused, including the shared key that
+		// used to ship inside every install. Every caller must now be a paired
+		// device belonging to an account in good standing.
+		keyCheck = account.Middleware(accounts, nil, s.LeaseSecret, s.Logger)
+	}
 	cleanupChain := chain(
 		http.HandlerFunc(s.handleCleanup),
-		auth.Middleware(s.Store),
+		keyCheck,
 		limiter.Middleware,
 	)
 	mux.Handle("POST /cleanup", cleanupChain)
+
+	// Entitlement-only probe. Same auth and the same verdict as /cleanup, but no
+	// LLM call — so a client that has cleanup switched off can still be told it
+	// is out of subscription, instead of dictating free forever.
+	mux.Handle("GET /entitlement", chain(
+		http.HandlerFunc(s.handleEntitlement),
+		keyCheck,
+	))
 
 	// Admin endpoints (separate admin token).
 	adminAuth := auth.AdminMiddleware(adminToken)
@@ -97,7 +133,7 @@ func (s *Server) handleCleanup(w http.ResponseWriter, r *http.Request) {
 	}
 	text := strings.TrimSpace(req.Text)
 	if text == "" {
-		writeJSON(w, http.StatusOK, cleanupResponse{Cleaned: ""})
+		writeJSON(w, http.StatusOK, cleanupResponse{Cleaned: "", Lease: leaseFor(r)})
 		return
 	}
 	context := strings.TrimSpace(req.Context)
@@ -106,30 +142,35 @@ func (s *Server) handleCleanup(w http.ResponseWriter, r *http.Request) {
 	if recent == nil {
 		recent = []string{}
 	}
+	dict := cleanup.NormalizeDict(req.Dictionary)
 
-	cleaned := s.runCleanup(r.Context(), text, context, recent, screen)
-	writeJSON(w, http.StatusOK, cleanupResponse{Cleaned: cleaned})
+	cleaned := s.runCleanup(r.Context(), text, context, recent, screen, dict)
+	writeJSON(w, http.StatusOK, cleanupResponse{Cleaned: cleaned, Lease: leaseFor(r)})
 }
 
-// runCleanup reproduces clean_with_ollama from sidecar/server.py:
+// runCleanup applies the two-pass cleanup contract:
 // 1. context-aware pass; if non-echo → return.
 // 2. on echo, retry context-free; if length ok → return.
 // 3. otherwise return raw text. Any backend error → raw text.
-func (s *Server) runCleanup(ctx context.Context, text, context string, recent []string, screen string) string {
+func (s *Server) runCleanup(ctx context.Context, text, context string, recent []string, screen string, dict []cleanup.Entry) string {
 	// First pass: context-aware cleanup (better name/term correction).
-	cleaned, err := s.Backend.Cleanup(ctx, cleanup.BuildPrompt(text, context, recent, screen))
+	cleaned, err := s.Backend.Cleanup(ctx, cleanup.BuildPrompt(text, context, recent, screen, dict))
 	cleaned = strings.TrimSpace(cleaned)
-	if err == nil && cleaned != "" && !cleanup.LooksLikeEcho(cleaned, text, context, recent, screen) {
+	if err == nil && cleaned != "" && !cleanup.LooksLikeEcho(cleaned, text, context, recent, screen, dict) {
 		return cleaned
 	}
 
 	// The backend echoed reference material (or errored). Retry with NO context,
-	// history, or screen — it can't repeat what it was never given.
+	// history, or screen — it can't repeat what it was never given. The
+	// dictionary stays: it is short, structured, and the thing the user
+	// explicitly asked us to apply, so dropping it would silently turn the
+	// feature off on exactly the dictations that needed a second attempt. The
+	// bulky, noisy sources are the ones that get echoed, and those are gone.
 	if context != "" || len(recent) > 0 || screen != "" {
 		s.Logger.Info("cleanup echoed reference material; retrying context-free")
-		cleaned, err = s.Backend.Cleanup(ctx, cleanup.BuildPrompt(text, "", nil, ""))
+		cleaned, err = s.Backend.Cleanup(ctx, cleanup.BuildPrompt(text, "", nil, "", dict))
 		cleaned = strings.TrimSpace(cleaned)
-		if err == nil && cleaned != "" && !cleanup.TooLong(cleaned, text) {
+		if err == nil && cleaned != "" && !cleanup.TooLong(cleaned, text, dict) {
 			return cleaned
 		}
 	}
@@ -155,4 +196,24 @@ func chain(handler http.Handler, middlewares ...func(http.Handler) http.Handler)
 		h = middlewares[i](h)
 	}
 	return h
+}
+
+// handleEntitlement answers 200 for a caller the middleware already allowed.
+// Anything not entitled never reaches here — the middleware has already
+// returned 402 or 401 with a message for the user.
+//
+// This is the endpoint a client with cleanup switched off calls, so it is also
+// where that client collects its offline lease.
+func (s *Server) handleEntitlement(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "lease": leaseFor(r)})
+}
+
+// leaseFor returns the lease the account middleware minted for this request, or
+// "" when the request was authenticated some other way.
+func leaseFor(r *http.Request) string {
+	res, ok := account.FromContext(r.Context())
+	if !ok {
+		return ""
+	}
+	return res.Lease
 }

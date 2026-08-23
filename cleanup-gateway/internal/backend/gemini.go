@@ -12,13 +12,12 @@ import (
 )
 
 // GeminiBackend calls Google's Gemini API (generativelanguage.googleapis.com)
-// via generateContent.
+// via generateContent. It is the gateway's only LLM backend.
 //
-// Why this exists: the Ollama cloud tags are all large reasoning models
-// (even "nano" resolves to a 30b-cloud tag), and they emit chain-of-thought
-// before answering. For mechanical transcript tidying that reasoning is pure
-// latency — measured at 6-24s per cleanup. A flash-lite class model with
-// thinking pinned to its floor does the same job in a fraction of that.
+// Why a flash-lite class model with thinking pinned to its floor: transcript
+// tidying is mechanical, so any chain-of-thought the model emits before
+// answering is pure latency on the dictation path. Reasoning-heavy models were
+// measured at 6-24s per cleanup against roughly 1s here for the same output.
 type GeminiBackend struct {
 	APIKey  string        // never logged; injected from env
 	Model   string        // e.g. gemini-3.5-flash-lite
@@ -94,9 +93,9 @@ type geminiResponse struct {
 // Cleanup sends the built prompt to Gemini and returns the model's text.
 //
 // The whole prompt goes in as a single user part rather than being split into
-// systemInstruction + user content, so the bytes on the wire stay identical to
-// what the Ollama backend sends. Prompt parity across backends is deliberate —
-// see cleanup.BuildPrompt.
+// systemInstruction + user content, so the bytes on the wire are exactly what
+// cleanup.BuildPrompt produced. Keeping the prompt provider-agnostic is
+// deliberate: a future backend can be swapped in without re-tuning it.
 func (b *GeminiBackend) Cleanup(ctx context.Context, prompt string) (string, error) {
 	reqBody := geminiRequest{
 		Contents: []geminiContent{{

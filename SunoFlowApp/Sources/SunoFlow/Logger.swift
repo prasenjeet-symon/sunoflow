@@ -2,10 +2,19 @@ import Foundation
 
 /// Minimal append-only file logger so we can inspect app behavior directly,
 /// without digging through the noisy unified system log.
+///
+/// The log lives at `~/Library/Logs/SunoFlow/app-debug.log` — the conventional,
+/// TCC-safe location. It must NOT live under the dev source tree
+/// (`~/Downloads/work/sunoapp`), because a distributed app has no such
+/// directory and writing there would fail silently for end users.
 enum AppLog {
     static let fileURL: URL = {
-        let dir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Downloads/work/sunoapp")
+        let fm = FileManager.default
+        let dir = fm
+            .urls(for: .libraryDirectory, in: .userDomainMask)
+            .first!
+            .appendingPathComponent("Logs/SunoFlow", isDirectory: true)
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir.appendingPathComponent("app-debug.log")
     }()
 

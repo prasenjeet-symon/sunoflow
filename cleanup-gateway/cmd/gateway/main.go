@@ -1,6 +1,7 @@
 // Command gateway is the SunoFlow cleanup gateway — a single static Go binary
 // that authenticates clients, rate-limits per key, and proxies cleanup requests
-// to a local Ollama instance. It is the sole caller of Ollama.
+// to the Gemini API. It is the sole holder of the provider API key: no client
+// ever sees it, which is the whole reason cleanup is server-side.
 package main
 
 import (
@@ -13,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sunoflow/cleanup-gateway/internal/account"
 	"github.com/sunoflow/cleanup-gateway/internal/backend"
 	"github.com/sunoflow/cleanup-gateway/internal/config"
 	"github.com/sunoflow/cleanup-gateway/internal/ratelimit"
@@ -37,18 +39,11 @@ func main() {
 	}
 	defer st.Close()
 
-	// Build the active backend (openai/claude remain interface-only).
+	// Build the active backend. Gemini is the only implementation; adding
+	// another means implementing backend.Backend and adding a case here.
 	var be backend.Backend
 	var activeModel string
 	switch cfg.Backend {
-	case "ollama":
-		activeModel = cfg.OllamaModel
-		be = &backend.OllamaBackend{
-			URL:     cfg.OllamaURL,
-			Model:   cfg.OllamaModel,
-			Timeout: cfg.OllamaTimeout,
-			Client:  &http.Client{Timeout: cfg.OllamaTimeout + 5*time.Second},
-		}
 	case "gemini":
 		activeModel = cfg.GeminiModel
 		be = &backend.GeminiBackend{
@@ -66,14 +61,35 @@ func main() {
 	logger.Info("backend selected", "backend", be.Name(), "model", activeModel)
 
 	srv := &server.Server{
-		Backend:    be,
-		Store:      st,
-		Logger:     logger,
-		QuotaRPM:   cfg.QuotaRPM,
-		QuotaDaily: cfg.QuotaDaily,
+		Backend:     be,
+		Store:       st,
+		Logger:      logger,
+		QuotaRPM:    cfg.QuotaRPM,
+		QuotaDaily:  cfg.QuotaDaily,
+		LeaseSecret: cfg.LeaseSecret,
 	}
-	limiter := ratelimit.New(st, cfg.QuotaRPM, cfg.QuotaDaily)
-	handler := server.NewMux(srv, limiter, cfg.AdminToken)
+	limiter := ratelimit.New(st, cfg.QuotaRPM, cfg.QuotaDaily, logger)
+
+	// Entitlement lives in Firestore alongside the accounts. Without a project
+	// configured the gateway keeps to its own key table and no subscription is
+	// enforced — fine for local runs, not for production.
+	var accounts *account.Resolver
+	if cfg.FirebaseProject != "" {
+		accounts, err = account.New(context.Background(), cfg.FirebaseProject, cfg.FirebaseCredentials)
+		if err != nil {
+			logger.Error("could not reach Firestore for account checks", "err", err)
+			os.Exit(1)
+		}
+		defer func() { _ = accounts.Close() }()
+		logger.Info("account entitlement enabled",
+			"project", cfg.FirebaseProject,
+			"lease_ttl", account.LeaseTTL.String(),
+			"lease_secret", map[bool]string{true: "default", false: "custom"}[cfg.LeaseSecret == ""])
+	} else {
+		logger.Warn("FIREBASE_PROJECT not set — subscriptions are NOT enforced")
+	}
+
+	handler := server.NewMux(srv, limiter, cfg.AdminToken, accounts)
 
 	httpServer := &http.Server{
 		Addr:              cfg.GatewayAddr,

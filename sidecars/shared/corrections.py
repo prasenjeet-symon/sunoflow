@@ -1,9 +1,21 @@
-"""The personal corrections dictionary.
+"""The personal dictionary.
 
-We watch what the user edits after each paste and learn recurring word/short-
-phrase substitutions (e.g. "cavach" -> "Kavach"), then apply them to future
-transcripts. Stored locally; nothing leaves the machine. See
-docs/CONTRACT.md §learn / §corrections.
+Two different things live in here, and the difference decides who applies them:
+
+* **corrections** — a word the transcript mis-hears, paired with its correct
+  spelling (e.g. "cavach" -> "Kavach"). Learned automatically from what the user
+  edits after a paste, or added by hand. Mechanical enough to apply ourselves,
+  which we do after cleanup so they always win.
+* **expansions** — a phrase the user says out loud, paired with the literal
+  value it stands for (e.g. "my Instagram" -> a profile URL). Added by hand.
+  Applying one takes judgement about whether the speaker is *giving* the value
+  or just mentioning the thing — "I don't have an Instagram" must not sprout a
+  URL — so only the cleanup model ever applies these, never ``apply()``.
+
+The file stays on this machine. What leaves, per dictation, is the handful of
+entries that look relevant to the transcript in hand (``relevant_for``), sent to
+the cleanup gateway so the model can act on them. See docs/CONTRACT.md
+§learn / §corrections.
 
 This module is pure logic (no FastAPI) so it can be unit-tested in isolation and
 shared by every sidecar. A sidecar instance owns one ``Corrections`` object and
@@ -27,8 +39,72 @@ _COMMON_WORDS = {
 }
 
 
+KIND_CORRECTION = "correction"
+KIND_EXPANSION = "expansion"
+
+# What a "value" looks like: a URL, handle, email, bare domain, or phone number.
+# These are the things a user saves so they never have to spell them out loud.
+_VALUE_LIKE = re.compile(
+    r"""(?xi)
+      https?://
+    | www\.
+    | ^@[\w.]+$
+    | [\w.+-]+@[\w-]+\.\w
+    | \.(com|net|org|io|in|co|dev|me|ai|app|xyz)\b
+    | ^\+?\d[\d\s().-]{7,}$
+    """
+)
+
+
 def _norm_key(s: str) -> str:
     return s.strip().strip(".,!?;:\"'`()[]").lower()
+
+
+def infer_kind(frm: str, to: str) -> str:
+    """Classify an entry the user added without saying which kind it is.
+
+    A correction is a re-spelling, so the two sides look alike; an expansion
+    swaps a short spoken phrase for something structurally different and usually
+    much longer. Both tests below are about *shape*, not meaning, which is why
+    this can run on a manually-added pair with no other signal.
+
+    Errs toward a correction: that is the conservative default, since a
+    correction only ever changes a spelling, while an expansion inserts a
+    personal value into the user's text.
+    """
+    to = to.strip()
+    if _VALUE_LIKE.search(to):
+        return KIND_EXPANSION
+    if len(to) > max(24, len(frm) * 2):
+        return KIND_EXPANSION
+    if SequenceMatcher(None, _norm_key(frm), _norm_key(to)).ratio() < 0.5:
+        return KIND_EXPANSION
+    return KIND_CORRECTION
+
+
+def _kind_of(entry: dict) -> str:
+    """The stored kind, classifying on the fly for entries written before the
+    field existed. Keeps old corrections.json files working untouched."""
+    kind = entry.get("kind")
+    if kind in (KIND_CORRECTION, KIND_EXPANSION):
+        return kind
+    return infer_kind(entry.get("from", ""), entry.get("to", ""))
+
+
+def _distinctive_tokens(s: str) -> list:
+    """The words in ``s`` that carry enough signal to match a transcript on.
+
+    "my Instagram" reduces to ["instagram"], so the entry is offered whether the
+    user said "my Instagram ID", "my Instagram handle", or just "my Instagram".
+    """
+    return [
+        t for t in (w.lower() for w in re.findall(r"\w+", s))
+        if len(t) >= 3 and t not in _COMMON_WORDS
+    ]
+
+
+def _contains_phrase(lowered_text: str, phrase: str) -> bool:
+    return re.search(r"(?<!\w)" + re.escape(phrase.lower()) + r"(?!\w)", lowered_text) is not None
 
 
 def _worth_learning(old: str, new: str) -> bool:
@@ -70,9 +146,12 @@ def extract_correction_pairs(original: str, edited: str):
 
 
 class Corrections:
-    """A learned-substitution dictionary persisted to a JSON file.
+    """The user's dictionary, persisted to a JSON file.
 
-    Keys are normalized "from" text; values are ``{"from", "to", "count"}``.
+    Keys are normalized "from" text; values are
+    ``{"from", "to", "count", "kind"}``. ``kind`` is absent in files written
+    before expansions existed and is inferred on read, so an old file needs no
+    migration.
     """
 
     def __init__(self, path: str):
@@ -93,24 +172,34 @@ class Corrections:
         os.replace(tmp, self.path)
 
     def list(self) -> list:
-        """Full list sorted by normalized key, each with ``key/from/to/count``."""
+        """Full list sorted by normalized key, each with ``key/from/to/count/kind``."""
         return [
-            {"key": k, "from": v["from"], "to": v["to"], "count": v.get("count", 1)}
+            {
+                "key": k,
+                "from": v["from"],
+                "to": v["to"],
+                "count": v.get("count", 1),
+                "kind": _kind_of(v),
+            }
             for k, v in sorted(self.data.items())
         ]
 
-    def add(self, frm: str, to: str) -> bool:
-        """Manually add a correction. Preserves an existing entry's count."""
+    def add(self, frm: str, to: str, kind: str = "") -> bool:
+        """Manually add an entry. Preserves an existing entry's count.
+
+        ``kind`` is optional: the UI does not ask, so an unset kind is inferred
+        from the shape of the pair.
+        """
         key = _norm_key(frm)
         if not key:
             return False
         count = self.data.get(key, {}).get("count", 0)
-        self.data[key] = {"from": frm.strip(), "to": to.strip(), "count": count}
+        self.data[key] = self._entry(frm, to, count, kind)
         self._save()
         return True
 
-    def update(self, key: str, frm: str, to: str) -> bool:
-        """Edit an existing correction's from/to. Renormalizes the key."""
+    def update(self, key: str, frm: str, to: str, kind: str = "") -> bool:
+        """Edit an existing entry's from/to. Renormalizes the key."""
         old = self.data.pop(key, None)
         new_key = _norm_key(frm)
         if not new_key:
@@ -119,9 +208,16 @@ class Corrections:
                 self.data[key] = old
             return False
         count = (old or {}).get("count", self.data.get(new_key, {}).get("count", 0))
-        self.data[new_key] = {"from": frm.strip(), "to": to.strip(), "count": count}
+        self.data[new_key] = self._entry(frm, to, count, kind)
         self._save()
         return True
+
+    @staticmethod
+    def _entry(frm: str, to: str, count: int, kind: str = "") -> dict:
+        frm, to = frm.strip(), to.strip()
+        if kind not in (KIND_CORRECTION, KIND_EXPANSION):
+            kind = infer_kind(frm, to)
+        return {"from": frm, "to": to, "count": count, "kind": kind}
 
     def delete(self, key: str) -> bool:
         existed = self.data.pop(key, None) is not None
@@ -146,6 +242,9 @@ class Corrections:
             entry["from"] = old
             entry["to"] = new
             entry["count"] = entry.get("count", 0) + 1
+            # Always a correction: extract_correction_pairs only yields pairs
+            # whose two sides look alike, which is what a mishearing is.
+            entry["kind"] = KIND_CORRECTION
             self.data[key] = entry
             learned.append({"from": old, "to": new, "count": entry["count"]})
         if learned:
@@ -153,13 +252,66 @@ class Corrections:
         return learned
 
     def apply(self, text: str) -> str:
-        """Apply learned corrections, longest-phrase-first, case-insensitive."""
+        """Apply the *corrections* — longest-phrase-first, case-insensitive.
+
+        Expansions are deliberately skipped. A blind global replace cannot tell
+        "here's my Instagram" from "I don't have an Instagram", and getting that
+        wrong drops the user's personal URL into a sentence that did not want
+        it. The cleanup model decides those; see the DICTIONARY block in the
+        gateway's system prompt.
+        """
         if not self.data or not text:
             return text
         result = text
+        entries = [v for v in self.data.values() if _kind_of(v) == KIND_CORRECTION]
         # Longer phrases first so multi-word fixes win over single-word ones.
-        for key in sorted(self.data, key=len, reverse=True):
-            frm = self.data[key]["from"]
-            to = self.data[key]["to"]
-            result = re.sub(r"\b" + re.escape(frm) + r"\b", to, result, flags=re.IGNORECASE)
+        for entry in sorted(entries, key=lambda v: len(v["from"]), reverse=True):
+            frm, to = entry["from"], entry["to"]
+            # Lookarounds rather than \b: \b is a *transition*, so it silently
+            # fails to match a "from" that starts or ends with punctuation.
+            # The replacement is a function so that backslashes and \1-style
+            # sequences in the user's text stay literal instead of being read as
+            # group references.
+            result = re.sub(
+                r"(?<!\w)" + re.escape(frm) + r"(?!\w)",
+                lambda _m, to=to: to,
+                result,
+                flags=re.IGNORECASE,
+            )
         return result
+
+    def relevant_for(self, text: str, limit: int = 40) -> list:
+        """The entries worth sending to the cleanup model for this transcript.
+
+        Filtering here rather than shipping the whole dictionary keeps the
+        prompt small, and keeps every entry the user did not just say on this
+        machine: a term only leaves when the transcript already looks like it.
+
+        A correction has to appear literally — the mishearing *is* what the
+        speech model produced. An expansion is matched on its distinctive words
+        instead, since the spoken lead-in varies ("my Instagram ID", "my
+        Instagram handle", "my Instagram").
+        """
+        if not self.data or not text:
+            return []
+        lowered = text.lower()
+        out = []
+        for key, entry in self.data.items():
+            frm, kind = entry["from"], _kind_of(entry)
+            if kind == KIND_EXPANSION:
+                tokens = _distinctive_tokens(frm)
+                hit = (
+                    all(re.search(r"(?<!\w)" + re.escape(t), lowered) for t in tokens)
+                    if tokens
+                    else _contains_phrase(lowered, frm)
+                )
+            else:
+                hit = _contains_phrase(lowered, frm)
+            if hit:
+                out.append({"from": frm, "to": entry["to"], "kind": kind, "count": entry.get("count", 0)})
+        # Expansions first, then most-used, so the cap sheds the entries least
+        # likely to matter. Expansions are always count 0 — they are added by
+        # hand, never learned — so sorting on count alone would drop exactly the
+        # entries the user took the trouble to type in.
+        out.sort(key=lambda e: (e["kind"] != KIND_EXPANSION, -e["count"], len(e["from"])))
+        return [{"from": e["from"], "to": e["to"], "kind": e["kind"]} for e in out[:limit]]

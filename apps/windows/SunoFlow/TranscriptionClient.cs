@@ -17,7 +17,8 @@ namespace SunoFlow;
 /// the Swift client, called out in the contract:
 /// <list type="bullet">
 /// <item><c>/corrections/add</c> + <c>/corrections/update</c> send <c>frm</c>
-///   (not <c>from</c>) — the Swift client sends <c>from</c> and silently 422s.</item>
+///   (not <c>from</c>) — <c>from</c> is a Python keyword, so the endpoint names
+///   its parameter <c>frm</c> and anything else silently 422s.</item>
 /// <item><c>/learn</c> decodes <c>learned</c> as a lighter struct with a
 ///   <c>count</c> field (the Swift client decodes into a struct requiring
 ///   <c>key</c> the server never sends, so the learned count always reads 0).</item>
@@ -49,12 +50,59 @@ internal static class TranscriptionClient
         [JsonPropertyName("cleaned")] public string Cleaned { get; set; } = "";
     }
 
+    /// <summary>Which half of the dictionary an entry belongs to.
+    ///
+    /// The two behave very differently at dictation time — a spelling is swapped
+    /// in mechanically, a shorthand value is only substituted where the model
+    /// judges the speaker was actually giving it — so the UI names the
+    /// difference rather than showing one undifferentiated list. See
+    /// <c>docs/CONTRACT.md</c> §corrections.</summary>
+    public enum CorrectionKind { Correction, Expansion }
+
+    /// <summary>User-facing wording for a <see cref="CorrectionKind"/>, kept
+    /// beside the enum so the two platforms stay worded the same.</summary>
+    public static class CorrectionKinds
+    {
+        public static readonly CorrectionKind[] All =
+            { CorrectionKind.Correction, CorrectionKind.Expansion };
+
+        /// <summary>Anything unrecognised — including the field being absent,
+        /// which is how a sidecar predating the two-kind dictionary answers —
+        /// reads as a spelling. Those installs only ever held spellings.</summary>
+        public static CorrectionKind Parse(string? wire) =>
+            string.Equals(wire, "expansion", StringComparison.OrdinalIgnoreCase)
+                ? CorrectionKind.Expansion
+                : CorrectionKind.Correction;
+
+        public static string Wire(CorrectionKind kind) =>
+            kind == CorrectionKind.Expansion ? "expansion" : "correction";
+
+        public static string Label(CorrectionKind kind) =>
+            kind == CorrectionKind.Expansion ? "Shorthand" : "Spelling";
+
+        public static string Blurb(CorrectionKind kind) => kind == CorrectionKind.Expansion
+            ? "Something you say out loud, and the value it stands for."
+            : "A word dictation mishears, and how you write it.";
+
+        public static string FromPlaceholder(CorrectionKind kind) =>
+            kind == CorrectionKind.Expansion ? "What you say" : "What it mishears";
+
+        public static string ToPlaceholder(CorrectionKind kind) =>
+            kind == CorrectionKind.Expansion ? "The value to write instead" : "What it should write";
+    }
+
     public sealed class Correction
     {
         [JsonPropertyName("key")] public string Key { get; set; } = "";
         [JsonPropertyName("from")] public string From { get; set; } = "";
         [JsonPropertyName("to")] public string To { get; set; } = "";
         [JsonPropertyName("count")] public int Count { get; set; }
+        /// <summary>Kept as the raw wire string so an unknown value can never
+        /// break deserialization of the whole list; read it via
+        /// <see cref="ResolvedKind"/>.</summary>
+        [JsonPropertyName("kind")] public string Kind { get; set; } = "";
+
+        [JsonIgnore] public CorrectionKind ResolvedKind => CorrectionKinds.Parse(Kind);
     }
 
     private sealed class CorrectionsResponse
@@ -78,6 +126,41 @@ internal static class TranscriptionClient
     private sealed class ReadyResponse
     {
         [JsonPropertyName("backend_ok")] public bool BackendOk { get; set; }
+    }
+
+    /// <summary>The sidecar's 402 body when this device may not dictate.</summary>
+    private sealed class RefusalResponse
+    {
+        [JsonPropertyName("error")] public string Error { get; set; } = "";
+        [JsonPropertyName("message")] public string Message { get; set; } = "";
+    }
+
+    /// <summary>
+    /// What came back from <c>/transcribe</c>. Three outcomes, and the caller
+    /// has to tell them apart: a transcript, a refusal (the account's trial has
+    /// ended, its subscription lapsed, or this PC is not connected), or a plain
+    /// failure. A refusal must not be treated as a failure — the user needs to
+    /// be told why nothing was typed, and pointed at the fix.
+    /// </summary>
+    public sealed class TranscribeOutcome
+    {
+        public TranscriptionResult? Result { get; init; }
+
+        /// <summary>Non-null when the device was refused; carries the wording the
+        /// gateway chose, so every surface shows one consistent explanation.</summary>
+        public string? NotEntitled { get; init; }
+
+        /// <summary>Why it was refused: <c>not_entitled</c> (trial over,
+        /// subscription lapsed, device disconnected — fixed on the account
+        /// page) or <c>unreachable</c> (we could not check — fixed by
+        /// reconnecting). Both stop the dictation; they are not the same news
+        /// and must not read the same in the tray.</summary>
+        public string NotEntitledCode { get; init; } = "not_entitled";
+
+        public static TranscribeOutcome Ok(TranscriptionResult r) => new() { Result = r };
+        public static TranscribeOutcome Refused(string message, string code) =>
+            new() { NotEntitled = message, NotEntitledCode = code };
+        public static TranscribeOutcome Failed() => new();
     }
 
     public sealed class ModelStatus
@@ -115,9 +198,16 @@ internal static class TranscriptionClient
     /// <summary>
     /// POST /transcribe. Uploads the WAV as multipart/form-data with the
     /// optional <c>context</c> and <c>screen</c> fields, plus the <c>cleanup</c>
-    /// query param. Returns null on any transport error (the caller beeps).
+    /// query param.
+    ///
+    /// This PC's device key travels with the request so the sidecar can
+    /// authenticate to the cleanup gateway, which is where the account's trial
+    /// and subscription are actually checked. Sending it per call rather than
+    /// baking it into the sidecar's environment means re-pairing takes effect
+    /// immediately, with no restart, and the key is never written to disk
+    /// outside its DPAPI-protected store.
     /// </summary>
-    public static async Task<TranscriptionResult?> TranscribeAsync(
+    public static async Task<TranscribeOutcome> TranscribeAsync(
         string wavPath, string context, string screenContext, bool cleanup)
     {
         try
@@ -131,19 +221,46 @@ internal static class TranscriptionClient
             form.Add(new StringContent(screenContext, Encoding.UTF8), "screen");
 
             var url = $"{BaseUrl}/transcribe?cleanup={(cleanup ? "true" : "false")}";
-            using var resp = await Http.PostAsync(url, form);
+            using var request = new HttpRequestMessage(HttpMethod.Post, url) { Content = form };
+            var deviceKey = AccountManager.Shared.DeviceKey;
+            if (!string.IsNullOrEmpty(deviceKey))
+                request.Headers.TryAddWithoutValidation("X-SunoFlow-Device-Key", $"Bearer {deviceKey}");
+
+            using var resp = await Http.SendAsync(request);
+
+            // 402 means this device may not dictate: the trial ended, the
+            // subscription lapsed, or the account disconnected this PC. This is
+            // deliberately not a soft failure — nothing is pasted and the user
+            // is told why.
+            if ((int)resp.StatusCode == 402)
+            {
+                var body = await resp.Content.ReadAsStringAsync();
+                string message = "Your SunoFlow subscription isn't active.";
+                string code = "not_entitled";
+                try
+                {
+                    var parsed = JsonSerializer.Deserialize<RefusalResponse>(body, JsonOpts);
+                    if (!string.IsNullOrWhiteSpace(parsed?.Message)) message = parsed!.Message;
+                    if (!string.IsNullOrWhiteSpace(parsed?.Error)) code = parsed!.Error;
+                }
+                catch { /* keep the default wording */ }
+                AppLog.Log($"Dictation refused — {code}");
+                return TranscribeOutcome.Refused(message, code);
+            }
+
             if (!resp.IsSuccessStatusCode)
             {
                 AppLog.Log($"Transcribe returned HTTP {resp.StatusCode}");
-                return null;
+                return TranscribeOutcome.Failed();
             }
             var json = await resp.Content.ReadAsStringAsync();
-            return JsonSerializer.Deserialize<TranscriptionResult>(json, JsonOpts);
+            var result = JsonSerializer.Deserialize<TranscriptionResult>(json, JsonOpts);
+            return result == null ? TranscribeOutcome.Failed() : TranscribeOutcome.Ok(result);
         }
         catch (Exception ex)
         {
             AppLog.Log($"Transcribe request failed: {ex.Message}");
-            return null;
+            return TranscribeOutcome.Failed();
         }
     }
 
@@ -187,17 +304,27 @@ internal static class TranscriptionClient
     /// Manually add a correction. Sends <c>frm</c> on the wire (not
     /// <c>from</c>) — see the contract note. Returns the updated list.
     /// </summary>
-    public static async Task<Correction[]> AddCorrectionAsync(string from, string to)
+    /// <param name="kind">Null sends no <c>kind</c> field, leaving the sidecar to
+    /// infer it from the shape of the pair. That is the default: the classifier
+    /// lives in one place rather than being second-guessed here, and the list
+    /// refreshes straight after with the badge showing what it decided.</param>
+    public static async Task<Correction[]> AddCorrectionAsync(string from, string to,
+                                                              CorrectionKind? kind = null)
     {
         var fields = new Dictionary<string, string> { ["frm"] = from, ["to"] = to };
+        if (kind.HasValue) fields["kind"] = CorrectionKinds.Wire(kind.Value);
         var data = await PostFormAsync("corrections/add", fields);
         return DecodeCorrections(data);
     }
 
     /// <summary>Edit an existing correction. Sends <c>frm</c> + <c>key</c>.</summary>
-    public static async Task<Correction[]> UpdateCorrectionAsync(string key, string from, string to)
+    /// <param name="kind">Always worth sending on an edit: fixing a typo in a URL
+    /// should not silently reclassify the entry.</param>
+    public static async Task<Correction[]> UpdateCorrectionAsync(string key, string from, string to,
+                                                                 CorrectionKind? kind = null)
     {
         var fields = new Dictionary<string, string> { ["key"] = key, ["frm"] = from, ["to"] = to };
+        if (kind.HasValue) fields["kind"] = CorrectionKinds.Wire(kind.Value);
         var data = await PostFormAsync("corrections/update", fields);
         return DecodeCorrections(data);
     }

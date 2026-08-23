@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Connect a device — SunoFlow</title>
+<meta name="robots" content="noindex">
+<meta name="theme-color" content="#ffffff">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="assets/styles.css?v=13">
+</head>
+<body>
+<div class="auth-wrap">
+  <div class="auth-col">
+    <a class="auth-mark" href="index.html" aria-label="SunoFlow home">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8.9 4.3c2.8 0 4.7 2 4.7 4.8 0 2.5-1.8 3.7-2.9 5.1-.7.9-.9 1.8-.9 2.9 0 1.5-1.2 2.6-2.6 2.6s-2.6-1.2-2.6-2.6c0-1.2.4-2 .4-3.1 0-1.6-1-2.8-1-4.9 0-2.8 2.1-4.8 4.9-4.8z"/><path d="M8.9 7.4c1.4 0 2.2 1 2.2 2.1 0 1.3-1.1 1.9-1.7 2.8-.4.6-.5 1.2-.5 1.9"/><path d="M16.6 10.2a3.6 3.6 0 0 0 0 5.2"/><path d="M19.9 8.2a6.8 6.8 0 0 0 0 9.2"/></svg><span>SunoFlow</span>
+    </a>
+
+    <h1 id="head">Connect your Mac.</h1>
+    <p class="sub" id="sub">Check the code below matches the one SunoFlow is showing, then approve it.</p>
+
+    <div class="form-msg error" id="msg" role="alert"></div>
+
+    <div id="pane">
+      <div class="field">
+        <label for="code">Code from the app</label>
+        <input id="code" type="text" inputmode="text" autocomplete="off" spellcheck="false"
+               placeholder="XXXX-XXXX" maxlength="9" style="text-transform:uppercase;letter-spacing:.12em;font-size:19px;text-align:center">
+      </div>
+      <button class="btn btn-primary btn-block" type="button" id="approve">Connect this device</button>
+    </div>
+
+    <p class="auth-note" id="note">
+      Only approve a code you can see in the SunoFlow app on the machine you're
+      connecting. A code lets that Mac dictate using your subscription.
+    </p>
+  </div>
+
+  <p class="auth-foot"><a href="dashboard.html">Back to your account</a></p>
+</div>
+
+<script type="module">
+  import { auth } from "./assets/firebase-init.js?v=13";
+  import { onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
+  import { getFunctions, httpsCallable, connectFunctionsEmulator }
+    from "https://www.gstatic.com/firebasejs/10.14.1/firebase-functions.js";
+
+  const el = (id) => document.getElementById(id);
+  const msg = el("msg"), input = el("code"), btn = el("approve");
+
+  const fns = getFunctions(undefined, "asia-south1");
+  if (["localhost", "127.0.0.1"].includes(location.hostname)) {
+    connectFunctionsEmulator(fns, "127.0.0.1", 5299);
+  }
+
+  // Prefill from the link the app opened, so there is usually nothing to type.
+  const fromUrl = new URLSearchParams(location.search).get("code");
+  if (fromUrl) input.value = fromUrl.toUpperCase();
+
+  const show = (text, ok = false) => {
+    msg.textContent = text;
+    msg.className = "form-msg show " + (ok ? "ok" : "error");
+  };
+
+  // Bounce to sign-in at most once. If we come back still signed out, something
+  // is wrong with the session and redirecting again would loop forever — so say
+  // so and let the user click, rather than trapping them.
+  const BOUNCED = "connectBouncedToLogin";
+
+  onAuthStateChanged(auth, (user) => {
+    if (user) {
+      sessionStorage.removeItem(BOUNCED);
+      btn.disabled = false;
+      return;
+    }
+    if (sessionStorage.getItem(BOUNCED)) {
+      show("You're not signed in. Open the sign-in page, then come back to this link.");
+      el("pane").innerHTML =
+        '<a class="btn btn-primary btn-block" href="login.html">Go to sign in</a>';
+      return;
+    }
+    sessionStorage.setItem(BOUNCED, "1");
+    sessionStorage.setItem("afterLogin", location.pathname + location.search);
+    location.replace("login.html");
+  });
+
+  input.addEventListener("input", () => {
+    let v = input.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8);
+    if (v.length > 4) v = v.slice(0, 4) + "-" + v.slice(4);
+    input.value = v;
+  });
+
+  btn.disabled = true;   // enabled once auth state resolves
+
+  btn.addEventListener("click", async () => {
+    const code = input.value.trim().toUpperCase();
+    if (code.length < 9) { show("Enter the full code from the app."); return; }
+
+    msg.className = "form-msg";
+    btn.disabled = true;
+    btn.textContent = "Connecting…";
+    try {
+      const approve = httpsCallable(fns, "approveDevice");
+      const res = await approve({ userCode: code });
+      const name = res.data?.device?.name || "Your Mac";
+      el("head").textContent = "Connected.";
+      el("sub").textContent = `${name} can now dictate with your account. You can close this tab — the app has already picked it up.`;
+      el("pane").innerHTML = '<a class="btn btn-quiet btn-block" href="dashboard.html">See your devices</a>';
+      el("note").textContent = "";
+    } catch (err) {
+      show(err?.message || "Couldn't connect that device.");
+      btn.disabled = false;
+      btn.textContent = "Connect this device";
+    }
+  });
+</script>
+</body>
+</html>

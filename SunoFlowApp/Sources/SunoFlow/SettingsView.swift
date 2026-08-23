@@ -11,8 +11,8 @@ final class HotkeyRecorderNSView: NSView {
     var modifiers: UInt32 = DefaultHotkey.modifiers
     var onCapture: ((UInt32, UInt32) -> Void)?
 
-    /// The brand violet, matched to `Theme.violet` on the SwiftUI side.
-    private static let accent = NSColor(calibratedRed: 0.545, green: 0.486, blue: 1.0, alpha: 1.0)
+    /// The brand accent, matched to `Theme.accent` on the SwiftUI side.
+    private static let accent = NSColor(calibratedRed: 0.310, green: 0.286, blue: 0.710, alpha: 1.0)
 
     private(set) var isRecording = false {
         didSet { needsDisplay = true }
@@ -146,7 +146,31 @@ struct HotkeyRecorder: NSViewRepresentable {
 
 // MARK: - Corrections manager
 
-/// Manages the learned-corrections list inside Settings: search, edit, add, delete.
+/// A small pill naming which half of the dictionary an entry belongs to.
+///
+/// Worth the pixels because the two kinds behave differently at dictation time:
+/// a spelling is swapped in on every dictation, while a shorthand value only
+/// lands where the model judges you were actually giving it. Without the badge
+/// that difference is invisible until it surprises someone.
+private struct KindBadge: View {
+    let kind: CorrectionKind
+
+    var body: some View {
+        Text(kind.label)
+            .font(.system(size: 9.5, weight: .semibold))
+            .tracking(0.2)
+            .foregroundStyle(kind == .expansion ? Theme.accent : Theme.faint)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2.5)
+            .background(
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .fill(kind == .expansion ? Theme.accentSoft : Theme.wash)
+            )
+            .help(kind.blurb)
+    }
+}
+
+/// Manages the dictionary inside Settings: search, edit, add, delete.
 private struct CorrectionsManager: View {
     @Binding var corrections: [Correction]
     @Binding var sidecarOnline: Bool
@@ -156,9 +180,13 @@ private struct CorrectionsManager: View {
     @State private var editingKey: String?
     @State private var editFrom = ""
     @State private var editTo = ""
+    @State private var editKind: CorrectionKind = .correction
     @State private var addingNew = false
     @State private var newFrom = ""
     @State private var newTo = ""
+    /// nil = let the sidecar classify it. The default, so the rule that decides
+    /// lives in one place instead of being guessed at again here.
+    @State private var newKind: CorrectionKind?
     @State private var hoveredKey: String?
 
     private var filtered: [Correction] {
@@ -166,21 +194,25 @@ private struct CorrectionsManager: View {
         let q = searchText.lowercased()
         return corrections.filter {
             $0.from.lowercased().contains(q) || $0.to.lowercased().contains(q)
+                || $0.resolvedKind.label.lowercased().contains(q)
         }
     }
 
+    private var spellingCount: Int { corrections.filter { $0.resolvedKind == .correction }.count }
+    private var shorthandCount: Int { corrections.count - spellingCount }
+
     var body: some View {
         if !sidecarOnline {
-            SunoNotice(text: "Engine offline — start the engine from Overview to manage corrections.")
+            SunoNotice(text: "The engine is offline — start it from Overview to manage your dictionary.")
+                .padding(.vertical, 16)
         } else {
-            VStack(alignment: .leading, spacing: 14) {
-                // Search + add
+            VStack(alignment: .leading, spacing: 0) {
                 HStack(spacing: 10) {
                     HStack(spacing: 7) {
                         Image(systemName: "magnifyingglass")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                        TextField("Search corrections…", text: $searchText)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(Theme.faint)
+                        TextField("Search your dictionary…", text: $searchText)
                             .textFieldStyle(.plain)
                             .font(.sunoBody)
                         if !searchText.isEmpty {
@@ -192,46 +224,45 @@ private struct CorrectionsManager: View {
                     }
                     .padding(.horizontal, 11)
                     .padding(.vertical, 7)
-                    .sunoWell(radius: Theme.Radius.control)
+                    .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(Theme.wash))
 
-                    Button {
+                    Button(addingNew ? "Cancel" : "Add entry") {
                         withAnimation(Theme.spring) { addingNew.toggle() }
-                    } label: {
-                        Label(addingNew ? "Close" : "Add", systemImage: addingNew ? "xmark" : "plus")
                     }
                     .buttonStyle(.sunoSecondary)
                 }
+                .padding(.vertical, 14)
 
                 if addingNew {
                     addRow
-                        .transition(.opacity.combined(with: .move(edge: .top)))
                 }
+
+                Rule()
 
                 if corrections.isEmpty {
                     emptyState
                 } else {
-                    ScrollView {
-                        VStack(spacing: 6) {
-                            ForEach(filtered) { correction in
-                                if editingKey == correction.key {
-                                    editRow(correction)
-                                } else {
-                                    displayRow(correction)
-                                }
+                    VStack(spacing: 0) {
+                        ForEach(filtered) { correction in
+                            if editingKey == correction.key {
+                                editRow(correction)
+                            } else {
+                                displayRow(correction)
                             }
                         }
-                        .padding(.vertical, 2)
                     }
-                    .frame(maxHeight: 260)
+
+                    Rule(strong: true)
 
                     HStack {
-                        Text("\(corrections.count) correction\(corrections.count == 1 ? "" : "s") learned")
+                        Text(summary)
                             .font(.sunoCaption)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Theme.faint)
                         Spacer()
                         Button("Clear all", action: clearAll)
                             .buttonStyle(.sunoGhost(Theme.danger))
                     }
+                    .padding(.top, 14)
                 }
             }
             .animation(Theme.spring, value: addingNew)
@@ -239,109 +270,143 @@ private struct CorrectionsManager: View {
         }
     }
 
+    /// "3 spellings · 1 shorthand", dropping whichever half is empty.
+    private var summary: String {
+        func plural(_ n: Int, _ word: String) -> String { "\(n) \(word)\(n == 1 ? "" : "s")" }
+        var parts: [String] = []
+        if spellingCount > 0 { parts.append(plural(spellingCount, "spelling")) }
+        if shorthandCount > 0 { parts.append(plural(shorthandCount, "shorthand entry")) }
+        return parts.isEmpty ? "Nothing saved yet" : parts.joined(separator: " · ")
+    }
+
     private var emptyState: some View {
-        VStack(spacing: 8) {
-            IconChip(systemImage: "text.badge.checkmark", size: 40)
-                .opacity(0.85)
-            Text("No corrections yet")
-                .font(.sunoSubhead)
-            Text("Edit the text SunoFlow pastes and it learns the fix automatically — or add one by hand.")
+        VStack(alignment: .leading, spacing: 5) {
+            Text("Nothing saved yet")
+                .font(.sunoRowTitle)
+                .foregroundStyle(Theme.ink)
+            Text("Edit the text SunoFlow pastes and it remembers the fix — or add a spelling or a shorthand by hand.")
                 .font(.sunoCaption)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
+                .foregroundStyle(Theme.faint)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 26)
-        .padding(.horizontal, 20)
-        .sunoWell(radius: Theme.Radius.control)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 22)
     }
 
     // MARK: Rows
 
     private func displayRow(_ c: Correction) -> some View {
         let hovered = hoveredKey == c.key
-        return HStack(spacing: 10) {
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 8) {
-                    Text(c.from)
-                        .font(.sunoMono)
-                        .foregroundStyle(.secondary)
-                    Image(systemName: "arrow.right")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundStyle(Theme.violet)
-                    Text(c.to)
-                        .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
-                }
+        return VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Text(c.from)
+                    .font(.sunoMono)
+                    .foregroundStyle(Theme.faint)
+                Image(systemName: "arrow.right")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(Theme.faint.opacity(0.7))
+                Text(c.to)
+                    .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(Theme.ink)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+
+                KindBadge(kind: c.resolvedKind)
+
                 if c.count > 1 {
                     Text("seen \(c.count)×")
-                        .font(.sunoMicro)
-                        .foregroundStyle(.secondary)
+                        .font(.sunoCaption)
+                        .foregroundStyle(Theme.faint)
+                        .padding(.leading, 4)
                 }
+
+                Spacer(minLength: 12)
+
+                HStack(spacing: 2) {
+                    Button { startEdit(c) } label: { Image(systemName: "pencil") }
+                        .buttonStyle(.sunoIcon(Theme.accent))
+                        .help("Edit")
+                    Button { delete(c) } label: { Image(systemName: "trash") }
+                        .buttonStyle(.sunoIcon(Theme.danger))
+                        .help("Delete")
+                }
+                .opacity(hovered ? 1 : 0)
             }
-            Spacer(minLength: 0)
-            HStack(spacing: 2) {
-                Button { startEdit(c) } label: { Image(systemName: "pencil") }
-                    .buttonStyle(.sunoIcon(Theme.violet))
-                    .help("Edit")
-                Button { delete(c) } label: { Image(systemName: "trash") }
-                    .buttonStyle(.sunoIcon(Theme.danger))
-                    .help("Delete")
-            }
-            .opacity(hovered ? 1 : 0.35)
+            .padding(.vertical, 11)
+            .background(hovered ? Theme.wash : Color.clear)
+            .animation(Theme.quick, value: hovered)
+            .onHover { hoveredKey = $0 ? c.key : (hoveredKey == c.key ? nil : hoveredKey) }
+
+            Rule()
         }
-        .padding(.vertical, 8)
-        .padding(.horizontal, 12)
-        .sunoWell(tint: hovered ? Theme.violet : nil)
-        .animation(Theme.quick, value: hovered)
-        .onHover { hoveredKey = $0 ? c.key : (hoveredKey == c.key ? nil : hoveredKey) }
     }
 
     private func editRow(_ c: Correction) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            VStack(alignment: .leading, spacing: 7) {
-                TextField("From", text: $editFrom)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.sunoBody)
-                TextField("To", text: $editTo)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.sunoBody)
+        VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 10) {
+                    TextField(editKind.fromPlaceholder, text: $editFrom)
+                        .textFieldStyle(SunoFieldStyle())
+                    TextField(editKind.toPlaceholder, text: $editTo)
+                        .textFieldStyle(SunoFieldStyle())
+                    Button("Save") { saveEdit(c) }
+                        .buttonStyle(.sunoPrimary)
+                    Button("Cancel") { editingKey = nil }
+                        .buttonStyle(.sunoGhost)
+                }
+                HStack(spacing: 8) {
+                    // Prefilled with the entry's current kind, never re-inferred:
+                    // fixing a typo in a URL should not silently reclassify it.
+                    Picker("", selection: $editKind) {
+                        ForEach(CorrectionKind.allCases) { kind in
+                            Text(kind.label).tag(kind)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .frame(width: 132)
+
+                    Text(editKind.blurb)
+                        .font(.sunoCaption)
+                        .foregroundStyle(Theme.faint)
+                    Spacer(minLength: 0)
+                }
             }
-            VStack(spacing: 6) {
-                Button("Save") { saveEdit(c) }
-                    .buttonStyle(.sunoPrimary)
-                Button("Cancel") { editingKey = nil }
-                    .buttonStyle(.sunoGhost)
-            }
+            .padding(.vertical, 10)
+            Rule()
         }
-        .padding(12)
-        .sunoWell(tint: Theme.violet)
     }
 
     private var addRow: some View {
-        HStack(alignment: .top, spacing: 10) {
-            VStack(alignment: .leading, spacing: 7) {
-                TextField("From — what the model mishears", text: $newFrom)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.sunoBody)
-                TextField("To — the correct text", text: $newTo)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.sunoBody)
-            }
-            VStack(spacing: 6) {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                TextField(newKind?.fromPlaceholder ?? "What you say", text: $newFrom)
+                    .textFieldStyle(SunoFieldStyle())
+                TextField(newKind?.toPlaceholder ?? "What should be written instead", text: $newTo)
+                    .textFieldStyle(SunoFieldStyle())
                 Button("Add") { addCorrection() }
                     .buttonStyle(.sunoPrimary)
                     .disabled(newFrom.isEmpty || newTo.isEmpty)
-                Button("Cancel") {
-                    withAnimation(Theme.spring) { addingNew = false }
-                    newFrom = ""
-                    newTo = ""
+            }
+            HStack(spacing: 8) {
+                Picker("", selection: $newKind) {
+                    Text("Detect automatically").tag(CorrectionKind?.none)
+                    ForEach(CorrectionKind.allCases) { kind in
+                        Text(kind.label).tag(CorrectionKind?.some(kind))
+                    }
                 }
-                .buttonStyle(.sunoGhost)
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .frame(width: 175)
+
+                Text(newKind?.blurb
+                     ?? "Paste a link or handle and it becomes a shorthand; a respelling stays a spelling.")
+                    .font(.sunoCaption)
+                    .foregroundStyle(Theme.faint)
+                Spacer(minLength: 0)
             }
         }
-        .padding(12)
-        .sunoWell(tint: Theme.violet)
+        .padding(.bottom, 14)
     }
 
     // MARK: Actions
@@ -350,13 +415,14 @@ private struct CorrectionsManager: View {
         editingKey = c.key
         editFrom = c.from
         editTo = c.to
+        editKind = c.resolvedKind
     }
 
     private func saveEdit(_ c: Correction) {
         let from = editFrom.trimmingCharacters(in: .whitespacesAndNewlines)
         let to = editTo.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !from.isEmpty, !to.isEmpty else { editingKey = nil; return }
-        TranscriptionClient.updateCorrection(key: c.key, from: from, to: to) { updated in
+        TranscriptionClient.updateCorrection(key: c.key, from: from, to: to, kind: editKind) { updated in
             DispatchQueue.main.async {
                 corrections = updated
                 editingKey = nil
@@ -380,12 +446,13 @@ private struct CorrectionsManager: View {
         let from = newFrom.trimmingCharacters(in: .whitespacesAndNewlines)
         let to = newTo.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !from.isEmpty, !to.isEmpty else { return }
-        TranscriptionClient.addCorrection(from: from, to: to) { updated in
+        TranscriptionClient.addCorrection(from: from, to: to, kind: newKind) { updated in
             DispatchQueue.main.async {
                 corrections = updated
                 addingNew = false
                 newFrom = ""
                 newTo = ""
+                newKind = nil
             }
         }
     }
@@ -395,18 +462,18 @@ private struct CorrectionsManager: View {
 
 /// Sidebar tabs for the dashboard.
 private enum Tab: String, CaseIterable, Identifiable {
-    case overview, general, microphone, model, corrections, cleanup, about
+    case overview, account, general, microphone, model, corrections, about
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
         case .overview: return "Overview"
+        case .account: return "Account"
         case .general: return "General"
         case .microphone: return "Microphone"
         case .model: return "Speech Model"
-        case .corrections: return "Corrections"
-        case .cleanup: return "AI Cleanup"
+        case .corrections: return "Dictionary"
         case .about: return "About"
         }
     }
@@ -414,11 +481,11 @@ private enum Tab: String, CaseIterable, Identifiable {
     var systemImage: String {
         switch self {
         case .overview: return "square.grid.2x2.fill"
+        case .account: return "person.crop.circle"
         case .general: return "gearshape.fill"
         case .microphone: return "mic.fill"
         case .model: return "waveform.badge.magnifyingglass"
         case .corrections: return "text.badge.checkmark"
-        case .cleanup: return "sparkles"
         case .about: return "info.circle.fill"
         }
     }
@@ -426,12 +493,12 @@ private enum Tab: String, CaseIterable, Identifiable {
     var subtitle: String {
         switch self {
         case .overview: return "System health and quick actions"
+        case .account: return "Your subscription and this device"
         case .general: return "Launch, hotkey, and recording behaviour"
         case .microphone: return "Choose which input SunoFlow listens to"
-        case .model: return "The on-device speech-to-text model"
-        case .corrections: return "Text substitutions SunoFlow has learned"
-        case .cleanup: return "Hosted AI transcript polishing"
-        case .about: return "Version, endpoints, and resources"
+        case .model: return "The speech-to-text model"
+        case .corrections: return "Spellings it has learned, and shorthand you add"
+        case .about: return "Version and resources"
         }
     }
 }
@@ -440,78 +507,7 @@ private enum Tab: String, CaseIterable, Identifiable {
 
 /// A card showing the health of one subsystem, with a live status dot and an
 /// optional inline recovery action.
-private struct StatusCard: View {
-    let title: String
-    let systemImage: String
-    let ok: Bool
-    let okText: String
-    let failText: String
-    var hint: String? = nil
-    var action: (() -> Void)? = nil
-    var actionLabel: String? = nil
-    var actionBusy: Bool = false
 
-    @State private var hovering = false
-
-    private var tint: Color { Theme.status(ok) }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top, spacing: 12) {
-                IconChip(
-                    systemImage: systemImage,
-                    gradient: Theme.gradient(for: tint),
-                    size: 38,
-                    glowColor: tint
-                )
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(title)
-                        .font(.sunoSubhead)
-                    HStack(spacing: 2) {
-                        PulseDot(color: tint, active: ok, size: 5)
-                        Text(ok ? okText : failText)
-                            .font(.sunoCaption)
-                            .foregroundStyle(tint)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                    }
-                }
-                Spacer(minLength: 0)
-            }
-
-            if let hint {
-                Text(hint)
-                    .font(.sunoCaption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            Spacer(minLength: 0)
-
-            if let action, let actionLabel {
-                Button(action: action) {
-                    HStack(spacing: 6) {
-                        if actionBusy {
-                            ProgressView().controlSize(.small).scaleEffect(0.7)
-                                .frame(width: 11, height: 11)
-                        } else {
-                            Image(systemName: "bolt.fill").font(.system(size: 10, weight: .bold))
-                        }
-                        Text(actionLabel)
-                    }
-                }
-                .buttonStyle(.sunoPrimary)
-                .disabled(actionBusy)
-            }
-        }
-        .padding(Theme.Space.card)
-        .frame(maxWidth: .infinity, minHeight: 118, alignment: .topLeading)
-        .sunoSurface(hovering: hovering, interactive: true)
-        .scaleEffect(hovering ? 1.01 : 1)
-        .animation(Theme.spring, value: hovering)
-        .onHover { hovering = $0 }
-    }
-}
 
 // MARK: - Dashboard window content
 
@@ -519,15 +515,15 @@ struct SettingsView: View {
     @ObservedObject private var prefs = Preferences.shared
 
     @State private var selectedTab: Tab = .overview
+    @StateObject private var account = AccountManager.shared
     @State private var hoveredTab: Tab?
     @Namespace private var navPill
 
     @State private var inputDevices: [AudioInputDevice] = []
     @State private var micIsBluetooth = false
 
-    // Hosted cleanup gateway reachability (replaces local-Ollama status).
+    // Sidecar (transcription engine) reachability.
     @State private var sidecarOnline = false
-    @State private var cleanupGatewayOnline = false
 
     // Permission status.
     @State private var micPermission: Bool = false
@@ -559,17 +555,17 @@ struct SettingsView: View {
 
     /// Number of subsystems that are healthy (for the overview header).
     private var healthyCount: Int {
-        [sidecarOnline, cleanupGatewayOnline, micPermission, accessibilityPermission].filter { $0 }.count
+        [sidecarOnline, micPermission, accessibilityPermission].filter { $0 }.count
     }
 
-    private var allReady: Bool { healthyCount == 4 }
+    private var allReady: Bool { healthyCount == 3 }
 
     private var heroSubtitle: String {
         guard !allReady else {
             let combo = KeyCombo.display(keyCode: prefs.hotkeyKeyCode, modifiers: prefs.hotkeyModifiers)
             return "Press \(combo) anywhere to dictate."
         }
-        let pending = 4 - healthyCount
+        let pending = 3 - healthyCount
         return pending == 1
             ? "1 item still needs attention before dictation works everywhere."
             : "\(pending) items still need attention before dictation works everywhere."
@@ -581,7 +577,10 @@ struct SettingsView: View {
             content
         }
         .frame(minWidth: 880, minHeight: 620)
-        .background(Theme.canvas)
+        .background(Theme.paper)
+        // Toggles, pickers and sliders are system controls; tinting them here
+        // stops macOS colouring them its own accent blue mid-page.
+        .tint(Theme.accent)
         .onAppear(perform: load)
     }
 
@@ -589,56 +588,47 @@ struct SettingsView: View {
 
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Brand mark. The top padding clears the (hidden) title bar so the
-            // traffic lights float over the sidebar instead of over content.
-            HStack(spacing: 11) {
-                IconChip(systemImage: "waveform", size: 34)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("SunoFlow")
-                        .font(.system(size: 15, weight: .bold, design: .rounded))
-                    Text("Voice dictation")
-                        .font(.sunoMicro)
-                        .foregroundStyle(.secondary)
-                }
+            // Brand. The top padding clears the hidden title bar so the traffic
+            // lights float over the navigation column.
+            HStack(spacing: 9) {
+                Image(nsImage: BrandMark.image(size: 17))
+                    .renderingMode(.template)
+                    .foregroundStyle(Theme.accent)
+                Text("SunoFlow")
+                    .font(.system(size: 14.5, weight: .semibold))
+                    .tracking(-0.2)
+                    .foregroundStyle(Theme.ink)
                 Spacer(minLength: 0)
             }
-            .padding(.horizontal, 18)
-            .padding(.top, 42)
-            .padding(.bottom, Theme.Space.lg)
+            .padding(.horizontal, 20)
+            .padding(.top, 46)
+            .padding(.bottom, 20)
 
-            // Navigation
-            VStack(spacing: 3) {
+            VStack(spacing: 0) {
                 ForEach(Tab.allCases) { tab in
                     navButton(tab)
                 }
             }
-            .padding(.horizontal, 12)
 
-            Spacer(minLength: Theme.Space.lg)
+            Spacer(minLength: 20)
 
-            // Footer: live engine status
-            VStack(alignment: .leading, spacing: 0) {
-                Divider().opacity(0.5)
-                HStack(spacing: 4) {
-                    PulseDot(
-                        color: sidecarOnline ? Theme.success : Theme.warning,
-                        active: sidecarOnline,
-                        size: 6
-                    )
-                    Text(sidecarOnline ? "Engine online" : "Engine offline")
-                        .font(.sunoCaption)
-                        .foregroundStyle(.secondary)
-                    Spacer(minLength: 0)
-                }
-                .padding(.horizontal, 14)
-                .padding(.top, 12)
-                .padding(.bottom, 16)
+            Rule()
+            HStack(spacing: 7) {
+                Circle()
+                    .fill(sidecarOnline ? Theme.success : Theme.warning)
+                    .frame(width: 6, height: 6)
+                Text(sidecarOnline ? "Engine online" : "Engine offline")
+                    .font(.sunoCaption)
+                    .foregroundStyle(Theme.faint)
+                Spacer(minLength: 0)
             }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 14)
         }
-        .frame(width: 232, alignment: .top)
-        .background(GlassBackground(material: .sidebar))
+        .frame(width: 210, alignment: .top)
+        .background(Theme.shell)
         .overlay(alignment: .trailing) {
-            Rectangle().fill(Theme.hairline).frame(width: 1)
+            Rectangle().fill(Theme.ruleStrong).frame(width: 1)
         }
     }
 
@@ -651,33 +641,24 @@ struct SettingsView: View {
         } label: {
             HStack(spacing: 11) {
                 Image(systemName: tab.systemImage)
-                    .font(.system(size: 12.5, weight: .semibold))
-                    .frame(width: 18)
-                    .foregroundStyle(selected
-                        ? AnyShapeStyle(Theme.brand)
-                        : AnyShapeStyle(Color.secondary))
+                    .font(.system(size: 12, weight: .medium))
+                    .frame(width: 16)
+                    .foregroundStyle(selected ? Theme.accent : Theme.faint)
                 Text(tab.title)
-                    .font(.system(size: 12.5,
-                                  weight: selected ? .semibold : .medium,
-                                  design: .rounded))
-                    .foregroundStyle(selected ? Color.primary : Color.secondary)
+                    .font(.system(size: 13, weight: selected ? .semibold : .regular))
+                    .foregroundStyle(selected ? Theme.ink : Theme.body)
                 Spacer(minLength: 0)
             }
             .padding(.vertical, 8)
-            .padding(.horizontal, 11)
-            .background {
-                ZStack {
+            .padding(.horizontal, 20)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(alignment: .leading) {
+                ZStack(alignment: .leading) {
                     if selected {
-                        RoundedRectangle(cornerRadius: 9, style: .continuous)
-                            .fill(Theme.brandWash)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                                    .strokeBorder(Theme.violet.opacity(0.28), lineWidth: 1)
-                            )
-                            .matchedGeometryEffect(id: "navPill", in: navPill)
+                        Theme.accentSoft
+                        Rectangle().fill(Theme.accent).frame(width: 2)
                     } else if hovered {
-                        RoundedRectangle(cornerRadius: 9, style: .continuous)
-                            .fill(Color.primary.opacity(0.06))
+                        Theme.rule.opacity(0.55)
                     }
                 }
             }
@@ -696,266 +677,250 @@ struct SettingsView: View {
 
     private var content: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: Theme.Space.lg) {
+            VStack(alignment: .leading, spacing: 0) {
                 header
 
                 Group {
                     switch selectedTab {
                     case .overview: overviewSection
+                    case .account: accountSection
                     case .general: generalSection
                     case .microphone: microphoneSection
                     case .model: modelSection
                     case .corrections: correctionsSection
-                    case .cleanup: cleanupSection
                     case .about: aboutSection
                     }
                 }
                 .id(selectedTab)
-                .transition(.asymmetric(
-                    insertion: .opacity.combined(with: .offset(y: 12)),
-                    removal: .opacity
-                ))
+                .transition(.opacity)
             }
             .padding(.horizontal, Theme.Space.page)
-            .padding(.top, 38)
-            .padding(.bottom, Theme.Space.xl)
+            .padding(.bottom, 56)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .background(Theme.paper)
         .animation(Theme.gentle, value: selectedTab)
     }
 
     private var header: some View {
-        HStack(alignment: .center, spacing: 16) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(selectedTab.title)
-                    .font(.sunoDisplay)
-                Text(selectedTab.subtitle)
-                    .font(.sunoCaption)
-                    .foregroundStyle(.secondary)
-            }
-            Spacer(minLength: 0)
-            if selectedTab == .overview {
-                SunoBadge(
-                    text: allReady ? "All systems ready" : "\(healthyCount) of 4 ready",
-                    color: allReady ? Theme.success : Theme.warning,
-                    systemImage: allReady ? "checkmark.circle.fill" : "exclamationmark.circle.fill"
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .firstTextBaseline, spacing: 16) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(selectedTab.title)
+                        .font(.sunoDisplay)
+                        .tracking(-0.7)
+                        .foregroundStyle(Theme.ink)
+                    Text(selectedTab.subtitle)
+                        .font(.sunoCaption)
+                        .foregroundStyle(Theme.faint)
+                }
+                Spacer(minLength: 12)
+                StatusText(
+                    text: allReady ? "All systems ready" : "\(3 - healthyCount) need attention",
+                    color: allReady ? Theme.success : Theme.warning
                 )
             }
+            .padding(.top, 46)
+            .padding(.bottom, 22)
+
+            Rule(strong: true)
         }
     }
 
     // MARK: Overview / Dashboard
 
     private var overviewSection: some View {
-        VStack(alignment: .leading, spacing: Theme.Space.cardGap) {
-            heroBanner
+        VStack(alignment: .leading, spacing: 0) {
+            overviewLead
+            statusGroup
+            setupGroup
+            actionNeededGroup
+        }
+    }
 
-            LazyVGrid(
-                columns: [GridItem(.adaptive(minimum: 260), spacing: Theme.Space.md)],
-                spacing: Theme.Space.md
-            ) {
-                StatusCard(
-                    title: "Transcription Engine",
-                    systemImage: "cpu.fill",
-                    ok: sidecarOnline,
-                    okText: "Online — Parakeet TDT v2",
-                    failText: "Offline",
-                    hint: sidecarOnline
-                        ? "Speech runs entirely on this Mac."
-                        : "Start the sidecar to enable dictation.",
-                    action: sidecarOnline ? nil : startEngine,
-                    actionLabel: startingEngine ? "Starting…" : "Start engine",
-                    actionBusy: startingEngine
-                )
-                StatusCard(
-                    title: "AI Cleanup",
-                    systemImage: "sparkles",
-                    ok: cleanupGatewayOnline,
-                    okText: "Cleanup service reachable",
-                    failText: "Cleanup service offline",
-                    hint: "Transcript polishing runs on a hosted service — no local setup needed."
-                )
-                StatusCard(
-                    title: "Microphone",
-                    systemImage: "mic.fill",
-                    ok: micPermission,
-                    okText: "Permission granted",
-                    failText: "Permission needed",
-                    hint: micPermission
-                        ? micDisplayName
-                        : "Grant access in System Settings → Privacy & Security."
-                )
-                StatusCard(
-                    title: "Accessibility",
-                    systemImage: "keyboard.fill",
-                    ok: accessibilityPermission,
-                    okText: "Permission granted",
-                    failText: "Permission needed",
-                    hint: "Required to insert text into other apps."
-                )
-            }
+    /// The one sentence that answers "is this thing working?".
+    private var overviewLead: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(allReady ? "Everything's ready" : "Almost there")
+                .font(.sunoLead)
+                .tracking(-0.3)
+                .foregroundStyle(Theme.ink)
+            Text(heroSubtitle)
+                .font(.sunoBody)
+                .foregroundStyle(Theme.body)
+                .fixedSize(horizontal: false, vertical: true)
 
-            // Model download banner — surfaces on the overview when the STT
-            // model isn't ready, with a one-click jump to the Model tab.
             if sidecarOnline, let st = modelStatus, !st.model_loaded {
                 modelBanner(st)
+                    .padding(.top, 14)
             }
+        }
+        .padding(.top, 28)
+    }
 
-            currentSetupCard
+    private var statusGroup: some View {
+        VStack(spacing: 0) {
+            SectionLabel(text: "Status", trailing: "\(healthyCount) of 3 ready")
+            Rule(strong: true)
+            statusRow(
+                title: "Transcription engine",
+                systemImage: "cpu",
+                ok: sidecarOnline,
+                okText: "Online",
+                failText: "Offline",
+                hint: sidecarOnline
+                    ? "Speech is transcribed entirely on this Mac."
+                    : "Start the engine to enable dictation.",
+                action: sidecarOnline ? nil : startEngine,
+                actionLabel: startingEngine ? "Starting…" : "Start engine"
+            )
+            statusRow(
+                title: "Microphone",
+                systemImage: "mic",
+                ok: micPermission,
+                okText: "Allowed",
+                failText: "Not allowed",
+                hint: micPermission
+                    ? micDisplayName
+                    : "Grant access in System Settings → Privacy & Security."
+            )
+            statusRow(
+                title: "Accessibility",
+                systemImage: "keyboard",
+                ok: accessibilityPermission,
+                okText: "Allowed",
+                failText: "Not allowed",
+                hint: "Required so SunoFlow can type into other apps.",
+                divider: false
+            )
+            Rule(strong: true)
+        }
+    }
 
-            // Permission warnings
-            if !micPermission || !accessibilityPermission
-                || (prefs.screenContextEnabled && !screenRecordingPermission) {
-                SunoSection(
-                    title: "Action needed",
-                    systemImage: "exclamationmark.triangle.fill",
-                    subtitle: "SunoFlow can't do everything until these are granted",
-                    tint: Theme.gradient(for: Theme.warning)
-                ) {
-                    VStack(alignment: .leading, spacing: 10) {
-                        if !micPermission {
-                            SunoNotice(text: "Grant microphone permission in System Settings → Privacy & Security → Microphone.")
-                        }
-                        if !accessibilityPermission {
-                            SunoNotice(text: "Grant Accessibility permission in System Settings → Privacy & Security → Accessibility for text insertion to work.")
-                        }
-                        if prefs.screenContextEnabled, !screenRecordingPermission {
-                            SunoNotice(text: "Grant Screen Recording permission in System Settings → Privacy & Security → Screen Recording for screen context to work.")
-                        }
+    private func statusRow(
+        title: String,
+        systemImage: String,
+        ok: Bool,
+        okText: String,
+        failText: String,
+        hint: String,
+        action: (() -> Void)? = nil,
+        actionLabel: String = "",
+        divider: Bool = true
+    ) -> some View {
+        SunoRow(
+            title: title,
+            subtitle: hint,
+            systemImage: systemImage,
+            iconColor: ok ? Theme.success : Theme.warning,
+            divider: divider
+        ) {
+            HStack(spacing: 14) {
+                if let action, !ok {
+                    Button(action: action) {
+                        Text(actionLabel)
+                    }
+                    .buttonStyle(.sunoPrimary)
+                    .disabled(startingEngine)
+                }
+                StatusText(
+                    text: ok ? okText : failText,
+                    color: ok ? Theme.success : Theme.warning
+                )
+            }
+        }
+    }
+
+    private var setupGroup: some View {
+        VStack(spacing: 0) {
+            SectionLabel(text: "Current setup")
+            Rule(strong: true)
+            ValueRow(
+                label: "Dictation hotkey",
+                value: KeyCombo.display(keyCode: prefs.hotkeyKeyCode, modifiers: prefs.hotkeyModifiers),
+                systemImage: "command"
+            )
+            ValueRow(label: "Microphone", value: micDisplayName, systemImage: "mic")
+            ValueRow(label: "Auto-stop recording", value: "\(prefs.maxRecordingSeconds) seconds", systemImage: "timer")
+            ValueRow(
+                label: "Screen context",
+                value: prefs.screenContextEnabled ? "On" : "Off",
+                systemImage: "rectangle.on.rectangle",
+                valueColor: prefs.screenContextEnabled ? Theme.success : Theme.faint
+            )
+            ValueRow(
+                label: "Launch at login",
+                value: launchAtLogin ? "Enabled" : "Disabled",
+                systemImage: "power",
+                valueColor: launchAtLogin ? Theme.success : Theme.faint
+            )
+            ValueRow(
+                label: "Dictionary entries",
+                value: "\(corrections.count)",
+                systemImage: "text.badge.checkmark",
+                divider: false
+            )
+            Rule(strong: true)
+        }
+    }
+
+    @ViewBuilder
+    private var actionNeededGroup: some View {
+        let needsMic = !micPermission
+        let needsAX = !accessibilityPermission
+        let needsScreen = prefs.screenContextEnabled && !screenRecordingPermission
+
+        if needsMic || needsAX || needsScreen {
+            VStack(alignment: .leading, spacing: 0) {
+                SectionLabel(text: "Action needed")
+                Rule(strong: true)
+                VStack(alignment: .leading, spacing: 12) {
+                    if needsMic {
+                        SunoNotice(text: "Grant microphone access in System Settings → Privacy & Security → Microphone.")
+                    }
+                    if needsAX {
+                        SunoNotice(text: "Grant Accessibility access in System Settings → Privacy & Security → Accessibility so SunoFlow can insert text.")
+                    }
+                    if needsScreen {
+                        SunoNotice(text: "Grant Screen Recording access in System Settings → Privacy & Security → Screen Recording for screen context to work.")
                     }
                 }
+                .padding(.vertical, 16)
+                Rule(strong: true)
             }
         }
     }
 
     /// The big "how are we doing" strip at the top of the overview.
-    private var heroBanner: some View {
-        HStack(spacing: 18) {
-            healthRing
 
-            VStack(alignment: .leading, spacing: 5) {
-                Text(allReady ? "Everything's ready" : "Almost there")
-                    .font(.sunoTitle)
-                Text(heroSubtitle)
-                    .font(.sunoCaption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(Theme.Space.card)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            ZStack {
-                RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous)
-                    .fill(Theme.surface)
-                RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous)
-                    .fill(Theme.brandWash.opacity(0.6))
-                RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous)
-                    .strokeBorder(Theme.violet.opacity(0.22), lineWidth: 1)
-            }
-            .shadow(color: Theme.violet.opacity(0.14), radius: 16, y: 6)
-        )
-    }
 
     /// Circular gauge of healthy subsystems, animated as services come up.
-    private var healthRing: some View {
-        ZStack {
-            Circle()
-                .stroke(Color.primary.opacity(0.10), lineWidth: 6)
-            Circle()
-                .trim(from: 0, to: CGFloat(healthyCount) / 4)
-                .stroke(Theme.brand, style: StrokeStyle(lineWidth: 6, lineCap: .round))
-                .rotationEffect(.degrees(-90))
-                .shadow(color: Theme.violet.opacity(0.4), radius: 5)
-            VStack(spacing: -1) {
-                Text("\(healthyCount)")
-                    .font(.system(size: 17, weight: .bold, design: .rounded))
-                Text("of 4")
-                    .font(.system(size: 8.5, weight: .medium, design: .rounded))
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .frame(width: 56, height: 56)
-        .animation(Theme.gentle, value: healthyCount)
-    }
+
 
     private func modelBanner(_ st: ModelStatus) -> some View {
         Button {
             withAnimation(Theme.spring) { selectedTab = .model }
         } label: {
-            HStack(spacing: 13) {
-                IconChip(
-                    systemImage: st.active ? "arrow.down.circle.fill" : "exclamationmark.circle.fill",
-                    gradient: Theme.gradient(for: Theme.warning),
-                    size: 34,
-                    glowColor: Theme.warning
-                )
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(st.active ? "Downloading speech model…" : "Speech model not downloaded")
-                        .font(.sunoSubhead)
-                    Text(st.active
-                         ? "\(st.overall_done)/\(st.overall_total) files — open for details"
-                         : "Download the ~2.4 GB on-device model to start dictating")
-                        .font(.sunoCaption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer(minLength: 0)
+            HStack(spacing: 10) {
+                Image(systemName: st.active ? "arrow.down.circle" : "exclamationmark.circle")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Theme.warning)
+                Text(st.active
+                     ? "Downloading the speech model — \(st.overall_done) of \(st.overall_total) files"
+                     : "The speech model hasn't been downloaded yet")
+                    .font(.sunoValue)
+                    .foregroundStyle(Theme.ink)
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(.secondary)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Theme.faint)
+                Spacer(minLength: 0)
             }
-            .padding(14)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .sunoWell(radius: Theme.Radius.control, tint: Theme.warning)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }
 
-    private var currentSetupCard: some View {
-        SunoSection(
-            title: "Current setup",
-            systemImage: "slider.horizontal.3",
-            subtitle: "Everything SunoFlow is configured to do right now"
-        ) {
-            LazyVGrid(
-                columns: [GridItem(.adaptive(minimum: 250), spacing: 8)],
-                spacing: 8
-            ) {
-                SunoInfoRow(
-                    label: "Dictation hotkey",
-                    value: KeyCombo.display(keyCode: prefs.hotkeyKeyCode, modifiers: prefs.hotkeyModifiers),
-                    systemImage: "command"
-                )
-                SunoInfoRow(label: "Microphone", value: micDisplayName, systemImage: "mic")
-                SunoInfoRow(label: "Auto-stop", value: "\(prefs.maxRecordingSeconds) s", systemImage: "timer")
-                SunoInfoRow(
-                    label: "AI cleanup",
-                    value: prefs.cleanupEnabled ? "On" : "Off",
-                    systemImage: "sparkles",
-                    valueColor: prefs.cleanupEnabled ? Theme.success : .secondary
-                )
-                SunoInfoRow(
-                    label: "Screen context",
-                    value: prefs.screenContextEnabled ? "On" : "Off",
-                    systemImage: "rectangle.on.rectangle",
-                    valueColor: prefs.screenContextEnabled ? Theme.success : .secondary
-                )
-                SunoInfoRow(
-                    label: "Launch at login",
-                    value: launchAtLogin ? "Enabled" : "Disabled",
-                    systemImage: "power",
-                    valueColor: launchAtLogin ? Theme.success : .secondary
-                )
-                SunoInfoRow(
-                    label: "Learned corrections",
-                    value: "\(corrections.count)",
-                    systemImage: "text.badge.checkmark"
-                )
-            }
-        }
-    }
+
 
     private var micDisplayName: String {
         if prefs.micDeviceUID.isEmpty { return "System Default" }
@@ -971,123 +936,246 @@ struct SettingsView: View {
     private func settingRow<C: View>(
         _ title: String,
         _ description: String? = nil,
-        @ViewBuilder control: () -> C
+        divider: Bool = true,
+        @ViewBuilder control: @escaping () -> C
     ) -> some View {
-        HStack(alignment: .top, spacing: 18) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(title).font(.sunoBodyMedium)
-                if let description {
-                    Text(description)
-                        .font(.sunoCaption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            Spacer(minLength: 12)
-            control()
-        }
+        SunoRow(title: title, subtitle: description, divider: divider, trailing: control)
     }
 
     private func brandToggle(_ isOn: Binding<Bool>) -> some View {
         Toggle("", isOn: isOn)
             .labelsHidden()
             .toggleStyle(.switch)
-            .tint(Theme.violet)
+            .controlSize(.small)
+            .tint(Theme.accent)
+    }
+
+    // MARK: Account
+
+    @ViewBuilder
+    private var accountSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SectionLabel(text: "This Mac")
+            Rule(strong: true)
+
+            switch account.state {
+            case .notConnected:
+                SunoRow(
+                    title: "Not connected",
+                    subtitle: "Connect this Mac to your SunoFlow account to dictate. We'll open your browser to confirm it's you — there's nothing to type.",
+                    systemImage: "personalhotspot",
+                    divider: false
+                ) {
+                    Button("Connect account") { account.connect() }
+                        .buttonStyle(.sunoPrimary)
+                }
+
+            case .waiting(let code):
+                SunoRow(
+                    title: "Waiting for you to approve",
+                    subtitle: "Check your browser shows this same code, then choose Connect.",
+                    systemImage: "hourglass"
+                ) {
+                    Text(code)
+                        .font(.system(size: 15, weight: .semibold, design: .monospaced))
+                        .tracking(1.5)
+                        .foregroundStyle(Theme.accent)
+                }
+                SunoRow(title: "Didn't the browser open?", divider: false) {
+                    HStack(spacing: 12) {
+                        Button("Cancel") { account.cancelPairing() }
+                            .buttonStyle(.sunoGhost)
+                        Button("Open browser") { account.openAccountPage() }
+                            .buttonStyle(.sunoSecondary)
+                    }
+                }
+
+            case .connected:
+                SunoRow(
+                    title: "Connected",
+                    subtitle: "This Mac is linked to your account and can dictate.",
+                    systemImage: "checkmark.circle",
+                    iconColor: Theme.success
+                ) {
+                    StatusText(text: "Linked", color: Theme.success)
+                }
+                SunoRow(
+                    title: "Sign out of this Mac",
+                    subtitle: "Removes the key stored here. To stop it working everywhere, disconnect the device from your account page instead.",
+                    systemImage: "xmark.circle",
+                    divider: false
+                ) {
+                    Button("Sign out") { account.signOutThisMac() }
+                        .buttonStyle(.sunoSecondary)
+                }
+
+            case .failed(let message):
+                SunoRow(
+                    title: "Couldn't connect",
+                    subtitle: message,
+                    systemImage: "exclamationmark.triangle",
+                    iconColor: Theme.warning,
+                    divider: false
+                ) {
+                    Button("Try again") { account.connect() }
+                        .buttonStyle(.sunoPrimary)
+                }
+            }
+
+            Rule(strong: true)
+
+            if let notice = account.entitlementNotice {
+                SectionLabel(text: "Subscription")
+                Rule(strong: true)
+                SunoRow(
+                    title: "Dictation is paused",
+                    subtitle: notice,
+                    systemImage: "creditcard",
+                    iconColor: Theme.warning,
+                    divider: false
+                ) {
+                    Button("Open account") { account.openAccountPage() }
+                        .buttonStyle(.sunoPrimary)
+                }
+                Rule(strong: true)
+            }
+
+            SectionLabel(text: "Your account")
+            Rule(strong: true)
+            SunoRow(
+                title: "Subscription and devices",
+                subtitle: "Your plan, billing and every connected Mac live on your account page.",
+                systemImage: "safari",
+                divider: false
+            ) {
+                Button("Open account page") { account.openAccountPage() }
+                    .buttonStyle(.sunoSecondary)
+            }
+            Rule(strong: true)
+        }
+        .rowIconColumn()
     }
 
     // MARK: General
 
     private var generalSection: some View {
-        VStack(alignment: .leading, spacing: Theme.Space.cardGap) {
-            SunoSection(
-                title: "Startup",
-                systemImage: "power",
-                subtitle: "What happens when you log in"
-            ) {
-                settingRow(
-                    "Launch SunoFlow at login",
-                    "To also auto-start the transcription engine, run ./install-autostart.sh once."
-                ) {
-                    brandToggle($launchAtLogin)
-                        .onChange(of: launchAtLogin) { newValue in
-                            if let error = LoginItem.setEnabled(newValue) {
-                                loginError = error
-                                launchAtLogin = LoginItem.isEnabled
-                            } else {
-                                loginError = nil
-                            }
-                        }
-                }
-                if let loginError {
-                    SunoNotice(text: loginError, systemImage: "xmark.octagon.fill", color: Theme.danger)
-                }
-            }
+        VStack(alignment: .leading, spacing: 0) {
+            startupGroup
+            hotkeyGroup
+            recordingGroup
+            screenContextGroup
+        }
+    }
 
-            SunoSection(
-                title: "Dictation hotkey",
-                systemImage: "command",
-                subtitle: "Press this combo anywhere to start and stop dictation"
+    private var startupGroup: some View {
+        VStack(spacing: 0) {
+            SectionLabel(text: "Startup")
+            Rule(strong: true)
+            settingRow(
+                "Launch SunoFlow at login",
+                "SunoFlow starts automatically and waits in the menu bar.",
+                divider: loginError != nil
             ) {
-                HStack(spacing: 10) {
-                    HotkeyRecorder(keyCode: $prefs.hotkeyKeyCode, modifiers: $prefs.hotkeyModifiers)
-                        .frame(width: 168, height: 34)
+                brandToggle($launchAtLogin)
+                    .onChange(of: launchAtLogin) { newValue in
+                        if let error = LoginItem.setEnabled(newValue) {
+                            loginError = error
+                            launchAtLogin = LoginItem.isEnabled
+                        } else {
+                            loginError = nil
+                        }
+                    }
+            }
+            if let loginError {
+                SunoNotice(text: loginError, systemImage: "xmark.octagon.fill", color: Theme.danger)
+                    .padding(.vertical, 14)
+            }
+            Rule(strong: true)
+        }
+    }
+
+    private var hotkeyGroup: some View {
+        VStack(spacing: 0) {
+            SectionLabel(text: "Dictation hotkey")
+            Rule(strong: true)
+            settingRow(
+                "Shortcut",
+                "Press this combination anywhere to start and stop dictation.",
+                divider: false
+            ) {
+                HStack(spacing: 12) {
                     Button("Reset") { prefs.resetHotkeyToDefault() }
                         .buttonStyle(.sunoGhost)
-                    Spacer(minLength: 0)
+                    HotkeyRecorder(keyCode: $prefs.hotkeyKeyCode, modifiers: $prefs.hotkeyModifiers)
+                        .frame(width: 150, height: 30)
                 }
             }
+            Rule(strong: true)
+        }
+    }
 
-            SunoSection(
-                title: "Recording",
-                systemImage: "timer",
-                subtitle: "Stops a runaway recording automatically so you don't have to"
+    private var recordingGroup: some View {
+        VStack(spacing: 0) {
+            SectionLabel(text: "Recording")
+            Rule(strong: true)
+            settingRow(
+                "Stop automatically after",
+                "Ends a recording you forgot about, so it can't run all day.",
+                divider: false
             ) {
-                settingRow("Auto-stop recording after") {
-                    HStack(spacing: 10) {
-                        Text("\(prefs.maxRecordingSeconds) s")
-                            .font(.system(size: 13, weight: .semibold, design: .rounded))
-                            .monospacedDigit()
-                            .frame(minWidth: 46, alignment: .trailing)
-                        Stepper("", value: $prefs.maxRecordingSeconds, in: 10...600, step: 5)
-                            .labelsHidden()
-                    }
+                HStack(spacing: 8) {
+                    Text("\(prefs.maxRecordingSeconds) s")
+                        .font(.sunoValue)
+                        .monospacedDigit()
+                        .foregroundStyle(Theme.ink)
+                        .frame(minWidth: 42, alignment: .trailing)
+                    Stepper("", value: $prefs.maxRecordingSeconds, in: 10...600, step: 5)
+                        .labelsHidden()
                 }
             }
+            Rule(strong: true)
+        }
+    }
 
-            SunoSection(
-                title: "Screen context",
-                systemImage: "rectangle.on.rectangle",
-                subtitle: "Give the cleanup AI a sense of what's on screen"
+    private var screenContextGroup: some View {
+        let needsPermission = prefs.screenContextEnabled && !screenRecordingPermission
+        return VStack(alignment: .leading, spacing: 0) {
+            SectionLabel(text: "Screen context")
+            Rule(strong: true)
+            settingRow(
+                "Read what's on screen",
+                "When dictation stops, SunoFlow reads the words visible on screen so it can match names, terminology and phrasing. Nothing is stored, and only the vocabulary is used.",
+                divider: needsPermission
             ) {
-                settingRow(
-                    "Use screen context for cleanup",
-                    "When on, a screenshot is taken and OCR'd on-device when dictation stops. The recognized words give the cleanup AI rough context about the app you're typing into — better names, terms, and phrasing. Accuracy is not the goal; only the on-screen vocabulary is extracted."
-                ) {
-                    brandToggle($prefs.screenContextEnabled)
-                        .onChange(of: prefs.screenContextEnabled) { newValue in
-                            if newValue, !ScreenContext.hasPermission {
-                                ScreenContext.openSystemSettings()
-                            }
+                brandToggle($prefs.screenContextEnabled)
+                    .onChange(of: prefs.screenContextEnabled) { newValue in
+                        if newValue, !ScreenContext.hasPermission {
+                            ScreenContext.openSystemSettings()
                         }
-                }
-
-                if prefs.screenContextEnabled, !screenRecordingPermission {
-                    SunoNotice(text: "Screen Recording permission is required. Grant it in System Settings → Privacy & Security → Screen Recording, then restart SunoFlow.")
+                    }
+            }
+            if needsPermission {
+                VStack(alignment: .leading, spacing: 12) {
+                    SunoNotice(text: "Screen Recording access is required. Grant it in System Settings, then restart SunoFlow.")
                     Button("Open System Settings") { ScreenContext.openSystemSettings() }
                         .buttonStyle(.sunoSecondary)
                 }
+                .padding(.vertical, 14)
             }
+            Rule(strong: true)
         }
     }
 
     // MARK: Microphone
 
     private var microphoneSection: some View {
-        VStack(alignment: .leading, spacing: Theme.Space.cardGap) {
-            SunoSection(
-                title: "Input device",
-                systemImage: "mic.fill",
-                subtitle: "Which microphone SunoFlow records from"
+        VStack(alignment: .leading, spacing: 0) {
+            SectionLabel(text: "Input device")
+            Rule(strong: true)
+            settingRow(
+                "Microphone",
+                "Which input SunoFlow records from.",
+                divider: micIsBluetooth
             ) {
                 Picker("", selection: $prefs.micDeviceUID) {
                     Text("System Default").tag("")
@@ -1102,35 +1190,56 @@ struct SettingsView: View {
                 }
                 .labelsHidden()
                 .pickerStyle(.menu)
+                .frame(maxWidth: 240)
                 .onChange(of: prefs.micDeviceUID) { _ in refreshMicWarning() }
-
-                if micIsBluetooth {
-                    VStack(alignment: .leading, spacing: 10) {
-                        SunoNotice(text: "This is a Bluetooth microphone. Recording from it forces your earbuds or headphones into low-quality call mode — degrading audio in every app while you dictate.")
-                        if AudioDevices.builtInInputUID() != nil {
-                            Button("Switch to built-in microphone") {
-                                if let builtIn = AudioDevices.builtInInputUID() {
-                                    prefs.micDeviceUID = builtIn
-                                    refreshMicWarning()
-                                }
-                            }
-                            .buttonStyle(.sunoPrimary)
-                        }
-                    }
-                }
-
-                HStack {
-                    Spacer(minLength: 0)
-                    Button {
-                        inputDevices = AudioDevices.inputDevices()
-                        refreshMicWarning()
-                    } label: {
-                        Label("Refresh devices", systemImage: "arrow.clockwise")
-                    }
-                    .buttonStyle(.sunoGhost)
-                }
             }
+
+            if micIsBluetooth {
+                VStack(alignment: .leading, spacing: 12) {
+                    SunoNotice(text: "Recording from a Bluetooth microphone forces your earbuds into low-quality call mode, degrading audio in every app while you dictate.")
+                    if AudioDevices.builtInInputUID() != nil {
+                        Button("Switch to the built-in microphone") {
+                            if let builtIn = AudioDevices.builtInInputUID() {
+                                prefs.micDeviceUID = builtIn
+                                refreshMicWarning()
+                            }
+                        }
+                        .buttonStyle(.sunoSecondary)
+                    }
+                }
+                .padding(.vertical, 14)
+            }
+
+            SunoRow(
+                title: "Devices out of date?",
+                subtitle: "SunoFlow reads the input list when Settings opens. Rescan if you have just plugged something in.",
+                systemImage: "arrow.clockwise",
+                divider: false
+            ) {
+                Button("Rescan") {
+                    inputDevices = AudioDevices.inputDevices()
+                    refreshMicWarning()
+                }
+                .buttonStyle(.sunoSecondary)
+            }
+            Rule(strong: true)
+
+            SectionLabel(text: "Getting a clean recording")
+            Rule(strong: true)
+            SunoRow(
+                title: "The built-in microphone is usually best",
+                subtitle: "It stays in high-quality mode while you dictate, and it is what the speech model hears most often.",
+                systemImage: "checkmark.circle"
+            )
+            SunoRow(
+                title: "Wired beats wireless",
+                subtitle: "Any wired headset avoids the call-mode downgrade that Bluetooth microphones force on the whole system.",
+                systemImage: "cable.connector",
+                divider: false
+            )
+            Rule(strong: true)
         }
+        .rowIconColumn()
     }
 
     private func refreshMicWarning() {
@@ -1140,99 +1249,82 @@ struct SettingsView: View {
     // MARK: Model download
 
     private var modelSection: some View {
-        VStack(alignment: .leading, spacing: Theme.Space.cardGap) {
+        VStack(alignment: .leading, spacing: 0) {
             if !sidecarOnline {
-                SunoNotice(text: "Engine offline — start it from the Overview tab to download the model.")
+                SunoNotice(text: "The engine is offline — start it from Overview before downloading the model.")
+                    .padding(.top, 26)
             }
 
-            SunoSection(
-                title: "Parakeet TDT 0.6B v2",
-                systemImage: "waveform",
-                subtitle: "Runs entirely on your Mac — no audio ever leaves this machine"
-            ) {
-                Text("The model is about 2.4 GB; the download takes a few minutes on a typical connection.")
-                    .font(.sunoCaption)
-                    .foregroundStyle(.secondary)
+            SectionLabel(text: "On-device model")
+            Rule(strong: true)
 
-                Divider().opacity(0.5)
+            SunoRow(
+                title: "SunoFlow speech model v1",
+                subtitle: "Roughly 2.4 GB. The download takes a few minutes on a typical connection.",
+                systemImage: "waveform"
+            )
 
+            Group {
                 if let st = modelStatus {
                     modelStatusBody(st)
                 } else if sidecarOnline {
-                    HStack(spacing: 8) {
-                        ProgressView().controlSize(.small)
-                        Text("Checking model status…")
-                            .font(.sunoCaption).foregroundStyle(.secondary)
+                    SunoRow(title: "Checking model status…", divider: false) {
+                        ProgressView().controlSize(.small).scaleEffect(0.75)
                     }
                 } else {
-                    Text("Model status unavailable while the engine is offline.")
-                        .font(.sunoCaption).foregroundStyle(.secondary)
+                    SunoRow(
+                        title: "Status unavailable",
+                        subtitle: "Start the engine to see whether the model is installed.",
+                        divider: false
+                    )
                 }
             }
 
-            if let st = modelStatus, !st.model_dir.isEmpty {
-                SunoSection(
-                    title: "Storage",
-                    systemImage: "internaldrive.fill",
-                    subtitle: "Where the weights live on disk"
-                ) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        monoRow(st.model_dir)
-                        monoRow(st.model_id)
-                    }
-                }
-            }
+            Rule(strong: true)
+
+            SectionLabel(text: "Where it runs")
+            Rule(strong: true)
+            SunoRow(
+                title: "On this Mac",
+                subtitle: "Speech is turned into text by your own machine. The recording is never uploaded.",
+                systemImage: "desktopcomputer"
+            )
+            SunoRow(
+                title: "Downloaded once",
+                subtitle: "The model is stored locally and reused. After the first download it works without an internet connection.",
+                systemImage: "arrow.down.circle",
+                divider: false
+            )
+            Rule(strong: true)
         }
+        .rowIconColumn()
         .onAppear { startModelPolling() }
         .onDisappear { stopModelPolling() }
-    }
-
-    private func monoRow(_ text: String) -> some View {
-        Text(text)
-            .font(.sunoMono)
-            .foregroundStyle(.secondary)
-            .textSelection(.enabled)
-            .padding(.horizontal, 11)
-            .padding(.vertical, 8)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .sunoWell()
     }
 
     @ViewBuilder
     private func modelStatusBody(_ st: ModelStatus) -> some View {
         if st.model_loaded {
-            HStack(spacing: 9) {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(Theme.success)
-                Text("Model ready — dictation is available.")
-                    .font(.sunoBodyMedium)
-                Spacer(minLength: 0)
+            SunoRow(title: "Model ready", subtitle: "Dictation is available.", divider: false) {
+                StatusText(text: "Ready", color: Theme.success)
             }
-            .padding(12)
-            .sunoWell(radius: Theme.Radius.control, tint: Theme.success)
         } else if st.active {
-            // Download / load in progress.
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 9) {
+            VStack(alignment: .leading, spacing: 0) {
+                SunoRow(
+                    title: st.phase == "loading" ? "Loading model into memory…" : "Downloading model…",
+                    subtitle: st.phase == "loading" ? nil : "File \(st.overall_done + 1) of \(st.overall_total)",
+                    divider: false
+                ) {
                     if st.phase == "loading" {
-                        ProgressView().controlSize(.small)
-                        Text("Loading model into memory…").font(.sunoBodyMedium)
+                        ProgressView().controlSize(.small).scaleEffect(0.75)
                     } else {
-                        Image(systemName: "arrow.down.circle.fill")
-                            .foregroundStyle(Theme.violet)
-                        Text("Downloading model…").font(.sunoBodyMedium)
+                        Text("\(st.overall_done)/\(st.overall_total)")
+                            .font(.sunoValue).monospacedDigit()
+                            .foregroundStyle(Theme.body)
                     }
-                    Spacer(minLength: 0)
-                    SunoBadge(text: "\(st.overall_done)/\(st.overall_total) files")
                 }
-
                 if st.phase != "loading", !st.current_file.isEmpty {
                     VStack(alignment: .leading, spacing: 7) {
-                        Text(st.current_file)
-                            .font(.sunoMono)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
                         SunoProgressBar(
                             value: Double(st.downloaded),
                             total: Double(max(st.file_total, 1))
@@ -1242,52 +1334,42 @@ struct SettingsView: View {
                             Spacer()
                             if st.file_total > 0 { Text(byteString(st.file_total)) }
                         }
-                        .font(.sunoMicro)
-                        .foregroundStyle(.secondary)
+                        .font(.sunoCaption)
+                        .foregroundStyle(Theme.faint)
                         .monospacedDigit()
                     }
+                    .padding(.bottom, 16)
                 }
             }
-            .padding(12)
-            .sunoWell(radius: Theme.Radius.control, tint: Theme.violet)
         } else if st.model_present {
-            // Files are on disk but the model isn't loaded in-process yet.
-            VStack(alignment: .leading, spacing: 12) {
-                SunoNotice(text: "Model downloaded but not loaded. Restart the engine to activate it.")
+            SunoRow(
+                title: "Downloaded, but not loaded",
+                subtitle: "Restart the engine to activate the model.",
+                divider: false
+            ) {
                 Button("Start engine") { startEngine() }
                     .buttonStyle(.sunoPrimary)
                     .disabled(startingEngine)
             }
         } else if st.phase == "error" {
-            VStack(alignment: .leading, spacing: 12) {
-                SunoNotice(text: st.error.isEmpty ? "Download failed." : "Download failed — \(st.error)",
-                           systemImage: "xmark.octagon.fill",
-                           color: Theme.danger)
-                Button("Retry download") { startDownload() }
+            SunoRow(
+                title: "Download failed",
+                subtitle: st.error.isEmpty ? "Something went wrong during the download." : st.error,
+                iconColor: Theme.danger,
+                divider: false
+            ) {
+                Button("Retry") { startDownload() }
                     .buttonStyle(.sunoPrimary)
             }
         } else {
-            // Idle, nothing present.
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 9) {
-                    Image(systemName: "arrow.down.circle")
-                        .foregroundStyle(.secondary)
-                    Text("Model not downloaded yet.")
-                        .font(.sunoBodyMedium)
-                        .foregroundStyle(.secondary)
-                    Spacer(minLength: 0)
-                }
-                Button {
-                    startDownload()
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "arrow.down.circle.fill")
-                            .font(.system(size: 11, weight: .bold))
-                        Text(modelDownloadStarting ? "Starting…" : "Download model (2.4 GB)")
-                    }
-                }
-                .buttonStyle(.sunoPrimary)
-                .disabled(modelDownloadStarting)
+            SunoRow(
+                title: "Not downloaded yet",
+                subtitle: "Dictation stays unavailable until the model is on this Mac.",
+                divider: false
+            ) {
+                Button(modelDownloadStarting ? "Starting…" : "Download model") { startDownload() }
+                    .buttonStyle(.sunoPrimary)
+                    .disabled(modelDownloadStarting || !sidecarOnline)
             }
         }
     }
@@ -1336,171 +1418,90 @@ struct SettingsView: View {
         return f.string(fromByteCount: bytes)
     }
 
-    // MARK: Learned corrections
+    // MARK: Dictionary
 
     private var correctionsSection: some View {
-        VStack(alignment: .leading, spacing: Theme.Space.cardGap) {
-            SunoSection(
-                title: "Learned corrections",
-                systemImage: "text.badge.checkmark",
-                subtitle: "SunoFlow learns from the edits you make to pasted text"
-            ) {
-                CorrectionsManager(
-                    corrections: $corrections,
-                    sidecarOnline: $sidecarOnline,
-                    onReload: loadCorrections
-                )
-            }
-        }
-    }
+        VStack(alignment: .leading, spacing: 0) {
+            SectionLabel(text: "Your dictionary", trailing: "Spellings it learns, and shorthand you add")
+            Rule(strong: true)
+            CorrectionsManager(
+                corrections: $corrections,
+                sidecarOnline: $sidecarOnline,
+                onReload: loadCorrections
+            )
 
-    // MARK: AI cleanup
-
-    private var cleanupSection: some View {
-        VStack(alignment: .leading, spacing: Theme.Space.cardGap) {
-            SunoSection(
-                title: "Transcript polishing",
-                systemImage: "sparkles",
-                subtitle: "A hosted AI rewrites the raw transcript before it's pasted"
-            ) {
-                settingRow(
-                    "Polish transcript with AI",
-                    "When off, the raw transcript is pasted with no cleanup pass. On-device speech recognition and your learned corrections still apply."
-                ) {
-                    brandToggle($prefs.cleanupEnabled)
-                }
-            }
-
-            SunoSection(
-                title: "Cleanup service",
-                systemImage: "cloud.fill",
-                subtitle: "Transcript polishing runs on a hosted gateway, not on this Mac"
-            ) {
-                HStack(spacing: 12) {
-                    PulseDot(
-                        color: cleanupGatewayOnline ? Theme.success : Theme.warning,
-                        active: cleanupGatewayOnline,
-                        size: 7
-                    )
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(cleanupGatewayOnline ? "Service reachable" : "Service unreachable")
-                            .font(.sunoBodyMedium)
-                        Text(cleanupGatewayOnline
-                             ? "Transcripts are sent for polishing when AI cleanup is on."
-                             : "Dictation still works — raw transcripts are pasted unchanged while the service is down.")
-                            .font(.sunoCaption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    Spacer(minLength: 0)
-                }
-                .padding(12)
-                .sunoWell(radius: Theme.Radius.control, tint: cleanupGatewayOnline ? Theme.success : Theme.warning)
-
-                monoRow("https://cleanup.mirrorli.art")
-            }
-
-            if prefs.screenContextEnabled {
-                SunoSection(
-                    title: "Screen context",
-                    systemImage: "rectangle.on.rectangle",
-                    subtitle: "On-screen words sent to the cleanup AI as reference"
-                ) {
-                    Text("When enabled, a screenshot is OCR'd on-device when dictation stops and the recognized words are sent to the cleanup service as context. This helps the AI match names, terminology, and phrasing to what's visible on screen. Managed in the General tab.")
-                        .font(.sunoCaption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
+            SectionLabel(text: "How this works")
+            Rule(strong: true)
+            SunoRow(
+                title: "Spellings are learned for you",
+                subtitle: "After SunoFlow pastes, it notices small edits you make — a name respelled, an acronym capitalised — and remembers them. Rephrasing a whole sentence is you changing your mind, not a mistake, so only short, name-like fixes are picked up.",
+                systemImage: "eye"
+            )
+            SunoRow(
+                title: "Spellings always win",
+                subtitle: "They are applied as the last step of every dictation, so they override whatever the model heard.",
+                systemImage: "checkmark.seal"
+            )
+            SunoRow(
+                title: "Shorthand saves you spelling things out",
+                subtitle: "Save your Instagram or LinkedIn link once, then just say “here's my Instagram” and the link is written instead. Add these by hand — SunoFlow never invents one.",
+                systemImage: "link"
+            )
+            SunoRow(
+                title: "Shorthand reads the sentence first",
+                subtitle: "The value is only substituted where you were actually giving it out. Say “I don't have an Instagram” and the words stay exactly as you said them.",
+                systemImage: "text.magnifyingglass"
+            )
+            SunoRow(
+                title: "The list stays on this Mac",
+                subtitle: "It lives in a local file. Only the few entries that match what you just said travel with a dictation, so cleanup can apply them. Remove any entry above, or clear the lot.",
+                systemImage: "lock",
+                divider: false
+            )
+            Rule(strong: true)
         }
     }
 
     // MARK: About
 
     private var aboutSection: some View {
-        VStack(alignment: .leading, spacing: Theme.Space.cardGap) {
-            // App identity strip
-            HStack(spacing: 16) {
-                IconChip(systemImage: "waveform", size: 52)
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 14) {
+                Image(systemName: "ear")
+                    .font(.system(size: 26, weight: .medium))
+                    .foregroundStyle(Theme.accent)
+                    .frame(width: 34)
                 VStack(alignment: .leading, spacing: 3) {
                     Text("SunoFlow")
-                        .font(.system(size: 20, weight: .bold, design: .rounded))
-                    Text("Version \(appVersion) (build \(appBuild))")
-                        .font(.sunoCaption)
-                        .foregroundStyle(.secondary)
+                        .font(.system(size: 19, weight: .semibold))
+                        .tracking(-0.3)
+                        .foregroundStyle(Theme.ink)
                     Text("On-device dictation for macOS")
                         .font(.sunoCaption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Theme.faint)
                 }
                 Spacer(minLength: 0)
             }
-            .padding(Theme.Space.card)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                ZStack {
-                    RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous)
-                        .fill(Theme.surface)
-                    RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous)
-                        .fill(Theme.brandWash.opacity(0.6))
-                    RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous)
-                        .strokeBorder(Theme.violet.opacity(0.22), lineWidth: 1)
-                }
-                .shadow(color: Theme.violet.opacity(0.14), radius: 16, y: 6)
-            )
+            .padding(.top, 28)
+            .padding(.bottom, 4)
 
-            SunoSection(
-                title: "Components",
-                systemImage: "square.stack.3d.up.fill",
-                subtitle: "What's running under the hood"
+            SectionLabel(text: "Version")
+            Rule(strong: true)
+            ValueRow(label: "Version", value: appVersion, mono: true)
+            ValueRow(label: "Build", value: appBuild, mono: true, divider: false)
+            Rule(strong: true)
+
+            SectionLabel(text: "Resources")
+            Rule(strong: true)
+            SunoRow(
+                title: "Diagnostic logs",
+                subtitle: "Records audio levels and permission status. Never transcript contents.",
+                divider: false
             ) {
-                VStack(spacing: 8) {
-                    SunoInfoRow(label: "Speech engine", value: "Parakeet TDT 0.6B v2 (MLX)", systemImage: "waveform")
-                    SunoInfoRow(
-                        label: "Speech model",
-                        value: modelStatus?.model_loaded == true
-                            ? "Downloaded & loaded"
-                            : (modelStatus?.model_present == true ? "Downloaded (not loaded)" : "Not downloaded"),
-                        systemImage: "arrow.down.circle",
-                        valueColor: modelStatus?.model_loaded == true ? Theme.success : Theme.warning
-                    )
-                    SunoInfoRow(
-                        label: "Cleanup service",
-                        value: cleanupGatewayOnline ? "Hosted gateway reachable" : "Hosted gateway offline",
-                        systemImage: "sparkles",
-                        valueColor: cleanupGatewayOnline ? Theme.success : Theme.warning
-                    )
-                    SunoInfoRow(label: "Sidecar endpoint", value: "http://127.0.0.1:8765", systemImage: "network")
-                }
-            }
-
-            SunoSection(
-                title: "Resources",
-                systemImage: "folder.fill",
-                subtitle: "Files, logs, and upstream projects"
-            ) {
-                HStack(spacing: 8) {
-                    Button {
-                        openProjectFolder()
-                    } label: {
-                        Label("Project folder", systemImage: "folder")
-                    }
+                Button("View logs") { revealLogs() }
                     .buttonStyle(.sunoSecondary)
-
-                    Button {
-                        revealLogs()
-                    } label: {
-                        Label("View logs", systemImage: "doc.text")
-                    }
-                    .buttonStyle(.sunoSecondary)
-
-                    Link(destination: URL(string: "https://github.com/senstella/parakeet-mlx")!) {
-                        Label("Parakeet MLX", systemImage: "arrow.up.right.square")
-                    }
-                    .buttonStyle(.sunoGhost)
-
-                    Spacer(minLength: 0)
-                }
             }
+            Rule(strong: true)
         }
     }
 
@@ -1530,9 +1531,6 @@ struct SettingsView: View {
                 }
             }
         }
-        TranscriptionClient.checkCleanupGateway { ok in
-            DispatchQueue.main.async { cleanupGatewayOnline = ok }
-        }
     }
 
     private func loadCorrections() {
@@ -1543,36 +1541,12 @@ struct SettingsView: View {
 
     // MARK: Engine actions
 
-    /// Find the project root (the directory containing run.sh) relative to the
-    /// app's own location. Works whether running from the built app bundle
-    /// (`<root>/SunoFlowApp/SunoFlow.app/Contents/MacOS/SunoFlow`) or from the
-    /// SwiftPM debug binary (`<root>/SunoFlowApp/.build/debug/SunoFlow`).
-    private func projectRoot() -> URL? {
-        let bundle = Bundle.main.bundleURL
-        // Bundle.main.bundleURL is the .app for a bundled app, or the executable's
-        // directory for a bare SwiftPM binary. In both cases, walking up a few
-        // levels should find run.sh.
-        var url = bundle
-        for _ in 0..<6 {
-            url = url.deletingLastPathComponent()
-            let candidate = url.appendingPathComponent("run.sh")
-            if FileManager.default.fileExists(atPath: candidate.path) {
-                return url
-            }
-        }
-        return nil
-    }
-
     private func startEngine() {
-        guard let root = projectRoot() else { return }
+        // In a distributed app the supervisor owns the sidecar process. In dev
+        // (no frozen binary) it's a no-op and the user runs the sidecar
+        // manually — there's nothing for the button to do.
         startingEngine = true
-        // Launch run.sh as a detached process. It starts the sidecar and waits
-        // for health, then opens the app — which is already running, so the
-        // single-instance guard in main.swift just bumps our Settings window.
-        let task = Process()
-        task.launchPath = "/bin/bash"
-        task.arguments = [root.appendingPathComponent("run.sh").path]
-        try? task.run()
+        SidecarSupervisor.shared.ensureRunning()
 
         // Poll for sidecar health, then refresh the UI.
         DispatchQueue.global().async {
@@ -1606,10 +1580,5 @@ struct SettingsView: View {
             // Reveal the directory at least.
             NSWorkspace.shared.open(logURL.deletingLastPathComponent())
         }
-    }
-
-    private func openProjectFolder() {
-        guard let root = projectRoot() else { return }
-        NSWorkspace.shared.open(root)
     }
 }

@@ -64,6 +64,11 @@ remember the result for context continuity.
 | `context` | string | no (default `""`) | Accessibility context of the focused field (app/name/role). Sent to cleanup. |
 | `screen` | string | no (default `""`) | OCR words from the screen (reference-only vocabulary). Sent to cleanup. |
 
+**Headers**:
+| Name | Required | Notes |
+|---|---|---|
+| `X-SunoFlow-Device-Key` | yes, in practice | `Bearer <device key>`. The app reads it from the platform credential store (macOS Keychain / Windows DPAPI) and sends it on **every** call. The sidecar strips the `Bearer ` prefix and forwards it to the cleanup gateway, which is where the account's trial and subscription are checked. Sent per request rather than held in the sidecar's environment so re-pairing takes effect with no restart. **A request without it is refused with 402** — an unpaired install, or anything posting to the port directly, gets no dictation. |
+
 **Query**:
 | Name | Type | Default | Notes |
 |---|---|---|---|
@@ -81,21 +86,59 @@ remember the result for context continuity.
 | `raw` | string | Raw STT output, stripped. Empty string on any soft-fail (audio too short, model not loaded, transcription error). |
 | `cleaned` | string | `raw` run through the cleanup gateway (if `cleanup=true`) and then `apply_corrections`. Equals `raw` when `cleanup=false`. Empty on soft-fail. |
 
-**Soft-fail contract (critical):** `/transcribe` NEVER returns a non-200 for a
-bad clip, a missing model, or a cleanup outage. It returns HTTP 200 with
-`{"raw": "", "cleaned": ""}` so dictation degrades gracefully instead of surfacing
-errors. The only non-200s are transport-level (connection refused, malformed
-multipart) or a 500 from an unhandled server bug.
+**Response 402** — `application/json`. The one deliberate non-200:
+
+```json
+{
+  "error": "not_entitled",
+  "message": "Your free trial has ended. Activate your subscription to keep dictating."
+}
+```
+
+Returned when the gateway refuses this device — expired trial, lapsed
+subscription, disconnected device, unpaired install — or when the gateway
+cannot be reached and no valid lease covers the gap. `message` is the gateway's
+own wording and the app MUST show it verbatim rather than inventing its own, so
+every surface explains a lapse the same way. Nothing is transcribed back and
+nothing is pasted.
+
+**Soft-fail contract (critical):** apart from that 402, `/transcribe` NEVER
+returns a non-200 for a bad clip, a missing model, or a cleanup outage. It
+returns HTTP 200 with `{"raw": "", "cleaned": ""}` so dictation degrades
+gracefully instead of surfacing errors. The other non-200s are transport-level
+(connection refused, malformed multipart) or a 500 from an unhandled server bug.
+
+**Entitlement is not part of the soft-fail contract.** An expired account must
+stop working, not quietly downgrade to a free tier. Both sidecars classify the
+gateway's answer identically:
+
+| Gateway says | Sidecar does |
+|---|---|
+| 2xx | Serve the dictation, and store the `lease` from the body. |
+| 401 / 402 / 403 **with a JSON `error` body** | Hard stop: raise, return 402 to the app. This includes 401 — a revoked device and an unknown key are refusals, not outages. |
+| 401 / 403 with a non-JSON body | An intermediary (a proxy), not us. Treat as an outage. |
+| 429, 5xx, timeout, DNS failure | Outage. The stored lease decides: serve the raw transcript while a valid lease exists, else 402. |
 
 **Pipeline order:**
 1. Validate clip duration ≥ `MIN_AUDIO_SECONDS` (0.1s). Else → empty.
 2. If `model is None` → empty (model not downloaded/loaded yet).
 3. `model.transcribe(path)` → `raw_text`. On exception → empty.
-4. If `cleanup=true`: POST `{text, context, recent, screen}` to the cleanup
-   gateway. On ANY gateway error, fall back to `raw_text` (never fail dictation
-   because cleanup is down).
-5. `apply_corrections(cleaned_text)` — learned dictionary, applied client-side
-   of the gateway, longest-phrase-first, case-insensitive word-boundary replace.
+4. If `cleanup=true`: POST `{text, context, recent, screen, dictionary}` to the
+   cleanup gateway with the device key. `dictionary` is the subset of the user's
+   entries that look relevant to *this* transcript (`relevant_for`) — the file
+   itself never leaves the machine. A refusal → 402 (see the table above). An
+   outage covered by a valid lease → fall back to `raw_text` (never fail
+   dictation because cleanup is down). An outage with no valid lease → 402.
+   If `cleanup=false`: call the gateway's `GET /entitlement` instead, applying
+   exactly the same rules. Skipping it would make the cleanup toggle a
+   free-dictation switch, because it is the only server call in the path.
+5. `apply_corrections(cleaned_text)` — the `correction`-kind entries only,
+   applied client-side of the gateway, longest-phrase-first, case-insensitive
+   word-boundary replace. `expansion`-kind entries are **not** applied here:
+   whether a spoken phrase means the speaker is *giving* a value or merely
+   mentioning the thing is a judgement call, so the cleanup model makes it. A
+   consequence worth knowing: with `cleanup=false` there is no model in the
+   path, so expansions do not fire at all.
 6. If `raw_text` non-empty: append `cleaned_text` to `recent_transcripts`
    (deque, maxlen 3) for next dictation's continuity context.
 7. Return `{raw, cleaned}`.
@@ -145,13 +188,15 @@ Learning heuristics (in `shared/`):
 
 ### `GET /corrections`
 
-List the full corrections dictionary, sorted by normalized key.
+List the full dictionary, sorted by normalized key.
 
 **Response 200**:
 ```json
 {
   "corrections": [
-    {"key": "jon", "from": "Jon", "to": "John", "count": 3}
+    {"key": "jon", "from": "Jon", "to": "John", "count": 3, "kind": "correction"},
+    {"key": "my instagram", "from": "my Instagram", "to": "https://instagram.com/someone",
+     "count": 0, "kind": "expansion"}
   ]
 }
 ```
@@ -161,18 +206,32 @@ List the full corrections dictionary, sorted by normalized key.
 | `corrections[].from` | string | Display "from" text. |
 | `corrections[].to` | string | Replacement text. |
 | `corrections[].count` | int | Times learned/seen. |
+| `corrections[].kind` | string | `correction` or `expansion` — see below. |
+
+**The two kinds.** They differ in *who applies them*, which is the only thing a
+client needs to understand:
+
+| Kind | What it is | Applied by |
+|---|---|---|
+| `correction` | A word the transcript mis-hears, paired with its correct spelling (`cavach` → `Kavach`). Learned from the user's edits, or added by hand. | The sidecar, mechanically, after cleanup — and the model, from the prompt. |
+| `expansion` | A phrase the user says out loud, paired with the literal value it stands for (`my Instagram` → a profile URL). Added by hand. | The cleanup model only. Never blind-replaced: "I don't have an Instagram" must not sprout a URL. |
+
+`kind` is absent from entries saved before it existed and is inferred on read
+from the shape of the pair (a URL/handle/email/phone `to`, or one very unlike
+its `from`, is an expansion). Old `corrections.json` files need no migration.
 
 ---
 
 ### `POST /corrections/add`
 
-Manually add a correction from the Settings UI.
+Manually add an entry from the Settings UI.
 
 **Request** — `application/x-www-form-urlencoded`:
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `frm` | string | yes | The "from" text. Named `frm` on the wire (not `from`) because `from` is a Python keyword and FastAPI would reject it as a parameter name. |
 | `to` | string | yes | |
+| `kind` | string | no | `correction` or `expansion`. Omitted or unrecognised → inferred from the pair. Clients that do not offer the choice should omit it. |
 
 **Response 200**:
 ```json
@@ -191,7 +250,7 @@ existing entry's `count` when the key already exists.
 
 ### `POST /corrections/update`
 
-Edit an existing correction's from/to. Renormalizes the key.
+Edit an existing entry's from/to. Renormalizes the key.
 
 **Request** — `application/x-www-form-urlencoded`:
 | Field | Type | Required | Notes |
@@ -199,6 +258,7 @@ Edit an existing correction's from/to. Renormalizes the key.
 | `key` | string | yes | Current normalized key to find/replace. |
 | `frm` | string | yes | New "from" text (named `frm` on the wire — see note above). |
 | `to` | string | yes | New "to" text. |
+| `kind` | string | no | As for `/corrections/add`. Omitted → re-inferred from the edited pair. |
 
 **Response 200**:
 ```json
@@ -301,15 +361,27 @@ already present and loaded.
 
 These live in `sidecars/shared/` and are inherited, not re-implemented:
 
-- **Corrections dictionary** — `corrections.json` next to the sidecar, normalized
+- **Personal dictionary** — `corrections.json` next to the sidecar, normalized
   keys, load/save, `_COMMON_WORDS`, `extract_correction_pairs`, `learn_from_edit`,
-  `apply_corrections` (longest-phrase-first, case-insensitive word boundary).
+  `infer_kind`, `apply_corrections` (corrections only, longest-phrase-first,
+  case-insensitive word boundary), and `relevant_for` (which entries ride along
+  with a cleanup request).
 - **Recent history** — `recent_transcripts` deque (maxlen 3), sent as `recent[]`
   to cleanup, appended after each successful transcription.
-- **Cleanup gateway POST** — `clean_with_ollama(text, context, recent, screen)`
+- **Cleanup gateway POST** — `clean_with_gateway(text, context, recent, screen, key, dictionary)`
   POSTs to `SUNOFLOW_CLEANUP_URL` (default
-  `https://cleanup.mirrorli.art/cleanup`) with `Bearer $SUNOFLOW_CLEANUP_KEY`,
-  60s timeout, soft-fails to raw text on ANY error.
+  `https://cleanup.mirrorli.art/cleanup`) with the caller's device key as the
+  bearer token, 60s timeout. Soft-fails to raw text on an outage; raises
+  `NotEntitled` on a refusal.
+- **Entitlement probe** — `check_entitlement(key)` GETs `/entitlement` for the
+  `cleanup=false` path, applying the same rules with no LLM call.
+- **Offline lease** (`sidecars/shared/lease.py`) — every entitled response
+  carries a signed token, stored under the platform data directory, that bounds
+  how long a device keeps working while the gateway is unreachable (72h). It is
+  what stops blocking the gateway's hostname from being unlimited free
+  dictation. The wire format is shared with
+  `cleanup-gateway/internal/account/lease.go` and pinned by a test vector on
+  both sides.
 - **WAV duration guard** — `_wav_duration_seconds`, skip clips < 0.1s.
 - **FastAPI skeleton** — routes, lifespan, the `transcribe` pipeline orchestrator
   (the only thing the platform adapter plugs into).

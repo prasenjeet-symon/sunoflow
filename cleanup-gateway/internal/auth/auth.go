@@ -3,7 +3,6 @@
 package auth
 
 import (
-	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -14,20 +13,9 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sunoflow/cleanup-gateway/internal/caller"
 	"github.com/sunoflow/cleanup-gateway/internal/store"
 )
-
-type ctxKey int
-
-const keyIDCtxKey ctxKey = 1
-
-// FromContext returns the authenticated key ID from the request context, or "".
-func FromContext(ctx context.Context) string {
-	if v, ok := ctx.Value(keyIDCtxKey).(string); ok {
-		return v
-	}
-	return ""
-}
 
 // HashKey returns the SHA-256 hex digest of an API key plaintext.
 func HashKey(plaintext string) string {
@@ -84,7 +72,8 @@ func Middleware(s *store.Store) func(http.Handler) http.Handler {
 				return
 			}
 			// Constant-time-ish: hash equality already enforced by the SQL lookup.
-			ctx := context.WithValue(r.Context(), keyIDCtxKey, k.ID)
+			// A legacy key has no account, so usage meters against the key itself.
+			ctx := caller.With(r.Context(), caller.Identity{KeyID: k.ID})
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}

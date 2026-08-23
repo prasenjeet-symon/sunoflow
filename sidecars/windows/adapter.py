@@ -25,6 +25,7 @@ See ``docs/CONTRACT.md`` for the HTTP contract and ``sidecars/shared/app.py``
 for the routes this adapter plugs into.
 """
 import os
+import re
 import threading
 
 from sidecars.shared.app import SttAdapter, create_app
@@ -195,8 +196,11 @@ class ParakeetOnnxAdapter(SttAdapter):
                 self._dl_state.update(phase="done", active=False)
         except Exception as exc:
             print(f"Model download failed: {exc}")
+            # Strip any URL from the surfaced error so the upstream model
+            # source isn't leaked to the client UI; the full exception is kept in the log.
+            safe = re.sub(r"https?://\S+", "[download URL]", str(exc))
             with self._dl_lock:
-                self._dl_state.update(phase="error", active=False, error=str(exc))
+                self._dl_state.update(phase="error", active=False, error=safe)
 
     def status_snapshot(self) -> dict:
         with self._dl_lock:

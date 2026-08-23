@@ -1,0 +1,443 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Your account — SunoFlow</title>
+<meta name="robots" content="noindex">
+<meta name="theme-color" content="#ffffff">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="assets/styles.css?v=13">
+<style>
+  /* Hold the page back until the auth state is known, so a signed-out visitor
+     never sees a flash of somebody's account shell. */
+  body[data-state="loading"] .dash-bar,
+  body[data-state="loading"] .dash-main { visibility: hidden; }
+</style>
+</head>
+<body data-state="loading">
+
+<header class="dash-bar">
+  <div class="shell">
+    <a class="wordmark" href="index.html" aria-label="SunoFlow home">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8.9 4.3c2.8 0 4.7 2 4.7 4.8 0 2.5-1.8 3.7-2.9 5.1-.7.9-.9 1.8-.9 2.9 0 1.5-1.2 2.6-2.6 2.6s-2.6-1.2-2.6-2.6c0-1.2.4-2 .4-3.1 0-1.6-1-2.8-1-4.9 0-2.8 2.1-4.8 4.9-4.8z"/><path d="M8.9 7.4c1.4 0 2.2 1 2.2 2.1 0 1.3-1.1 1.9-1.7 2.8-.4.6-.5 1.2-.5 1.9"/><path d="M16.6 10.2a3.6 3.6 0 0 0 0 5.2"/><path d="M19.9 8.2a6.8 6.8 0 0 0 0 9.2"/></svg>
+      SunoFlow
+    </a>
+    <div class="dash-who">
+      <img class="avatar" id="avatar" alt="" hidden>
+      <span class="email" id="who"></span>
+      <button class="btn btn-quiet" id="signout" type="button">Sign out</button>
+    </div>
+  </div>
+</header>
+
+<main class="dash-main">
+  <div class="shell">
+    <h1 class="dash-title" id="greeting">Your account</h1>
+    <p class="sub" id="greetingSub">Devices, subscription, and everything attached to your login.</p>
+
+    <!-- ---------------------------------------------------- subscription -->
+    <section class="dash-section">
+      <div class="dash-label">Subscription</div>
+      <div id="planBox" class="skeleton">Loading…</div>
+    </section>
+
+    <!-- --------------------------------------------------------- devices -->
+    <section class="dash-section">
+      <div class="dash-label">
+        Devices
+        <span class="right" id="deviceCount"></span>
+      </div>
+      <div id="deviceBox" class="skeleton">Loading…</div>
+    </section>
+
+    <!-- --------------------------------------------------------- account -->
+    <section class="dash-section">
+      <div class="dash-label">Account</div>
+      <div class="drow">
+        <div class="grow">
+          <div class="t">Email</div>
+          <div class="d">The address you sign in with.</div>
+        </div>
+        <div class="val" id="acctEmail">—</div>
+      </div>
+      <div class="drow">
+        <div class="grow">
+          <div class="t">Member since</div>
+          <div class="d">When this account was created.</div>
+        </div>
+        <div class="val" id="acctSince">—</div>
+      </div>
+    </section>
+  </div>
+</main>
+
+<script type="module">
+  import { auth, db } from "./assets/firebase-init.js?v=13";
+  import { onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
+  import { getFunctions, httpsCallable, connectFunctionsEmulator }
+    from "https://www.gstatic.com/firebasejs/10.14.1/firebase-functions.js";
+  import {
+    doc, getDoc, setDoc, collection, onSnapshot,
+    serverTimestamp, Timestamp,
+  } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
+
+  const PRICE = "₹99";
+  const TRIAL_DAYS = 7;
+
+  const el = (id) => document.getElementById(id);
+  const fmtDate = (d) =>
+    d ? d.toLocaleDateString(undefined, { day: "numeric", month: "long", year: "numeric" }) : "—";
+  const daysBetween = (a, b) => Math.ceil((b - a) / 86400000);
+  const esc = (s) => String(s).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+  const fns = getFunctions(undefined, "asia-south1");
+  if (["localhost", "127.0.0.1"].includes(location.hostname)) {
+    connectFunctionsEmulator(fns, "127.0.0.1", 5299);
+  }
+
+  let currentUser = null;
+  let profile = null;
+
+  onAuthStateChanged(auth, async (user) => {
+    if (!user) { location.replace("login.html"); return; }
+    currentUser = user;
+
+    el("who").textContent = user.email || "";
+    if (user.photoURL) {
+      const img = el("avatar");
+      img.src = user.photoURL;
+      img.hidden = false;
+    }
+    el("acctEmail").textContent = user.email || "—";
+    if (user.displayName) {
+      el("greeting").textContent = `Hello, ${user.displayName.split(" ")[0]}.`;
+    }
+    document.body.dataset.state = "ready";
+
+    await loadProfile();
+    await loadDevices();
+  });
+
+  let unsubProfile = null;
+  let unsubDevices = null;
+
+  function detachListeners() {
+    unsubProfile?.(); unsubProfile = null;
+    unsubDevices?.(); unsubDevices = null;
+  }
+
+  el("signout").addEventListener("click", async () => {
+    detachListeners();
+    await signOut(auth);
+    location.replace("login.html");
+  });
+
+
+  /**
+   * Watches the account document.
+   *
+   * Billing state is decided by Razorpay's webhook, seconds after the user
+   * finishes checkout and entirely outside this page. A one-shot read means the
+   * dashboard shows yesterday's answer until someone reloads — so it listens
+   * instead, and the plan flips the moment the webhook lands.
+   */
+  async function loadProfile() {
+    const ref = doc(db, "users", currentUser.uid);
+    let snap = await getDoc(ref);
+
+    if (!snap.exists()) {
+      const endsAt = new Date();
+      endsAt.setDate(endsAt.getDate() + TRIAL_DAYS);
+      await setDoc(ref, {
+        uid: currentUser.uid,
+        email: currentUser.email || "",
+        displayName: currentUser.displayName || "",
+        photoURL: currentUser.photoURL || "",
+        plan: "trial",
+        cancelAtPeriodEnd: false,
+        currentPeriodEnd: null,
+        trialEndsAt: Timestamp.fromDate(endsAt),
+        createdAt: serverTimestamp(),
+      });
+      snap = await getDoc(ref);
+    }
+
+    unsubProfile?.();
+    unsubProfile = onSnapshot(
+      ref,
+      (live) => {
+        profile = live.data() || {};
+        el("acctSince").textContent = fmtDate(profile.createdAt?.toDate?.());
+        renderPlan();
+      },
+      (err) => console.error("profile listener stopped:", err)
+    );
+  }
+
+  function planState() {
+    const now = new Date();
+    const trialEnds = profile.trialEndsAt?.toDate?.() || null;
+    const periodEnd = profile.currentPeriodEnd?.toDate?.() || null;
+
+    if (profile.plan === "active") {
+      return profile.cancelAtPeriodEnd
+        ? { key: "ending", label: "Ending soon", cls: "is-ending",
+            meta: `Your subscription stays active until ${fmtDate(periodEnd)}, then stops. You won't be charged again.` }
+        : { key: "active", label: "Active", cls: "is-active",
+            meta: periodEnd ? `Renews on ${fmtDate(periodEnd)}.` : "Renews monthly." };
+    }
+    if (profile.plan === "canceled") {
+      return { key: "canceled", label: "Canceled", cls: "is-expired",
+               meta: "Your subscription has ended. Reactivate whenever you like." };
+    }
+    // trial
+    if (trialEnds && trialEnds > now) {
+      const left = daysBetween(now, trialEnds);
+      return { key: "trial", label: "Free trial", cls: "is-trial",
+               meta: `${left} day${left === 1 ? "" : "s"} left — your trial ends on ${fmtDate(trialEnds)}.` };
+    }
+    return { key: "trial-over", label: "Trial ended", cls: "is-expired",
+             meta: `Your free trial ended on ${fmtDate(trialEnds)}. Activate to keep dictating.` };
+  }
+
+  function renderPlan() {
+    const st = planState();
+    const box = el("planBox");
+    box.className = "";
+
+    const actions = {
+      "trial":      `<button class="btn btn-primary" data-act="activate">Activate subscription</button>`,
+      "trial-over": `<button class="btn btn-primary" data-act="activate">Activate subscription</button>`,
+      "canceled":   `<button class="btn btn-primary" data-act="activate">Reactivate subscription</button>`,
+      "active":     `<button class="btn btn-quiet" data-act="cancel">Cancel subscription</button>`,
+      "ending":     `<button class="btn btn-primary" data-act="resume">Resume subscription</button>`,
+    }[st.key] || "";
+
+    box.innerHTML = `
+      <div class="plan-head">
+        <div>
+          <div class="plan-price">${PRICE} <small>per month</small></div>
+          <div class="meta">${esc(st.meta)}</div>
+        </div>
+        <div class="side">
+          <span class="state-pill ${st.cls}">${esc(st.label)}</span>
+          ${actions}
+        </div>
+      </div>
+      <div class="drow">
+        <div class="grow"><div class="t">Plan</div><div class="d">One plan, everything included.</div></div>
+        <div class="val">SunoFlow — monthly</div>
+      </div>
+      <div class="drow">
+        <div class="grow"><div class="t">Billing</div><div class="d">How you'll be charged when billing goes live.</div></div>
+        <div class="val">Not set up yet</div>
+      </div>
+      <p class="dash-note">
+        Paid but still showing inactive?
+        <a href="#" id="resync" style="color:var(--accent);text-decoration:underline;text-underline-offset:3px">Re-check with Razorpay</a>.
+      </p>
+    `;
+
+    box.querySelectorAll("[data-act]").forEach((btn) => {
+      btn.addEventListener("click", () => changePlan(btn.dataset.act, btn));
+    });
+    wireResync();
+  }
+
+  async function changePlan(action, btn) {
+    const label = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "Working…";
+
+    const restore = (msg) => {
+      btn.disabled = false;
+      btn.textContent = label;
+      if (msg) alert(msg);
+    };
+
+    try {
+      if (action === "activate" || action === "resume") {
+        await startCheckout(restore);
+        return;                       // the webhook decides what happens next
+      }
+      if (action === "cancel") {
+        if (!confirm("Cancel your subscription? You keep access until the end of the period you've paid for.")) {
+          restore();
+          return;
+        }
+        await httpsCallable(fns, "cancelSubscription")({});
+        // The listener re-renders when the write lands; nothing to do here.
+      }
+    } catch (err) {
+      restore("Couldn't update the subscription: " + (err.message || err));
+    }
+  }
+
+  function wireResync() {
+    const link = el("resync");
+    if (!link) return;
+    link.addEventListener("click", async (e) => {
+      e.preventDefault();
+      link.textContent = "Checking…";
+      try {
+        await httpsCallable(fns, "syncSubscription")({});
+        await refreshProfile();
+      } catch (err) {
+        alert("Couldn't re-check: " + (err.message || err));
+        link.textContent = "Re-check with Razorpay";
+      }
+    });
+  }
+
+  async function refreshProfile() {
+    const snap = await getDoc(doc(db, "users", currentUser.uid));
+    profile = snap.data() || {};
+    renderPlan();
+  }
+
+  /** Loads Razorpay Checkout on demand — no third-party script on page load. */
+  function loadCheckout() {
+    if (window.Razorpay) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const s = document.createElement("script");
+      s.src = "https://checkout.razorpay.com/v1/checkout.js";
+      s.onload = resolve;
+      s.onerror = () => reject(new Error("Couldn't load the payment window."));
+      document.head.appendChild(s);
+    });
+  }
+
+  async function startCheckout(restore) {
+    await loadCheckout();
+    const { data } = await httpsCallable(fns, "createSubscription")({});
+    if (data.alreadyActive) {
+      await refreshProfile();
+      return;
+    }
+
+    // Say plainly when money actually moves. Subscribing during the trial
+    // authorises the mandate now but defers the first charge to the day the
+    // trial ends, and the checkout window should not imply otherwise.
+    const firstCharge = data.firstChargeAt
+      ? new Date(data.firstChargeAt * 1000).toLocaleDateString(undefined,
+          { day: "numeric", month: "long", year: "numeric" })
+      : null;
+
+    const rzp = new window.Razorpay({
+      key: data.keyId,
+      subscription_id: data.subscriptionId,
+      name: "SunoFlow",
+      description: firstCharge
+        ? `₹99 per month — first charge on ${firstCharge}`
+        : "SunoFlow — ₹99 per month",
+      prefill: { email: currentUser.email || "", name: currentUser.displayName || "" },
+      theme: { color: "#4f49b5" },
+      handler: async () => {
+        // Payment authorised. The webhook is what actually flips the plan, and
+        // it may land a moment after this, so poll briefly rather than telling
+        // the user something we have not confirmed.
+        btn.textContent = "Confirming…";
+        awaitActivation(btn);
+      },
+      modal: {
+        ondismiss: () => restore(),   // user closed the window; nothing changed
+      },
+    });
+    rzp.on("payment.failed", (resp) => {
+      restore("Payment failed: " + (resp?.error?.description || "please try again."));
+    });
+    rzp.open();
+  }
+
+  /**
+   * After checkout the page just waits: the profile listener re-renders the
+   * moment Razorpay's webhook writes the new plan, so there is nothing to poll.
+   * This only exists to say something if that takes unusually long.
+   */
+  function awaitActivation(btn) {
+    btn.disabled = true;
+    btn.textContent = "Confirming…";
+    const startedWith = profile.plan;
+    setTimeout(() => {
+      if (profile.plan === startedWith && btn.isConnected) {
+        btn.disabled = false;
+        renderPlan();
+        alert("Payment received. If this still shows as inactive in a minute, use “Re-check with Razorpay”.");
+      }
+    }, 30000);
+  }
+
+  async function revokeDevice(btn) {
+    const name = btn.dataset.name;
+    if (!confirm(`Disconnect ${name}? It will stop dictating until you connect it again.`)) return;
+
+    const label = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "Disconnecting…";
+    try {
+      await httpsCallable(fns, "revokeDevice")({ deviceId: btn.dataset.revoke });
+      await loadDevices();
+    } catch (err) {
+      btn.disabled = false;
+      btn.textContent = label;
+      alert("Couldn't disconnect that device: " + (err.message || err));
+    }
+  }
+
+  async function loadDevices() {
+    const box = el("deviceBox");
+    unsubDevices?.();
+    unsubDevices = onSnapshot(
+      collection(db, "users", currentUser.uid, "devices"),
+      (snap) => renderDevices(snap, box),
+      (err) => {
+        console.error("device listener stopped:", err);
+        box.className = "";
+        box.innerHTML = '<div class="empty"><strong>Couldn\'t load devices</strong>Reload the page to try again.</div>';
+      }
+    );
+  }
+
+  function renderDevices(snap, box) {
+    try {
+      box.className = "";
+      if (snap.empty) {
+        el("deviceCount").textContent = "None yet";
+        box.innerHTML = `
+          <div class="empty">
+            <strong>No devices connected</strong>
+            Open SunoFlow on your Mac and sign in with this account. The Mac will
+            appear here, along with when it last dictated.
+          </div>`;
+        return;
+      }
+      const rows = [];
+      snap.forEach((d) => {
+        const v = d.data();
+        const seen = v.lastSeenAt?.toDate?.();
+        rows.push(`
+          <div class="drow">
+            <div class="grow">
+              <div class="t">${esc(v.name || "Unnamed device")}</div>
+              <div class="d">${esc(v.platform || "macOS")}${v.appVersion ? " · SunoFlow " + esc(v.appVersion) : ""} · ${seen ? "last used " + fmtDate(seen) : "never used"}</div>
+            </div>
+            <div class="actions">
+              <button class="btn btn-quiet" data-revoke="${esc(d.id)}" data-name="${esc(v.name || "this device")}">Disconnect</button>
+            </div>
+          </div>`);
+      });
+      el("deviceCount").textContent = `${snap.size} connected`;
+      box.innerHTML = rows.join("");
+      box.querySelectorAll("[data-revoke]").forEach((btn) => {
+        btn.addEventListener("click", () => revokeDevice(btn));
+      });
+    } catch (err) {
+      box.className = "";
+      box.innerHTML = `<div class="empty"><strong>Couldn't load your devices</strong>${esc(err.message || err)}</div>`;
+    }
+  }
+</script>
+</body>
+</html>

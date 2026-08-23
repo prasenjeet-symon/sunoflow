@@ -1,20 +1,40 @@
 import AppKit
 
-// Renders a 1024x1024 app icon: a white microphone glyph on a violet→indigo
-// rounded-rect gradient, and writes it to the path given as argv[1].
+// Renders the app icon: the SunoFlow ear mark in white on a violet→indigo
+// rounded-rect gradient. Usage:
+//
+//   make-icon <output.png> [pixel-size]     # pixel-size defaults to 1024
+//
+// The mark itself comes from BrandMark.swift, which holds the same SVG path
+// data the website ships, so the app icon and the site can't drift apart.
+// `tools/make-icns.sh` compiles the two together and wraps the result up as
+// Resources/AppIcon.icns.
 
-let size: CGFloat = 1024
 let outputPath = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "icon.png"
+let pixels = CommandLine.arguments.count > 2 ? Int(CommandLine.arguments[2]) ?? 1024 : 1024
+let size = CGFloat(pixels)
 
-let image = NSImage(size: NSSize(width: size, height: size))
-image.lockFocus()
-
-guard let ctx = NSGraphicsContext.current?.cgContext else {
-    fatalError("no graphics context")
+// Draw into a bitmap of exactly `pixels` square. Going through NSImage's
+// lockFocus() instead would silently render at the main screen's backing scale,
+// so the same command would produce a 2048px file on a Retina Mac and a 1024px
+// one over SSH.
+guard let rep = NSBitmapImageRep(
+    bitmapDataPlanes: nil, pixelsWide: pixels, pixelsHigh: pixels,
+    bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+    colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
+) else {
+    fatalError("could not allocate the bitmap")
 }
 
+guard let context = NSGraphicsContext(bitmapImageRep: rep) else {
+    fatalError("no graphics context")
+}
+NSGraphicsContext.saveGraphicsState()
+NSGraphicsContext.current = context
+let ctx = context.cgContext
+
 // Transparent margin around the rounded rect, matching macOS icon grid spacing.
-let margin: CGFloat = 90
+let margin: CGFloat = size * 90 / 1024
 let rect = NSRect(x: margin, y: margin, width: size - margin * 2, height: size - margin * 2)
 let radius: CGFloat = (size - margin * 2) * 0.2237 // Apple squircle-ish corner
 let bgPath = NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
@@ -36,27 +56,13 @@ bgPath.addClip()
 highlight.draw(in: NSRect(x: rect.minX, y: rect.midY, width: rect.width, height: rect.height / 2), angle: -90)
 ctx.resetClip()
 
-// White microphone glyph via SF Symbol, palette-colored white.
-let symbolConfig = NSImage.SymbolConfiguration(pointSize: 560, weight: .semibold)
-    .applying(NSImage.SymbolConfiguration(paletteColors: [.white]))
+// The ear, in white, sized to sit comfortably inside the rounded rect.
+let glyph = rect.insetBy(dx: rect.width * 0.21, dy: rect.height * 0.21)
+BrandMark.draw(.idle, in: glyph, color: NSColor.white.cgColor, into: ctx)
 
-if let mic = NSImage(systemSymbolName: "mic.fill", accessibilityDescription: nil)?
-    .withSymbolConfiguration(symbolConfig) {
-    let s = mic.size
-    let drawRect = NSRect(
-        x: (size - s.width) / 2,
-        y: (size - s.height) / 2,
-        width: s.width,
-        height: s.height
-    )
-    mic.draw(in: drawRect)
-}
+NSGraphicsContext.restoreGraphicsState()
 
-image.unlockFocus()
-
-guard let tiff = image.tiffRepresentation,
-      let rep = NSBitmapImageRep(data: tiff),
-      let png = rep.representation(using: .png, properties: [:]) else {
+guard let png = rep.representation(using: .png, properties: [:]) else {
     fatalError("failed to render PNG")
 }
 

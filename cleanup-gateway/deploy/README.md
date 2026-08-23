@@ -1,7 +1,7 @@
 # SunoFlow cleanup gateway — deploy runbook
 
 Single-host v1 deployment of the Go cleanup gateway behind Nginx, fronting a
-local Ollama. See `docs/CLEANUP_GATEWAY_ARCHITECTURE.md` for the full design.
+the Gemini API. See `docs/CLEANUP_GATEWAY_ARCHITECTURE.md` for the full design.
 
 ## Build
 
@@ -15,15 +15,10 @@ The result is a single static binary. CGO is not required (SQLite via
 
 ## Prerequisites on the host
 
-1. **Ollama** installed and running, bound to loopback only:
-   ```sh
-   OLLAMA_HOST=127.0.0.1:11434 ollama serve
-   ```
-   Pull the model you chose for `OLLAMA_MODEL`:
-   ```sh
-   ollama pull llama3.2:3b   # or glm-5.2:cloud, etc.
-   ```
-   **Never** expose Ollama to the internet. It must bind `127.0.0.1` only.
+1. **A Gemini API key** from https://aistudio.google.com/apikey, and outbound
+   HTTPS from the host to `generativelanguage.googleapis.com`. There is no
+   local model runtime to install and nothing to pull — the gateway holds the
+   key and is the only process that talks to the provider.
 
 2. **Nginx** with a TLS cert (Let's Encrypt / certbot):
    ```sh
@@ -43,15 +38,22 @@ Create `/etc/sunoflow/gateway.env`:
 ```sh
 ADMIN_TOKEN=<long random secret>      # REQUIRED. Guards /admin/*.
 GATEWAY_ADDR=127.0.0.1:8080
-OLLAMA_URL=http://127.0.0.1:11434/api/generate
-OLLAMA_MODEL=llama3.2:3b              # server-controlled; change without a client release
-BACKEND=ollama
-OLLAMA_TIMEOUT=20s
+BACKEND=gemini
+GEMINI_API_KEY=<AI Studio key>        # REQUIRED. Startup fails without it.
+GEMINI_MODEL=gemini-3.5-flash-lite    # server-controlled; change without a client release
+GEMINI_TIMEOUT=20s
+GEMINI_THINKING_LEVEL=low             # minimal|low|medium|high
 DB_PATH=/var/lib/sunoflow-gateway/keys.db
 LOG_LEVEL=info
 DEFAULT_QUOTA_RPM=60
 DEFAULT_QUOTA_DAILY=5000
 ```
+
+Both quotas are **per account**, not per device: a customer who pairs three
+machines gets one allowance, not three. Usage is attributed to the account uid
+where the gateway knows it (any paired device) and to the key id otherwise (a
+legacy key, which belongs to no account).
+
 
 ## Install
 
@@ -94,7 +96,7 @@ curl -X DELETE -H "Authorization: Bearer $ADMIN_TOKEN" \
 ```sh
 # Liveness
 curl https://api.example.com/health
-# Readiness (checks Ollama)
+# Readiness (probes Gemini)
 curl https://api.example.com/ready
 # Cleanup
 curl -X POST https://api.example.com/cleanup \
@@ -109,10 +111,13 @@ curl -X POST https://api.example.com/cleanup \
 - **Logs** go to journald as JSON: `journalctl -u sunoflow-gateway -f`. They
   contain metadata only (request id, key id, latency, status) — never transcript
   contents.
-- **Swap the model** by editing `OLLAMA_MODEL` in `/etc/sunoflow/gateway.env` and
+- **Swap the model** by editing `GEMINI_MODEL` in `/etc/sunoflow/gateway.env` and
   restarting the service. No client release needed.
-- **Backend swap** (Ollama → OpenAI/Claude) is interface-only in v1; implement the
-  backend and set `BACKEND=openai`. The cleanup handler is unchanged.
+- **Adding a backend** means implementing `backend.Backend` and adding a case in
+  `cmd/gateway/main.go`; `BACKEND` then selects it. The cleanup handler and the
+  prompt are provider-agnostic and stay unchanged.
+- **Key hygiene:** `GEMINI_API_KEY` lives only in `/etc/sunoflow/gateway.env`,
+  which should be mode 600 and owned by the `sunoflow` user. It is never logged.
 - **Scaling:** v1 is single-host + SQLite. When a second host is needed, move the
   key store to Postgres and the rate limiter to Redis; the interfaces are
   designed so this is a storage swap, not a rewrite.

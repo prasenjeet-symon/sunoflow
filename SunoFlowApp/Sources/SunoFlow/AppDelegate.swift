@@ -28,6 +28,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let correctionsMenu = NSMenu()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // The stored device key may have been written by a copy of the app at a
+        // different path (a build directory, before it was installed). Rewrite
+        // it from here so macOS stops treating every read as untrusted.
+        Keychain.repairAccessIfNeeded()
+
         AppLog.log("=== SunoFlow launched ===")
         logMicPermission()
         setupStatusItem()
@@ -58,6 +63,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ) { [weak self] _ in
             self?.openSettings()
         }
+
+        // In a distributed app the app itself supervises the bundled frozen
+        // sidecar (no external launchd KeepAlive). In dev this is a no-op.
+        SidecarSupervisor.shared.ensureRunning()
 
         startHealthPolling()
     }
@@ -132,11 +141,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func rebuildCorrectionsMenu(_ corrections: [Correction]) {
         correctionsMenu.removeAllItems()
         correctionsMenuItem.title = corrections.isEmpty
-            ? "Learned Corrections"
-            : "Learned Corrections (\(corrections.count))"
+            ? "Dictionary"
+            : "Dictionary (\(corrections.count))"
 
         guard !corrections.isEmpty else {
-            let none = NSMenuItem(title: "None yet — edit pasted text to teach it", action: nil, keyEquivalent: "")
+            let none = NSMenuItem(title: "Empty — edit pasted text to teach it a spelling", action: nil, keyEquivalent: "")
             none.isEnabled = false
             correctionsMenu.addItem(none)
             return
@@ -147,9 +156,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         correctionsMenu.addItem(header)
 
         for correction in corrections {
+            // Only shorthand is tagged. Spellings are the default and the bulk of
+            // the list, so labelling them too would be noise in a menu this size.
+            let kindTag = correction.resolvedKind == .expansion ? "  · Shorthand" : ""
             let suffix = correction.count > 1 ? "  (×\(correction.count))" : ""
             let item = NSMenuItem(
-                title: "“\(correction.from)” → “\(correction.to)”\(suffix)",
+                title: "“\(correction.from)” → “\(correction.to)”\(suffix)\(kindTag)",
                 action: #selector(deleteCorrectionItem(_:)),
                 keyEquivalent: ""
             )
@@ -188,7 +200,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func updateStatusText() {
         let text: String
         switch state {
-        case .sidecarOffline: text = "Status: sidecar offline (run ./run.sh)"
+        case .sidecarOffline: text = "Status: speech engine offline"
         case .idle: text = "Status: idle — press ⌥Space to dictate"
         case .recording: text = "Status: recording… press ⌥Space to stop"
         case .processing: text = "Status: transcribing…"
@@ -197,14 +209,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updateIcon() {
-        let symbolName: String
+        let variant: BrandMark.Variant
         switch state {
-        case .sidecarOffline: symbolName = "exclamationmark.triangle"
-        case .idle: symbolName = "mic"
-        case .recording: symbolName = "mic.fill"
-        case .processing: symbolName = "hourglass"
+        case .sidecarOffline: variant = .offline
+        case .idle: variant = .idle
+        case .recording: variant = .recording
+        case .processing: variant = .processing
         }
-        statusItem.button?.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "SunoFlow")
+        statusItem.button?.image = BrandMark.image(variant)
     }
 
     // MARK: - Sidecar health
@@ -225,6 +237,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     return
                 default:
                     self.state = ok ? .idle : .sidecarOffline
+                    if !ok {
+                        // Respawn a dead bundled sidecar (installed mode only).
+                        // In dev this is a no-op.
+                        SidecarSupervisor.shared.ensureRunning()
+                    }
                 }
             }
         }
@@ -250,6 +267,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func startRecording() {
+        // SunoFlow is a subscription product: without a connected account there
+        // is no device key, nothing would authenticate to the cleanup service,
+        // and dictation would quietly degrade to raw text. Say so up front
+        // rather than recording something we cannot finish.
+        guard Keychain.deviceKey() != nil else {
+            NSSound.beep()
+            AppLog.log("Dictation blocked — no account connected on this Mac")
+            lastTranscriptMenuItem?.title = "Connect your account to dictate"
+            SettingsWindowController.shared.show()
+            return
+        }
+
         // Before recording the next utterance, learn from any edits the user made
         // to the previously pasted text.
         editLearner.captureIfNeeded()
@@ -335,15 +364,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.state = .idle
                 switch result {
                 case .success(let transcription):
+                    // Served, so the account is in good standing: clear any
+                    // stale lapse notice and re-arm it for a future one.
+                    AccountManager.shared.clearEntitlementNotice()
+                    self.hasShownLapseNotice = false
                     self.handleTranscript(transcription)
                 case .failure(let error):
                     NSSound.beep()
-                    AppLog.log("Transcription request failed: \(error)")
+                    if case TranscriptionError.notEntitled(let code, let message) = error {
+                        // Nothing is pasted. This is a stop, not a degraded
+                        // result — say so and point at the place it can be fixed.
+                        AppLog.log("Dictation refused — \(code)")
+                        AccountManager.shared.noteEntitlementProblem(message)
+                        self.showDictationBlocked(code: code, message: message)
+                    } else {
+                        AppLog.log("Transcription request failed: \(error)")
+                    }
                 }
                 try? FileManager.default.removeItem(at: fileURL)
             }
         }
     }
+
+    /// Tells the user why nothing was typed.
+    ///
+    /// Deliberately not a user notification: that API is deprecated and the
+    /// replacement needs an authorisation prompt, which is a poor thing to ask
+    /// for at the exact moment dictation has just failed. Opening Settings on
+    /// the Account tab explains it and puts the fix one click away.
+    private func showDictationBlocked(code: String, message: String) {
+        // An outage and a lapsed subscription both stop dictation, but they are
+        // not the same news and must not read the same in the menu bar.
+        let summary = code == "unreachable"
+            ? "Paused — can't reach SunoFlow"
+            : "Paused — subscription inactive"
+        lastTranscriptMenuItem?.title = summary
+        let paused = BrandMark.image(.offline)
+        paused.accessibilityDescription = "SunoFlow \(summary)"
+        statusItem.button?.image = paused
+
+        // Only surface the window once per lapse, so repeated hotkey presses
+        // do not keep yanking Settings to the front.
+        guard !hasShownLapseNotice else { return }
+        hasShownLapseNotice = true
+        SettingsWindowController.shared.show()
+    }
+
+    private var hasShownLapseNotice = false
 
     private func handleTranscript(_ transcription: TranscriptionResult) {
         let cleaned = transcription.cleaned.trimmingCharacters(in: .whitespacesAndNewlines)

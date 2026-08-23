@@ -12,11 +12,8 @@ import (
 
 // Config holds all runtime configuration for the gateway.
 type Config struct {
-	GatewayAddr   string        // listen address (loopback; Nginx proxies to it)
-	OllamaURL     string        // Ollama /api/generate endpoint
-	OllamaModel   string        // model name (server-controlled)
-	Backend       string        // active backend: ollama|gemini|openai|claude
-	OllamaTimeout time.Duration // per-call timeout
+	GatewayAddr string // listen address (loopback; Nginx proxies to it)
+	Backend     string // active backend; gemini is the only implementation
 
 	// Gemini backend. GeminiAPIKey comes from the environment only — it is
 	// never written to source or logged.
@@ -30,18 +27,29 @@ type Config struct {
 	DBPath         string // SQLite path
 	AdminToken     string // token for /admin/* endpoints (required)
 	LogLevel       string // debug|info|warn|error
-	QuotaRPM       int    // default per-key requests/minute
-	QuotaDaily     int    // default per-key requests/day
+	// Account entitlement (Firestore). When FirebaseProject is empty the
+	// gateway keeps using only its own SQLite keys, so an existing deployment
+	// is unaffected until it is configured.
+	FirebaseProject     string // Firebase project id, e.g. sunoflow-app
+	FirebaseCredentials string // path to a service-account json; empty = ADC
+
+	QuotaRPM   int // default per-key requests/minute
+	QuotaDaily int // default per-key requests/day
+
+	// LeaseSecret signs the offline entitlement leases the gateway hands to
+	// entitled devices. The sidecar verifies them with the same value, so the
+	// two must match: changing it here without shipping a matching sidecar
+	// invalidates every lease in the field. Empty uses the built-in default,
+	// which is what almost every deployment should do — see
+	// internal/account/lease.go for why this is not really a secret.
+	LeaseSecret string
 }
 
 // Load reads configuration from the environment. Fatal on missing ADMIN_TOKEN.
 func Load() (Config, error) {
 	cfg := Config{
-		GatewayAddr:   envStr("GATEWAY_ADDR", "127.0.0.1:8080"),
-		OllamaURL:     envStr("OLLAMA_URL", "http://127.0.0.1:11434/api/generate"),
-		OllamaModel:   envStr("OLLAMA_MODEL", "llama3.2:3b"),
-		Backend:       envStr("BACKEND", "ollama"),
-		OllamaTimeout: envDuration("OLLAMA_TIMEOUT", 20*time.Second),
+		GatewayAddr: envStr("GATEWAY_ADDR", "127.0.0.1:8080"),
+		Backend:     envStr("BACKEND", "gemini"),
 
 		GeminiAPIKey:   envStr("GEMINI_API_KEY", ""),
 		GeminiModel:    envStr("GEMINI_MODEL", "gemini-3.5-flash-lite"),
@@ -50,22 +58,29 @@ func Load() (Config, error) {
 		GeminiThinking: envStr("GEMINI_THINKING_LEVEL", "low"),
 		DBPath:         envStr("DB_PATH", "/var/lib/sunoflow-gateway/keys.db"),
 		AdminToken:     envStr("ADMIN_TOKEN", ""),
-		LogLevel:       envStr("LOG_LEVEL", "info"),
-		QuotaRPM:       envInt("DEFAULT_QUOTA_RPM", 60),
-		QuotaDaily:     envInt("DEFAULT_QUOTA_DAILY", 5000),
+
+		FirebaseProject:     envStr("FIREBASE_PROJECT", ""),
+		FirebaseCredentials: envStr("FIREBASE_CREDENTIALS", ""),
+		LogLevel:            envStr("LOG_LEVEL", "info"),
+		QuotaRPM:            envInt("DEFAULT_QUOTA_RPM", 60),
+		QuotaDaily:          envInt("DEFAULT_QUOTA_DAILY", 5000),
+		LeaseSecret:         envStr("LEASE_SECRET", ""),
 	}
 	if cfg.AdminToken == "" {
 		return Config{}, fmt.Errorf("ADMIN_TOKEN is required")
 	}
+	// BACKEND is kept as an explicit selector so adding a provider stays a
+	// config change rather than a code change at the call site, but Gemini is
+	// the only backend that exists. Anything else is a typo, not a feature.
 	switch cfg.Backend {
-	case "ollama", "gemini", "openai", "claude":
+	case "gemini":
 	default:
-		return Config{}, fmt.Errorf("BACKEND must be ollama|gemini|openai|claude, got %q", cfg.Backend)
+		return Config{}, fmt.Errorf("BACKEND must be gemini, got %q", cfg.Backend)
 	}
 	// Fail at startup rather than on the first user request: a gateway that
 	// boots without a key would soft-fail every cleanup to raw text silently.
-	if cfg.Backend == "gemini" && cfg.GeminiAPIKey == "" {
-		return Config{}, fmt.Errorf("GEMINI_API_KEY is required when BACKEND=gemini")
+	if cfg.GeminiAPIKey == "" {
+		return Config{}, fmt.Errorf("GEMINI_API_KEY is required")
 	}
 	return cfg, nil
 }

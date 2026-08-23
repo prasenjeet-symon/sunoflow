@@ -59,8 +59,15 @@ internal sealed class Preferences : INotifyPropertyChanged
         // The setters already save + raise PropertyChanged for both fields.
     }
 
+    /// <summary>Set while <see cref="Load"/> is populating a fresh instance. The
+    /// hotkey setters persist on write, and during a load that would serialize the
+    /// half-populated object straight back over the file being read — whatever had
+    /// not been assigned yet would silently revert to its default.</summary>
+    private static bool _loading;
+
     public void Save()
     {
+        if (_loading) return;
         try
         {
             var dir = System.IO.Path.Combine(
@@ -68,7 +75,13 @@ internal sealed class Preferences : INotifyPropertyChanged
             System.IO.Directory.CreateDirectory(dir);
             var path = System.IO.Path.Combine(dir, "preferences.json");
             var json = JsonSerializer.Serialize(this, JsonOpts);
-            System.IO.File.WriteAllText(path, json);
+
+            // Write beside the real file and swap it in, so a crash or a full disk
+            // mid-write leaves the previous settings intact rather than a truncated
+            // file the next launch cannot parse.
+            var temp = path + ".tmp";
+            System.IO.File.WriteAllText(temp, json);
+            System.IO.File.Move(temp, path, overwrite: true);
         }
         catch (Exception ex)
         {
@@ -86,8 +99,13 @@ internal sealed class Preferences : INotifyPropertyChanged
             if (System.IO.File.Exists(path))
             {
                 var json = System.IO.File.ReadAllText(path);
-                var p = JsonSerializer.Deserialize<Preferences>(json, JsonOpts);
-                if (p != null) return p;
+                _loading = true;
+                try
+                {
+                    var p = JsonSerializer.Deserialize<Preferences>(json, JsonOpts);
+                    if (p != null) return p;
+                }
+                finally { _loading = false; }
             }
         }
         catch (Exception ex)

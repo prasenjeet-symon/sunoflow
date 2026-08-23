@@ -9,24 +9,32 @@ from contextlib import asynccontextmanager
 from difflib import SequenceMatcher
 
 import requests
-from fastapi import FastAPI, File, Form, Query, UploadFile
+from fastapi.responses import JSONResponse
+from fastapi import FastAPI, File, Form, Query, UploadFile, Header
 from starlette.concurrency import run_in_threadpool
 
 import parakeet_mlx
+
+import lease
 
 MODEL_ID = "mlx-community/parakeet-tdt-0.6b-v3"
 
 # --- Cleanup gateway (hosted) -------------------------------------------------
 # Cleanup/LLM no longer runs locally. The sidecar POSTs the transcript to a
 # remote cleanup gateway (Go service, see cleanup-gateway/) which owns the
-# cleanup instruction, the LLM backend (Ollama/OpenAI/Claude), and the
+# cleanup instruction, the LLM backend (Gemini), and the
 # echo-retry guard — so the live path is a single POST that soft-fails to raw
 # text on any error. The Swift app probes the gateway's /ready directly for
 # its connectivity status; the sidecar no longer surfaces /config or /models.
 # Override with SUNOFLOW_CLEANUP_URL / SUNOFLOW_CLEANUP_KEY for dev (e.g.
 # point at a local docker-compose stack).
 CLEANUP_URL = os.environ.get("SUNOFLOW_CLEANUP_URL", "https://cleanup.mirrorli.art/cleanup")
-CLEANUP_KEY = os.environ.get("SUNOFLOW_CLEANUP_KEY", "FQ2xxpibf5RBIeEzouwSXxU0Nn2sz-nI2H1STykqr1A")
+ENTITLEMENT_URL = CLEANUP_URL.rsplit("/", 1)[0] + "/entitlement"
+# No default. A key used to ship here, identical in every install, which meant
+# anyone who downloaded SunoFlow could use the gateway for free and it could not
+# be revoked without breaking everyone. The device key now arrives per request
+# from the app's Keychain; this remains only as a dev override.
+CLEANUP_KEY = os.environ.get("SUNOFLOW_CLEANUP_KEY", "")
 
 # --- Managed model directory ---------------------------------------------------
 # For distribution the app ships WITHOUT the model bundled. The user downloads
@@ -76,7 +84,13 @@ def _wav_duration_seconds(path: str):
 # We watch what the user edits after each paste and learn recurring word/short-
 # phrase substitutions (e.g. "cavach" -> "Kavach"), then apply them to future
 # transcripts. Stored locally; nothing leaves the machine.
-CORRECTIONS_PATH = os.path.join(os.path.dirname(__file__), "corrections.json")
+# In a distributed .app the bundled corrections.json (next to __file__) is
+# read-only, so the frozen entry point (freeze_entry.py) overrides this with a
+# writable copy in ~/Library/Application Support/SunoFlow/ via the env var.
+CORRECTIONS_PATH = os.environ.get(
+    "SUNOFLOW_CORRECTIONS_PATH",
+    os.path.join(os.path.dirname(__file__), "corrections.json"),
+)
 
 # Common words we won't auto-learn as global replacements: swapping these is
 # context-dependent (there/their) and a blanket replace would do harm.
@@ -89,6 +103,23 @@ _COMMON_WORDS = {
     "did", "has", "have", "had", "will", "would", "can", "could", "should",
     "than", "then", "too", "two", "to", "here", "hear", "where", "were",
 }
+
+
+KIND_CORRECTION = "correction"
+KIND_EXPANSION = "expansion"
+
+# What a "value" looks like: a URL, handle, email, bare domain, or phone number.
+# These are the things a user saves so they never have to spell them out loud.
+_VALUE_LIKE = re.compile(
+    r"""(?xi)
+      https?://
+    | www\.
+    | ^@[\w.]+$
+    | [\w.+-]+@[\w-]+\.\w
+    | \.(com|net|org|io|in|co|dev|me|ai|app|xyz)\b
+    | ^\+?\d[\d\s().-]{7,}$
+    """
+)
 
 
 def _load_corrections() -> dict:
@@ -112,6 +143,55 @@ corrections = _load_corrections()
 
 def _norm_key(s: str) -> str:
     return s.strip().strip(".,!?;:\"'`()[]").lower()
+
+
+def infer_kind(frm: str, to: str) -> str:
+    """Classify an entry the user added without saying which kind it is.
+
+    A correction is a re-spelling, so the two sides look alike; an expansion
+    swaps a short spoken phrase for something structurally different and usually
+    much longer. Errs toward a correction: that only ever changes a spelling,
+    while an expansion inserts a personal value into the user's text.
+    """
+    to = to.strip()
+    if _VALUE_LIKE.search(to):
+        return KIND_EXPANSION
+    if len(to) > max(24, len(frm) * 2):
+        return KIND_EXPANSION
+    if SequenceMatcher(None, _norm_key(frm), _norm_key(to)).ratio() < 0.5:
+        return KIND_EXPANSION
+    return KIND_CORRECTION
+
+
+def _kind_of(entry: dict) -> str:
+    """The stored kind, classifying on the fly for entries written before the
+    field existed. Keeps an old corrections.json working with no migration."""
+    kind = entry.get("kind")
+    if kind in (KIND_CORRECTION, KIND_EXPANSION):
+        return kind
+    return infer_kind(entry.get("from", ""), entry.get("to", ""))
+
+
+def _distinctive_tokens(s: str) -> list:
+    """The words in ``s`` with enough signal to match a transcript on. "my
+    Instagram" reduces to ["instagram"], so the entry is offered whether the
+    user said "my Instagram ID", "my Instagram handle", or just "my Instagram".
+    """
+    return [
+        t for t in (w.lower() for w in re.findall(r"\w+", s))
+        if len(t) >= 3 and t not in _COMMON_WORDS
+    ]
+
+
+def _contains_phrase(lowered_text: str, phrase: str) -> bool:
+    return re.search(r"(?<!\w)" + re.escape(phrase.lower()) + r"(?!\w)", lowered_text) is not None
+
+
+def _entry(frm: str, to: str, count: int, kind: str = "") -> dict:
+    frm, to = frm.strip(), to.strip()
+    if kind not in (KIND_CORRECTION, KIND_EXPANSION):
+        kind = infer_kind(frm, to)
+    return {"from": frm, "to": to, "count": count, "kind": kind}
 
 
 def _worth_learning(old: str, new: str) -> bool:
@@ -160,6 +240,9 @@ def learn_from_edit(original: str, edited: str):
         entry["from"] = old
         entry["to"] = new
         entry["count"] = entry.get("count", 0) + 1
+        # Always a correction: extract_correction_pairs only yields pairs whose
+        # two sides look alike, which is what a mishearing is.
+        entry["kind"] = KIND_CORRECTION
         corrections[key] = entry
         learned.append({"from": old, "to": new, "count": entry["count"]})
     if learned:
@@ -168,15 +251,69 @@ def learn_from_edit(original: str, edited: str):
 
 
 def apply_corrections(text: str) -> str:
+    """Apply the *corrections* — longest-phrase-first, case-insensitive.
+
+    Expansions are deliberately skipped. A blind global replace cannot tell
+    "here's my Instagram" from "I don't have an Instagram", and getting that
+    wrong drops the user's personal URL into a sentence that did not want it.
+    The cleanup model decides those; see the DICTIONARY block in the gateway's
+    system prompt.
+    """
     if not corrections or not text:
         return text
     result = text
+    entries = [v for v in corrections.values() if _kind_of(v) == KIND_CORRECTION]
     # Longer phrases first so multi-word fixes win over single-word ones.
-    for key in sorted(corrections, key=len, reverse=True):
-        frm = corrections[key]["from"]
-        to = corrections[key]["to"]
-        result = re.sub(r"\b" + re.escape(frm) + r"\b", to, result, flags=re.IGNORECASE)
+    for entry in sorted(entries, key=lambda v: len(v["from"]), reverse=True):
+        frm, to = entry["from"], entry["to"]
+        # Lookarounds rather than \b: \b is a *transition*, so it silently fails
+        # to match a "from" that starts or ends with punctuation. The replacement
+        # is a function so that backslashes and \1-style sequences in the user's
+        # text stay literal instead of being read as group references.
+        result = re.sub(
+            r"(?<!\w)" + re.escape(frm) + r"(?!\w)",
+            lambda _m, to=to: to,
+            result,
+            flags=re.IGNORECASE,
+        )
     return result
+
+
+def relevant_corrections(text: str, limit: int = 40) -> list:
+    """The entries worth sending to the cleanup model for this transcript.
+
+    Filtering here rather than shipping the whole dictionary keeps the prompt
+    small, and keeps every entry the user did not just say on this machine: a
+    term only leaves when the transcript already looks like it.
+
+    A correction has to appear literally — the mishearing *is* what the speech
+    model produced. An expansion is matched on its distinctive words instead,
+    since the spoken lead-in varies ("my Instagram ID", "my Instagram handle").
+    """
+    if not corrections or not text:
+        return []
+    lowered = text.lower()
+    out = []
+    for entry in corrections.values():
+        frm, kind = entry["from"], _kind_of(entry)
+        if kind == KIND_EXPANSION:
+            tokens = _distinctive_tokens(frm)
+            hit = (
+                all(re.search(r"(?<!\w)" + re.escape(t), lowered) for t in tokens)
+                if tokens
+                else _contains_phrase(lowered, frm)
+            )
+        else:
+            hit = _contains_phrase(lowered, frm)
+        if hit:
+            out.append({"from": frm, "to": entry["to"], "kind": kind,
+                        "count": entry.get("count", 0)})
+    # Expansions first, then most-used, so the cap sheds the entries least
+    # likely to matter. Expansions are always count 0 — they are added by
+    # hand, never learned — so sorting on count alone would drop exactly the
+    # entries the user took the trouble to type in.
+    out.sort(key=lambda e: (e["kind"] != KIND_EXPANSION, -e["count"], len(e["from"])))
+    return [{"from": e["from"], "to": e["to"], "kind": e["kind"]} for e in out[:limit]]
 
 model = None
 # Lazily import mlx only when we actually load weights — importing mlx spins up
@@ -282,8 +419,11 @@ def _run_download() -> None:
             _dl_state.update(phase="done", active=False)
     except Exception as exc:
         print(f"Model download failed: {exc}")
+        # Strip any URL from the surfaced error so the upstream model source
+        # isn't leaked to the client UI. The full exception is kept in the log.
+        safe = re.sub(r"https?://\S+", "[download URL]", str(exc))
         with _dl_lock:
-            _dl_state.update(phase="error", active=False, error=str(exc))
+            _dl_state.update(phase="error", active=False, error=safe)
 
 
 @asynccontextmanager
@@ -312,36 +452,185 @@ def health():
     }
 
 
-def clean_with_ollama(text: str, context: str = "", recent: list = None, screen: str = "") -> str:
+# Statuses that mean "we reached the gateway and it refused us".
+REFUSAL_STATUSES = (401, 402, 403)
+
+
+class NotEntitled(Exception):
+    """This device may not dictate: no account, or the account has lapsed.
+
+    ``code`` distinguishes the reasons, because they are not the same thing to
+    the user even though both stop the dictation. A lapsed subscription is fixed
+    on the account page; an unreachable gateway is fixed by reconnecting to the
+    internet. The app picks its wording from this rather than guessing from a
+    402 alone.
+    """
+
+    def __init__(self, message: str, code: str = "not_entitled"):
+        super().__init__(message)
+        self.code = code
+
+
+
+_DEFAULT_BLOCKED = "Your SunoFlow subscription isn't active. Open your account to continue."
+_NOT_CONNECTED = "This device isn't connected to a SunoFlow account. Open Settings → Account to connect it."
+_UNREACHABLE = (
+    "SunoFlow couldn't reach the account service to check your subscription. "
+    "Connect to the internet and try again."
+)
+
+
+def _refusal_message(resp) -> str:
+    """The user-facing reason if this response is a refusal from us, else "".
+
+    How a failed cleanup call is classified *is* the paywall, because that call
+    is the only place a dictation is checked against the user's plan:
+
+      * 2xx — entitled. Refresh the offline lease.
+      * 401/402/403 with a JSON `error` body — our gateway refused this device:
+        expired trial, lapsed subscription, disconnected device, unpaired
+        install. Hard stop, every time. An expired account is meant to stop
+        working, not to quietly downgrade to a free tier, and a 401 stops
+        dictation exactly as a 402 does.
+      * anything else — 429, 5xx, timeouts, DNS failures, a body that is not
+        ours. Indistinguishable from an outage, so the stored lease decides.
+
+    Requiring our JSON body is what stops an intermediary's own 401/403 page (a
+    misconfigured proxy) from reading to the user as a cancelled subscription.
+    """
+    if resp.status_code not in REFUSAL_STATUSES:
+        return ""
+    try:
+        body = resp.json()
+    except Exception:
+        return ""
+    if not isinstance(body, dict) or "error" not in body:
+        return ""
+    return (body.get("message") or "").strip() or _DEFAULT_BLOCKED
+
+
+def _allow_or_raise(key: str, why: str) -> None:
+    """Decide what an inconclusive gateway result means for this dictation.
+
+    Falls back to the signed lease: a device that checked in recently keeps
+    working through the outage, one that has not is refused. Returning normally
+    means "carry on with the raw transcript".
+    """
+    if lease.allows_offline(key):
+        print(f"Cleanup gateway unavailable ({why}); continuing on a valid lease.")
+        return
+    print(f"Cleanup gateway unavailable ({why}) and no valid lease; refusing.")
+    raise NotEntitled(_UNREACHABLE, code="unreachable")
+
+
+def check_entitlement(key: str) -> None:
+    """Ask the gateway whether this device may dictate, without doing any work.
+
+    Used when the cleanup pass is switched off — otherwise turning cleanup off
+    would skip the only server call and hand out unlimited free dictation.
+    """
+    key = key or CLEANUP_KEY
+    if not key:
+        raise NotEntitled(_NOT_CONNECTED, code="not_connected")
+
+    try:
+        resp = requests.get(ENTITLEMENT_URL, headers={"Authorization": f"Bearer {key}"}, timeout=10)
+    except Exception as exc:
+        _allow_or_raise(key, str(exc))
+        return
+
+    message = _refusal_message(resp)
+    if message:
+        raise NotEntitled(message)
+    if not resp.ok:
+        _allow_or_raise(key, f"HTTP {resp.status_code}")
+        return
+
+    try:
+        lease.save(resp.json().get("lease") or "", key)
+    except Exception:
+        pass
+
+
+def clean_with_gateway(
+    text: str,
+    context: str = "",
+    recent: list = None,
+    screen: str = "",
+    key: str = "",
+    dictionary: list = None,
+) -> str:
     """Clean a transcript via the hosted cleanup gateway.
 
     The gateway (cleanup-gateway/) owns the cleanup instruction, the LLM
-    backend (Ollama/OpenAI/Claude), and the echo-retry guard — so this is a
-    single POST. On ANY error (network, auth, timeout, non-200) we fall back to
-    the raw text so dictation never fails because cleanup is down. This matches
-    the old local-Ollama soft-fail behaviour byte for byte.
+    backend, and the echo-retry guard — so this is a single POST.
+
+    `key` is this Mac's device key, sent by the app on every /transcribe call
+    once the user has connected their account.
+
+    `dictionary` is the slice of the user's own saved terms that looks relevant
+    to *this* transcript (see relevant_corrections). corrections.json itself
+    never leaves the Mac; these few entries ride along with the request so the
+    model can fix the user's spellings and expand their shorthand, and the
+    gateway neither stores nor logs them.
+
+    Raises NotEntitled when the gateway refuses the device, or when it cannot be
+    reached and no valid lease covers the gap. Every other failure soft-fails to
+    the raw transcript, because a bad LLM response should never cost the user
+    their words.
     """
+    key = key or CLEANUP_KEY
+    if not key:
+        raise NotEntitled(_NOT_CONNECTED, code="not_connected")
     if not text.strip():
         return text
+
     recent = recent or []
     context = (context or "").strip()
     screen = (screen or "").strip()
+    payload = {"text": text, "context": context, "recent": recent, "screen": screen}
+    # Omitted rather than sent empty, so a request carries the user's terms only
+    # when there were any to carry.
+    if dictionary:
+        payload["dictionary"] = dictionary
 
     try:
         resp = requests.post(
             CLEANUP_URL,
-            headers={"Authorization": f"Bearer {CLEANUP_KEY}"},
-            json={"text": text, "context": context, "recent": recent, "screen": screen},
+            headers={"Authorization": f"Bearer {key}"},
+            json=payload,
             timeout=60,
         )
-        resp.raise_for_status()
-        cleaned = (resp.json().get("cleaned") or "").strip()
-        # Gateway already applies echo-retry, but guard against an empty payload
-        # falling through — return raw rather than an empty string.
-        return cleaned or text
     except Exception as exc:
-        print(f"Cleanup gateway failed, falling back to raw text: {exc}")
+        _allow_or_raise(key, str(exc))
         return text
+
+    message = _refusal_message(resp)
+    if message:
+        raise NotEntitled(message)
+    if not resp.ok:
+        _allow_or_raise(key, f"HTTP {resp.status_code}")
+        return text
+
+    try:
+        body = resp.json()
+    except Exception as exc:
+        # A 2xx we cannot parse is our own bug, not an entitlement question: the
+        # gateway said yes, so keep the words and move on.
+        print(f"Cleanup gateway returned an unreadable body: {exc}")
+        return text
+
+    lease.save(body.get("lease") or "", key)
+    # Gateway already applies echo-retry, but guard against an empty payload
+    # falling through — return raw rather than an empty string.
+    return (body.get("cleaned") or "").strip() or text
+
+
+class NotEntitledResponse(JSONResponse):
+    """402 with the gateway's own wording, so the app can show it verbatim."""
+
+    def __init__(self, message: str, code: str = "not_entitled"):
+        super().__init__(status_code=402, content={"error": code, "message": message})
 
 
 @app.post("/transcribe")
@@ -350,7 +639,18 @@ async def transcribe(
     cleanup: bool = Query(True),
     context: str = Form(""),
     screen: str = Form(""),
+    device_key: str = Header("", alias="X-SunoFlow-Device-Key"),
 ):
+    key = device_key.removeprefix("Bearer ").strip()
+    try:
+        return await _transcribe_inner(file, cleanup, context, screen, key)
+    except NotEntitled as exc:
+        # Deliberately NOT a soft failure: an expired account stops working.
+        print(f"Refusing dictation — {exc}")
+        return NotEntitledResponse(str(exc), getattr(exc, "code", "not_entitled"))
+
+
+async def _transcribe_inner(file, cleanup, context, screen, key):
     fd, tmp_path = tempfile.mkstemp(suffix=".wav")
     try:
         with os.fdopen(fd, "wb") as tmp:
@@ -387,14 +687,23 @@ async def transcribe(
         os.unlink(tmp_path)
 
     if cleanup:
+        # Only the entries this transcript could plausibly need — the rest of the
+        # dictionary stays on this Mac.
+        relevant = relevant_corrections(raw_text)
         cleaned_text = await run_in_threadpool(
-            clean_with_ollama, raw_text, context, list(recent_transcripts), screen
+            clean_with_gateway, raw_text, context, list(recent_transcripts), screen,
+            key, relevant,
         )
     else:
+        # Cleanup off still has to prove entitlement, or switching it off would
+        # be a free-dictation switch.
+        await run_in_threadpool(check_entitlement, key)
         cleaned_text = raw_text
 
-    # Learning system: apply the user's learned corrections as the final step so
-    # they always win over whatever the models produced.
+    # Apply the learned corrections as the final step so they always win over
+    # whatever the models produced. Expansions are not applied here — they need
+    # the model's judgement about whether the speaker was giving the value or
+    # just mentioning the thing, so with cleanup off they simply do not fire.
     cleaned_text = apply_corrections(cleaned_text)
 
     # Option A: remember what we produced so the next dictation has continuity.
@@ -412,7 +721,8 @@ async def learn(original: str = Form(...), edited: str = Form(...)):
 
 def _corrections_list():
     return [
-        {"key": k, "from": v["from"], "to": v["to"], "count": v.get("count", 1)}
+        {"key": k, "from": v["from"], "to": v["to"], "count": v.get("count", 1),
+         "kind": _kind_of(v)}
         for k, v in sorted(corrections.items())
     ]
 
@@ -423,21 +733,27 @@ def get_corrections():
 
 
 @app.post("/corrections/add")
-def add_correction(frm: str = Form(...), to: str = Form(...)):
-    """Manually add a correction (e.g. from the Settings UI)."""
+def add_correction(frm: str = Form(...), to: str = Form(...), kind: str = Form("")):
+    """Manually add an entry (e.g. from the Settings UI).
+
+    ``kind`` is optional — the UI does not ask, and an unset kind is inferred
+    from the shape of the pair.
+    """
     key = _norm_key(frm)
     if not key:
         return {"added": False, "corrections": _corrections_list()}
     # Preserve the count if the same key already existed.
     count = corrections.get(key, {}).get("count", 0)
-    corrections[key] = {"from": frm.strip(), "to": to.strip(), "count": count}
+    corrections[key] = _entry(frm, to, count, kind)
     _save_corrections(corrections)
     return {"added": True, "corrections": _corrections_list()}
 
 
 @app.post("/corrections/update")
-def update_correction(key: str = Form(...), frm: str = Form(...), to: str = Form(...)):
-    """Edit an existing correction's from/to text."""
+def update_correction(
+    key: str = Form(...), frm: str = Form(...), to: str = Form(...), kind: str = Form("")
+):
+    """Edit an existing entry's from/to text."""
     old = corrections.pop(key, None)
     new_key = _norm_key(frm)
     if not new_key:
@@ -446,7 +762,7 @@ def update_correction(key: str = Form(...), frm: str = Form(...), to: str = Form
             corrections[key] = old
         return {"updated": False, "corrections": _corrections_list()}
     count = (old or {}).get("count", corrections.get(new_key, {}).get("count", 0))
-    corrections[new_key] = {"from": frm.strip(), "to": to.strip(), "count": count}
+    corrections[new_key] = _entry(frm, to, count, kind)
     _save_corrections(corrections)
     return {"updated": True, "corrections": _corrections_list()}
 

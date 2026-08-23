@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- The frozen PyInstaller sidecar bundles its own MLX/numba/Metal dylibs
+         that we do not (and cannot reasonably) sign individually. Hardened
+         runtime blocks unsigned/oddly-signed libraries by default, so the
+         sidecar process would fail to load them. This entitlement lets the
+         process load those dylibs. Applied to both the Swift app and the
+         frozen sidecar executable during release signing. -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+
+    <!-- Python's CPython runtime and numba's JIT may allocate executable
+         memory pages. Hardened runtime forbids that by default; this
+         entitlement permits it. Relevant to the frozen sidecar; harmless on
+         the Swift app. -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+
+    <!-- The Swift menu-bar app captures microphone audio via AVAudioEngine.
+         Hardened runtime requires an explicit entitlement for mic access. -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+
+    <!-- NOT present: com.apple.security.app-sandbox. SunoFlow is direct-
+         distribution (Developer ID + notarization), NOT App Store. Sandboxing
+         would block spawning the external sidecar process, which is a core
+         architectural requirement. -->
+</dict>
+</plist>

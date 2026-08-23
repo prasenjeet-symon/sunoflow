@@ -9,9 +9,9 @@
     <key>CFBundleIdentifier</key>
     <string>com.sunoapp.sunoflow</string>
     <key>CFBundleVersion</key>
-    <string>1.0</string>
+    <string>1</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
+    <string>1.0.0</string>
     <key>CFBundleExecutable</key>
     <string>SunoFlow</string>
     <key>CFBundleIconFile</key>
@@ -24,6 +24,8 @@
     <true/>
     <key>NSMicrophoneUsageDescription</key>
     <string>SunoFlow needs microphone access to transcribe your dictation.</string>
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>SunoFlow reads on-screen text (window titles, labels) as context so the cleanup AI can pick the right names and terms for what you're typing into. No screen content is stored or sent anywhere.</string>
     <key>NSHighResolutionCapable</key>
     <true/>
 </dict>

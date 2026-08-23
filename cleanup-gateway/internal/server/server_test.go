@@ -19,10 +19,10 @@ import (
 
 // fakeBackend is a controllable test backend implementing backend.Backend.
 type fakeBackend struct {
-	resp    string
-	err     error
-	health  bool
-	calls   []string
+	resp   string
+	err    error
+	health bool
+	calls  []string
 }
 
 func (f *fakeBackend) Cleanup(_ context.Context, prompt string) (string, error) {
@@ -32,7 +32,7 @@ func (f *fakeBackend) Cleanup(_ context.Context, prompt string) (string, error) 
 	}
 	return f.resp, nil
 }
-func (f *fakeBackend) Name() string                  { return "fake" }
+func (f *fakeBackend) Name() string                   { return "fake" }
 func (f *fakeBackend) Healthy(_ context.Context) bool { return f.health }
 
 var errBackendDown = errors.New("backend down")
@@ -62,8 +62,8 @@ func newTestServer(t *testing.T, fb *fakeBackend) (*httptest.Server, *store.Stor
 		QuotaRPM:   1000,
 		QuotaDaily: 100000,
 	}
-	limiter := ratelimit.New(st, 1000, 100000)
-	handler := NewMux(srv, limiter, "admin-secret")
+	limiter := ratelimit.New(st, 1000, 100000, nil)
+	handler := NewMux(srv, limiter, "admin-secret", nil)
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
 	return ts, st, plaintext
@@ -283,7 +283,7 @@ func (s *seqBackend) Cleanup(_ context.Context, prompt string) (string, error) {
 	s.idx++
 	return r, nil
 }
-func (s *seqBackend) Name() string                  { return "seq" }
+func (s *seqBackend) Name() string                   { return "seq" }
 func (s *seqBackend) Healthy(_ context.Context) bool { return true }
 
 // newTestServerWithBackend is like newTestServer but lets the caller supply the backend.
@@ -306,9 +306,86 @@ func newTestServerWithBackend(t *testing.T, be interface {
 		t.Fatalf("create key: %v", err)
 	}
 	srv := &Server{Backend: be, Store: st, Logger: testLogger(), QuotaRPM: 1000, QuotaDaily: 100000}
-	limiter := ratelimit.New(st, 1000, 100000)
-	handler := NewMux(srv, limiter, "admin-secret")
+	limiter := ratelimit.New(st, 1000, 100000, nil)
+	handler := NewMux(srv, limiter, "admin-secret", nil)
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
 	return ts, plaintext
+}
+
+// TestCleanup_DictionaryReachesPrompt checks the wire field actually lands in
+// the prompt, split by kind — the whole feature is inert if it does not.
+func TestCleanup_DictionaryReachesPrompt(t *testing.T) {
+	fb := &fakeBackend{resp: "My LinkedIn: https://linkedin.example/me"}
+	ts, _, key := newTestServer(t, fb)
+	body, _ := json.Marshal(map[string]any{
+		"text": "my linkedin",
+		"dictionary": []map[string]string{
+			{"from": "sunno flow", "to": "SunoFlow", "kind": "correction"},
+			{"from": "my linkedin", "to": "https://linkedin.example/me", "kind": "expansion"},
+		},
+	})
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/cleanup", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if len(fb.calls) != 1 {
+		t.Fatalf("expected 1 backend call, got %d", len(fb.calls))
+	}
+	prompt := fb.calls[0]
+	for _, want := range []string{
+		`"sunno flow" -> "SunoFlow"`,
+		`"my linkedin" -> "https://linkedin.example/me"`,
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt missing dictionary entry %s", want)
+		}
+	}
+	// An expanded URL is far longer than the words that triggered it; the echo
+	// guard must let that through rather than falling back to the raw text.
+	var out cleanupResponse
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	if out.Cleaned != "My LinkedIn: https://linkedin.example/me" {
+		t.Errorf("expansion rejected by the echo guard, got %q", out.Cleaned)
+	}
+}
+
+// TestCleanup_DictionarySurvivesEchoRetry pins the deliberate asymmetry in the
+// retry: screen/context/recent are dropped because they are what gets echoed,
+// but the dictionary is carried over so the retry can still apply it.
+func TestCleanup_DictionarySurvivesEchoRetry(t *testing.T) {
+	text := "the new transcript words here"
+	context := strings.Repeat("x", 80)
+	echoed := "preamble " + context[len(context)-40:] + " trailing"
+	clean := "The new transcript words here."
+
+	fb := &seqBackend{responses: []string{echoed, clean}}
+	ts, key := newTestServerWithBackend(t, fb)
+	body, _ := json.Marshal(map[string]any{
+		"text":       text,
+		"context":    context,
+		"dictionary": []map[string]string{{"from": "sunno flow", "to": "SunoFlow", "kind": "correction"}},
+	})
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/cleanup", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if len(fb.calls) != 2 {
+		t.Fatalf("expected 2 backend calls (echo+retry), got %d", len(fb.calls))
+	}
+	retry := fb.calls[1]
+	if !strings.Contains(retry, `"sunno flow" -> "SunoFlow"`) {
+		t.Error("retry prompt dropped the dictionary")
+	}
+	if strings.Contains(retry, "[CONTEXT") {
+		t.Error("retry prompt should not carry the context it just echoed")
+	}
 }

@@ -1,6 +1,6 @@
-# SunoFlow cleanup gateway — one-command local stack.
+# SunoFlow cleanup gateway — one-command stack.
 #
-#   cp .env.example .env  &&  edit ADMIN_TOKEN
+#   cp .env.example .env  &&  edit ADMIN_TOKEN and GEMINI_API_KEY
 #   docker compose up -d --build
 #
 # Then expose it via the Cloudflare tunnel (see deploy/README.md).
@@ -8,27 +8,18 @@
 # Nothing here is internet-facing directly.
 
 services:
-  # --- The Go gateway. Talks to the HOST Ollama via host.docker.internal.
-  # Your existing host Ollama (with glm-5.2) is reused — no in-container
-  # Ollama, no model re-download. NOTE: for a production/server deployment
-  # you'd reintroduce the isolated `ollama` service, since the server has
-  # no host Ollama to borrow. This compose file is tuned for local dev. ---
+  # --- The Go gateway. Cleanup runs on Google's Gemini API, so the container
+  # needs nothing but outbound HTTPS — no model host, no GPU, no local runtime.
+  # The API key lives here and only here; clients never see it. ---
   gateway:
     build: .
     container_name: sunoflow-gateway
     restart: unless-stopped
-    extra_hosts:
-      # lets the container resolve `host.ollama` to the Mac's localhost
-      - "host.ollama:host-gateway"
     environment:
       ADMIN_TOKEN: ${ADMIN_TOKEN:?ADMIN_TOKEN is required — set it in .env}
       GATEWAY_ADDR: "0.0.0.0:8080"
-      OLLAMA_URL: "http://host.ollama:11434/api/generate"
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-glm-5.2:cloud}
-      BACKEND: ${BACKEND:-ollama}
-      OLLAMA_TIMEOUT: 30s
-      # Gemini backend (BACKEND=gemini). The key comes from .env only.
-      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      BACKEND: gemini
+      GEMINI_API_KEY: ${GEMINI_API_KEY:?GEMINI_API_KEY is required — set it in .env}
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.5-flash-lite}
       GEMINI_TIMEOUT: ${GEMINI_TIMEOUT:-20s}
       GEMINI_THINKING_LEVEL: ${GEMINI_THINKING_LEVEL:-low}
@@ -36,8 +27,22 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-info}
       DEFAULT_QUOTA_RPM: ${DEFAULT_QUOTA_RPM:-60}
       DEFAULT_QUOTA_DAILY: ${DEFAULT_QUOTA_DAILY:-5000}
+      # Trial / subscription enforcement. Empty project = nothing enforced.
+      FIREBASE_PROJECT: ${FIREBASE_PROJECT:-}
+      # Signs the offline leases that bound how long a sidecar keeps working
+      # without reaching us. Leave empty: the built-in default is what every
+      # shipped sidecar verifies against. See deploy/ENTITLEMENT.md before
+      # setting it — a mismatch invalidates every lease in the field.
+      LEASE_SECRET: ${LEASE_SECRET:-}
+      # Path INSIDE the container — the host file is mounted read-only below.
+      FIREBASE_CREDENTIALS: ${FIREBASE_CREDENTIALS:+/run/secrets/firebase.json}
     volumes:
       - gateway-data:/data
+      # The service-account JSON. FIREBASE_CREDENTIALS on the host points at the
+      # real path; inside the container it is always /run/secrets/firebase.json.
+      # Without this mount the gateway cannot reach Firestore and refuses to
+      # start, which is the loud failure we want rather than silent no-checks.
+      - ${FIREBASE_CREDENTIALS:-/dev/null}:/run/secrets/firebase.json:ro
     networks: [sunoflow-internal]
 
   # --- Nginx: edge proxy with rate limiting. HTTP only — the Cloudflare

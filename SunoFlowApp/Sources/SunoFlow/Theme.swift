@@ -3,315 +3,272 @@ import SwiftUI
 
 // MARK: - Design tokens
 
-/// The dashboard's design system — one place for colour, spacing, radii, type
-/// and motion, so every surface in the window reads as the same product.
+/// The dashboard's design system.
 ///
-/// The brand gradient deliberately mirrors the dictation overlay's violet→pink
-/// waveform (see `DictationOverlay`), so the floating bubble and the dashboard
-/// feel like two views of one app rather than two apps.
+/// The dashboard is one flat sheet of paper. There are no cards, no boxes, no
+/// nested panels and no drop shadows: structure comes from hairline rules,
+/// generous vertical rhythm, and rows that run the full width of the column so
+/// nothing is left floating in dead space.
+///
+/// Colour is rationed. Ink for text, one accent for selection and the single
+/// primary action per screen, and three semantic colours for status. Everything
+/// else is paper.
 enum Theme {
-
-    // MARK: Brand
-
-    static let violet = Color(red: 0.545, green: 0.486, blue: 1.000)
-    static let indigo = Color(red: 0.404, green: 0.416, blue: 0.980)
-    static let pink   = Color(red: 1.000, green: 0.561, blue: 0.816)
-
-    static let brand = LinearGradient(
-        colors: [violet, pink],
-        startPoint: .topLeading, endPoint: .bottomTrailing
-    )
-
-    /// A washed-out brand fill for selected rows and tinted panels, where a
-    /// full-strength gradient would fight with the text sitting on top of it.
-    static let brandWash = LinearGradient(
-        colors: [violet.opacity(0.20), pink.opacity(0.14)],
-        startPoint: .topLeading, endPoint: .bottomTrailing
-    )
-
-    // MARK: Semantic status
-
-    static let success = Color(red: 0.16, green: 0.76, blue: 0.50)
-    static let warning = Color(red: 0.98, green: 0.67, blue: 0.22)
-    static let danger  = Color(red: 0.98, green: 0.38, blue: 0.42)
-
-    static func status(_ ok: Bool) -> Color { ok ? success : danger }
-
-    static func gradient(for color: Color) -> LinearGradient {
-        LinearGradient(
-            colors: [color, color.opacity(0.72)],
-            startPoint: .topLeading, endPoint: .bottomTrailing
-        )
-    }
 
     // MARK: Surfaces
 
-    /// The page behind the cards.
-    static var canvas: Color { Color(nsColor: .windowBackgroundColor) }
-    /// The cards themselves — one step up from the canvas in both appearances.
-    static var surface: Color { Color(nsColor: .controlBackgroundColor) }
-    /// Inset wells inside a card (rows, code blocks, list items).
-    static var well: Color { Color.primary.opacity(0.045) }
-    static var hairline: Color { Color.primary.opacity(0.08) }
+    /// The content sheet.
+    static let paper = Color.white
+    /// The navigation column — a half-step warmer so the eye can tell them
+    /// apart without needing a border between them.
+    static let shell = Color(red: 0.973, green: 0.969, blue: 0.957)   // #F8F7F4
+    /// A barely-there fill for inputs and pressed states.
+    static let wash  = Color(red: 0.965, green: 0.961, blue: 0.949)   // #F6F5F2
 
-    /// The soft top-down sheen that keeps large cards from looking flat.
-    static let sheen = LinearGradient(
-        colors: [Color.white.opacity(0.07), Color.white.opacity(0.0)],
-        startPoint: .top, endPoint: .bottom
-    )
+    /// The hairline between rows.
+    static let rule       = Color(red: 0.925, green: 0.918, blue: 0.902)  // #ECEAE6
+    /// The heavier hairline that closes a section or the page header.
+    static let ruleStrong = Color(red: 0.886, green: 0.875, blue: 0.855)  // #E2DFDA
 
-    // MARK: Spacing
+    // MARK: Ink
+
+    static let ink   = Color(red: 0.090, green: 0.090, blue: 0.106)   // #17171B
+    static let body  = Color(red: 0.353, green: 0.353, blue: 0.396)   // #5A5A65
+    static let faint = Color(red: 0.549, green: 0.549, blue: 0.588)   // #8C8C96
+
+    // MARK: Accent
+
+    static let accent     = Color(red: 0.310, green: 0.286, blue: 0.710)  // #4F49B5
+    static let accentSoft = Color(red: 0.945, green: 0.941, blue: 0.980)  // #F1F0FA
+
+    // MARK: Semantic status
+
+    static let success = Color(red: 0.086, green: 0.478, blue: 0.329)  // #167A54
+    static let warning = Color(red: 0.612, green: 0.392, blue: 0.063)  // #9C6410
+    static let danger  = Color(red: 0.659, green: 0.227, blue: 0.188)  // #A83A30
+
+    static func status(_ ok: Bool) -> Color { ok ? success : danger }
+
+    // MARK: Metrics
 
     enum Space {
+        /// Left and right margin of the content column.
+        static let page: CGFloat = 40
+        /// Space above a section's label.
+        static let section: CGFloat = 34
+        /// Vertical padding inside a single row.
+        static let row: CGFloat = 15
         static let xs: CGFloat = 6
         static let sm: CGFloat = 10
         static let md: CGFloat = 16
-        static let lg: CGFloat = 22
-        static let xl: CGFloat = 30
-        static let xxl: CGFloat = 40
-
-        /// Padding inside a card, and the gap between stacked cards.
-        static let card: CGFloat = 20
-        static let cardGap: CGFloat = 18
-        /// Padding around the whole content column.
-        static let page: CGFloat = 32
-    }
-
-    enum Radius {
-        static let card: CGFloat = 16
-        static let control: CGFloat = 10
-        static let well: CGFloat = 9
+        static let lg: CGFloat = 24
     }
 
     // MARK: Motion
 
-    /// The default for anything that moves position or size — settles quickly
-    /// with just enough overshoot to feel physical.
-    static let spring = Animation.spring(response: 0.34, dampingFraction: 0.82)
-    /// A softer spring for content swapping in, which shouldn't bounce.
-    static let gentle = Animation.spring(response: 0.42, dampingFraction: 0.95)
-    /// Hover and press feedback — fast enough to feel instant.
-    static let quick = Animation.easeOut(duration: 0.16)
+    static let spring = Animation.spring(response: 0.30, dampingFraction: 0.95)
+    static let gentle = Animation.easeOut(duration: 0.20)
+    static let quick  = Animation.easeOut(duration: 0.13)
 }
 
 // MARK: - Type scale
 
 extension Font {
-    /// Page titles. Rounded, because it pairs with the app's soft, friendly icon set.
-    static let sunoDisplay = Font.system(size: 25, weight: .bold, design: .rounded)
-    static let sunoTitle = Font.system(size: 16, weight: .semibold, design: .rounded)
-    /// Card and section headings.
-    static let sunoHeadline = Font.system(size: 15, weight: .semibold, design: .rounded)
-    /// Sub-headings inside a card (status card titles, list group labels).
-    static let sunoSubhead = Font.system(size: 13.5, weight: .semibold, design: .rounded)
-    static let sunoBody = Font.system(size: 13, weight: .regular)
-    static let sunoBodyMedium = Font.system(size: 13, weight: .medium)
-    static let sunoCaption = Font.system(size: 11.5, weight: .regular)
-    static let sunoCaptionMedium = Font.system(size: 11.5, weight: .medium)
-    static let sunoMicro = Font.system(size: 10.5, weight: .medium)
-    static let sunoMono = Font.system(size: 11.5, weight: .regular, design: .monospaced)
+    /// The page title. Large, tight, and the only display size in the app.
+    static let sunoDisplay  = Font.system(size: 27, weight: .semibold)
+    /// A statement line — the one sentence that answers "am I set up?".
+    static let sunoLead     = Font.system(size: 19, weight: .semibold)
+    static let sunoRowTitle = Font.system(size: 13.5, weight: .medium)
+    static let sunoValue    = Font.system(size: 13, weight: .medium)
+    static let sunoBody     = Font.system(size: 13, weight: .regular)
+    static let sunoCaption  = Font.system(size: 12, weight: .regular)
+    static let sunoKicker   = Font.system(size: 10.5, weight: .semibold)
+    static let sunoMono     = Font.system(size: 11.5, weight: .regular, design: .monospaced)
 }
 
-// MARK: - Materials
+// MARK: - Rules
 
-/// A live blurred backdrop. Used for the sidebar so the desktop tint bleeds
-/// through the way it does in Finder and Mail.
-struct GlassBackground: NSViewRepresentable {
-    var material: NSVisualEffectView.Material = .sidebar
-    var blending: NSVisualEffectView.BlendingMode = .behindWindow
-
-    func makeNSView(context: Context) -> NSVisualEffectView {
-        let view = NSVisualEffectView()
-        view.material = material
-        view.blendingMode = blending
-        view.state = .active
-        return view
-    }
-
-    func updateNSView(_ view: NSVisualEffectView, context: Context) {
-        view.material = material
-        view.blendingMode = blending
-        view.state = .active
+/// The hairline that does all the structural work in this design.
+struct Rule: View {
+    var strong: Bool = false
+    var body: some View {
+        Rectangle()
+            .fill(strong ? Theme.ruleStrong : Theme.rule)
+            .frame(height: 1)
     }
 }
 
-// MARK: - Surface modifiers
+// MARK: - Section label
+
+/// The small capitalised label that opens a group of rows. It replaces what
+/// used to be a card header — same job, none of the chrome.
+struct SectionLabel: View {
+    let text: String
+    var trailing: String? = nil
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(text.uppercased())
+                .font(.sunoKicker)
+                .tracking(0.8)
+                .foregroundStyle(Theme.faint)
+            Spacer(minLength: 8)
+            if let trailing {
+                Text(trailing)
+                    .font(.sunoCaption)
+                    .foregroundStyle(Theme.faint)
+            }
+        }
+        .padding(.top, Theme.Space.section)
+        .padding(.bottom, 9)
+    }
+}
+
+// MARK: - Rows
+
+/// Set on a group of rows where *some* rows carry a leading glyph. Rows without
+/// one then reserve the same space, so every title in the group shares a left
+/// edge instead of stepping in and out.
+private struct RowIconColumnKey: EnvironmentKey { static let defaultValue = false }
+
+extension EnvironmentValues {
+    var sunoRowIconColumn: Bool {
+        get { self[RowIconColumnKey.self] }
+        set { self[RowIconColumnKey.self] = newValue }
+    }
+}
 
 extension View {
-    /// The standard card treatment: surface fill, a top sheen, a hairline
-    /// border and a soft shadow that lifts a little on hover.
-    func sunoSurface(
-        radius: CGFloat = Theme.Radius.card,
-        hovering: Bool = false,
-        interactive: Bool = false
-    ) -> some View {
-        background(
-            ZStack {
-                RoundedRectangle(cornerRadius: radius, style: .continuous)
-                    .fill(Theme.surface)
-                RoundedRectangle(cornerRadius: radius, style: .continuous)
-                    .fill(Theme.sheen)
-                RoundedRectangle(cornerRadius: radius, style: .continuous)
-                    .strokeBorder(
-                        hovering ? Theme.violet.opacity(0.32) : Theme.hairline,
-                        lineWidth: 1
-                    )
-            }
-            .shadow(
-                color: Color.black.opacity(hovering && interactive ? 0.16 : 0.09),
-                radius: hovering && interactive ? 20 : 12,
-                x: 0, y: hovering && interactive ? 9 : 5
-            )
-        )
-    }
-
-    /// A quieter inset well for rows nested inside a card.
-    func sunoWell(radius: CGFloat = Theme.Radius.well, tint: Color? = nil) -> some View {
-        background(
-            RoundedRectangle(cornerRadius: radius, style: .continuous)
-                .fill(tint?.opacity(0.10) ?? Theme.well)
-                .overlay(
-                    RoundedRectangle(cornerRadius: radius, style: .continuous)
-                        .strokeBorder(tint?.opacity(0.22) ?? Color.clear, lineWidth: 1)
-                )
-        )
+    func rowIconColumn(_ enabled: Bool = true) -> some View {
+        environment(\.sunoRowIconColumn, enabled)
     }
 }
 
-// MARK: - Card
-
-/// The primary content container. Everything in a section lives in one of these.
-struct SunoCard<Content: View>: View {
-    var spacing: CGFloat = 14
-    var padding: CGFloat = Theme.Space.card
-    @ViewBuilder var content: () -> Content
-
-    @State private var hovering = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: spacing) {
-            content()
-        }
-        .padding(padding)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .sunoSurface(hovering: hovering)
-        .animation(Theme.quick, value: hovering)
-        .onHover { hovering = $0 }
-    }
-}
-
-/// A card that leads with an icon chip, a title and a one-line explanation —
-/// the pattern used by every settings section.
-struct SunoSection<Content: View>: View {
+/// The workhorse. A full-width line: an optional glyph, a title with an
+/// optional explanation beneath it, and whatever control belongs on the right.
+///
+/// Rows draw their own bottom hairline so a run of them reads as one table;
+/// pass `divider: false` on the last row of a group.
+struct SunoRow<Trailing: View>: View {
     let title: String
-    let systemImage: String
     var subtitle: String? = nil
-    var tint: LinearGradient = Theme.brand
-    @ViewBuilder var content: () -> Content
+    var systemImage: String? = nil
+    var iconColor: Color = Theme.faint
+    var divider: Bool = true
+    @ViewBuilder var trailing: () -> Trailing
+
+    @Environment(\.sunoRowIconColumn) private var iconColumn
 
     var body: some View {
-        SunoCard(spacing: 16) {
-            HStack(alignment: .center, spacing: 12) {
-                IconChip(systemImage: systemImage, gradient: tint, size: 32)
+        VStack(spacing: 0) {
+            HStack(alignment: .center, spacing: 13) {
+                if let systemImage {
+                    Image(systemName: systemImage)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(iconColor)
+                        .frame(width: 17)
+                } else if iconColumn {
+                    Color.clear.frame(width: 17, height: 1)
+                }
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(title).font(.sunoHeadline)
+                    Text(title)
+                        .font(.sunoRowTitle)
+                        .foregroundStyle(Theme.ink)
                     if let subtitle {
                         Text(subtitle)
                             .font(.sunoCaption)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Theme.faint)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
-                Spacer(minLength: 0)
+                Spacer(minLength: 16)
+                trailing()
             }
-            content()
+            .padding(.vertical, Theme.Space.row)
+
+            if divider { Rule() }
         }
     }
 }
 
-// MARK: - Small components
-
-/// A rounded-square glyph tile. The dashboard's main unit of colour.
-struct IconChip: View {
-    let systemImage: String
-    var gradient: LinearGradient = Theme.brand
-    var size: CGFloat = 36
-    var glowColor: Color = Theme.violet
-
-    var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: size * 0.30, style: .continuous)
-                .fill(gradient)
-            Image(systemName: systemImage)
-                .font(.system(size: size * 0.45, weight: .semibold))
-                .foregroundStyle(.white)
-        }
-        .frame(width: size, height: size)
-        .shadow(color: glowColor.opacity(0.35), radius: 8, x: 0, y: 3)
+extension SunoRow where Trailing == EmptyView {
+    init(title: String, subtitle: String? = nil, systemImage: String? = nil,
+         iconColor: Color = Theme.faint, divider: Bool = true) {
+        self.init(title: title, subtitle: subtitle, systemImage: systemImage,
+                  iconColor: iconColor, divider: divider) { EmptyView() }
     }
 }
 
-/// A status dot that breathes a halo while it's live, so "online" reads at a
-/// glance without needing to parse the label next to it.
-struct PulseDot: View {
-    var color: Color
-    var active: Bool = true
-    var size: CGFloat = 8
-
-    @State private var animating = false
+/// A label on the left, a value hard right. Used for read-only summaries.
+struct ValueRow: View {
+    let label: String
+    let value: String
+    var systemImage: String? = nil
+    var valueColor: Color? = nil
+    var mono: Bool = false
+    var divider: Bool = true
 
     var body: some View {
-        ZStack {
-            if active {
-                Circle()
-                    .fill(color.opacity(0.40))
-                    .scaleEffect(animating ? 1.0 : 0.35)
-                    .opacity(animating ? 0.0 : 0.85)
-            }
+        SunoRow(title: label, systemImage: systemImage, divider: divider) {
+            Text(value)
+                .font(mono ? .sunoMono : .sunoValue)
+                .foregroundStyle(valueColor ?? Theme.ink)
+                .multilineTextAlignment(.trailing)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+    }
+}
+
+// MARK: - Status
+
+/// A status word with a dot. No capsule, no border — on a flat sheet the colour
+/// and the dot are enough.
+struct StatusText: View {
+    let text: String
+    var color: Color = Theme.success
+    var size: CGFloat = 6
+
+    var body: some View {
+        HStack(spacing: 6) {
             Circle()
                 .fill(color)
                 .frame(width: size, height: size)
-                .shadow(color: color.opacity(active ? 0.6 : 0), radius: 4)
-        }
-        .frame(width: size * 2.6, height: size * 2.6)
-        .onAppear { restart() }
-        .onChange(of: active) { _ in restart() }
-    }
-
-    private func restart() {
-        animating = false
-        guard active else { return }
-        withAnimation(.easeOut(duration: 1.9).repeatForever(autoreverses: false)) {
-            animating = true
+            Text(text)
+                .font(.sunoValue)
+                .foregroundStyle(color)
+                .lineLimit(1)
         }
     }
 }
 
-/// A tinted capsule for short status words.
-struct SunoBadge: View {
+/// An inline advisory line. Tinted text and a glyph, sitting directly on the
+/// page rather than inside a coloured box.
+struct SunoNotice: View {
     let text: String
-    var color: Color = Theme.violet
-    var systemImage: String? = nil
+    var systemImage: String = "exclamationmark.triangle.fill"
+    var color: Color = Theme.warning
 
     var body: some View {
-        HStack(spacing: 4) {
-            if let systemImage {
-                Image(systemName: systemImage).font(.system(size: 9, weight: .bold))
-            }
-            Text(text).font(.sunoMicro)
+        HStack(alignment: .top, spacing: 9) {
+            Image(systemName: systemImage)
+                .font(.system(size: 11.5, weight: .semibold))
+                .foregroundStyle(color)
+                .padding(.top, 1.5)
+            Text(text)
+                .font(.sunoCaption)
+                .foregroundStyle(Theme.body)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
         }
-        .foregroundStyle(color)
-        .padding(.horizontal, 9)
-        .padding(.vertical, 4)
-        .background(Capsule().fill(color.opacity(0.14)))
-        .overlay(Capsule().strokeBorder(color.opacity(0.26), lineWidth: 1))
     }
 }
 
-/// A gradient-filled progress track, used for the model download.
+/// A flat progress track for the model download.
 struct SunoProgressBar: View {
     var value: Double
     var total: Double
-    var height: CGFloat = 7
+    var height: CGFloat = 4
 
     private var fraction: Double {
         guard total > 0 else { return 0 }
@@ -321,11 +278,10 @@ struct SunoProgressBar: View {
     var body: some View {
         GeometryReader { geo in
             ZStack(alignment: .leading) {
-                Capsule().fill(Color.primary.opacity(0.10))
+                Capsule().fill(Theme.ruleStrong)
                 Capsule()
-                    .fill(Theme.brand)
+                    .fill(Theme.accent)
                     .frame(width: max(height, geo.size.width * fraction))
-                    .shadow(color: Theme.violet.opacity(0.45), radius: 5, y: 1)
             }
         }
         .frame(height: height)
@@ -333,147 +289,75 @@ struct SunoProgressBar: View {
     }
 }
 
-/// A label/value line, used for the setup summary and the About section.
-struct SunoInfoRow: View {
-    let label: String
-    let value: String
-    var systemImage: String? = nil
-    var valueColor: Color? = nil
-
-    var body: some View {
-        HStack(spacing: 10) {
-            if let systemImage {
-                Image(systemName: systemImage)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 16)
-            }
-            Text(label)
-                .font(.sunoCaption)
-                .foregroundStyle(.secondary)
-            Spacer(minLength: 12)
-            Text(value)
-                .font(.sunoCaptionMedium)
-                .foregroundStyle(valueColor ?? .primary)
-                .multilineTextAlignment(.trailing)
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 9)
-        .sunoWell()
-    }
-}
-
-/// An inline advisory banner — used for permissions and offline warnings.
-struct SunoNotice: View {
-    let text: String
-    var systemImage: String = "exclamationmark.triangle.fill"
-    var color: Color = Theme.warning
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: systemImage)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(color)
-                .padding(.top, 1)
-            Text(text)
-                .font(.sunoCaption)
-                .foregroundStyle(.primary.opacity(0.85))
-                .fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: 0)
-        }
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .sunoWell(radius: Theme.Radius.control, tint: color)
-    }
-}
-
 // MARK: - Button styles
 
-/// The filled, brand-gradient call to action. One per screen, at most.
+/// The one filled action per screen: solid ink, like the website.
 struct SunoPrimaryButtonStyle: ButtonStyle {
     @Environment(\.isEnabled) private var isEnabled
+    @State private var hovering = false
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 12.5, weight: .semibold, design: .rounded))
+            .font(.system(size: 12.5, weight: .medium))
             .foregroundStyle(.white)
             .padding(.horizontal, 15)
-            .padding(.vertical, 8)
+            .padding(.vertical, 7)
             .background(
-                Capsule()
-                    .fill(Theme.brand)
-                    .shadow(color: Theme.violet.opacity(isEnabled ? 0.40 : 0), radius: 10, y: 4)
+                Capsule().fill(hovering ? Color(red: 0.16, green: 0.16, blue: 0.19) : Theme.ink)
             )
-            .opacity(isEnabled ? (configuration.isPressed ? 0.88 : 1) : 0.45)
-            .scaleEffect(configuration.isPressed ? 0.96 : 1)
+            .opacity(isEnabled ? (configuration.isPressed ? 0.9 : 1) : 0.32)
             .animation(Theme.quick, value: configuration.isPressed)
+            .animation(Theme.quick, value: hovering)
+            .onHover { hovering = $0 }
     }
 }
 
-/// The neutral companion to the primary style.
+/// The neutral action: a soft fill, no border.
 struct SunoSecondaryButtonStyle: ButtonStyle {
     @Environment(\.isEnabled) private var isEnabled
     @State private var hovering = false
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 12.5, weight: .medium, design: .rounded))
-            .foregroundStyle(.primary)
+            .font(.system(size: 12.5, weight: .medium))
+            .foregroundStyle(Theme.ink)
             .padding(.horizontal, 14)
             .padding(.vertical, 7)
-            .background(
-                Capsule()
-                    .fill(Color.primary.opacity(hovering ? 0.10 : 0.06))
-                    .overlay(Capsule().strokeBorder(Theme.hairline, lineWidth: 1))
-            )
-            .opacity(isEnabled ? 1 : 0.45)
-            .scaleEffect(configuration.isPressed ? 0.96 : 1)
+            .background(Capsule().fill(hovering ? Theme.ruleStrong.opacity(0.7) : Theme.wash))
+            .opacity(isEnabled ? 1 : 0.35)
             .animation(Theme.quick, value: configuration.isPressed)
             .animation(Theme.quick, value: hovering)
             .onHover { hovering = $0 }
     }
 }
 
-/// A borderless text action for tertiary things ("Reset", "View logs").
+/// A text action for tertiary things ("Reset", "Clear all").
 struct SunoGhostButtonStyle: ButtonStyle {
     @Environment(\.isEnabled) private var isEnabled
-    var color: Color = Theme.violet
+    var color: Color = Theme.accent
     @State private var hovering = false
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 12, weight: .medium, design: .rounded))
+            .font(.system(size: 12.5, weight: .medium))
             .foregroundStyle(color)
-            .padding(.horizontal, 9)
-            .padding(.vertical, 5)
-            .background(
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .fill(color.opacity(hovering ? 0.12 : 0))
-            )
-            .opacity(isEnabled ? 1 : 0.45)
-            .scaleEffect(configuration.isPressed ? 0.96 : 1)
-            .animation(Theme.quick, value: configuration.isPressed)
+            .opacity(isEnabled ? (hovering ? 0.7 : 1) : 0.35)
             .animation(Theme.quick, value: hovering)
             .onHover { hovering = $0 }
     }
 }
 
-/// A compact square icon button for row-level actions (edit, delete).
+/// A compact icon button for row-level actions.
 struct SunoIconButtonStyle: ButtonStyle {
-    var color: Color = .secondary
+    var color: Color = Theme.faint
     @State private var hovering = false
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 11.5, weight: .semibold))
-            .foregroundStyle(hovering ? color : Color.secondary)
-            .frame(width: 26, height: 26)
-            .background(
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .fill(color.opacity(hovering ? 0.14 : 0))
-            )
-            .scaleEffect(configuration.isPressed ? 0.9 : 1)
-            .animation(Theme.quick, value: configuration.isPressed)
+            .font(.system(size: 11.5, weight: .medium))
+            .foregroundStyle(hovering ? color : Theme.faint.opacity(0.75))
+            .frame(width: 24, height: 24)
+            .contentShape(Rectangle())
             .animation(Theme.quick, value: hovering)
             .onHover { hovering = $0 }
     }
@@ -482,16 +366,27 @@ struct SunoIconButtonStyle: ButtonStyle {
 extension ButtonStyle where Self == SunoPrimaryButtonStyle {
     static var sunoPrimary: SunoPrimaryButtonStyle { .init() }
 }
-
 extension ButtonStyle where Self == SunoSecondaryButtonStyle {
     static var sunoSecondary: SunoSecondaryButtonStyle { .init() }
 }
-
 extension ButtonStyle where Self == SunoGhostButtonStyle {
     static var sunoGhost: SunoGhostButtonStyle { .init() }
     static func sunoGhost(_ color: Color) -> SunoGhostButtonStyle { .init(color: color) }
 }
-
 extension ButtonStyle where Self == SunoIconButtonStyle {
-    static func sunoIcon(_ color: Color = .secondary) -> SunoIconButtonStyle { .init(color: color) }
+    static func sunoIcon(_ color: Color = Theme.faint) -> SunoIconButtonStyle { .init(color: color) }
+}
+
+// MARK: - Field styling
+
+/// Text fields on a flat sheet: a soft well, no border, no focus ring fight.
+struct SunoFieldStyle: TextFieldStyle {
+    func _body(configuration: TextField<Self._Label>) -> some View {
+        configuration
+            .textFieldStyle(.plain)
+            .font(.sunoBody)
+            .padding(.horizontal, 11)
+            .padding(.vertical, 7)
+            .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(Theme.wash))
+    }
 }

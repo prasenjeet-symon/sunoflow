@@ -18,6 +18,8 @@ User=sunoflow
 Group=sunoflow
 ExecStart=/usr/local/bin/sunoflow-gateway
 EnvironmentFile=/etc/sunoflow/gateway.env
+# FIREBASE_CREDENTIALS points at a service-account JSON; it must be readable by
+# User= above and by nothing else. ReadWritePaths is not needed — it is only read.
 Restart=on-failure
 RestartSec=2
 
@@ -27,7 +29,7 @@ ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
 ReadWritePaths=/var/lib/sunoflow-gateway
-# Ollama runs on loopback; no outbound needed beyond the host.
+# Cleanup calls the Gemini API, so outbound HTTPS is required.
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 
 [Install]

@@ -48,7 +48,14 @@ internal static class TextInjector
 
         // Restore the user's clipboard after the paste has had time to land.
         // Matches the macOS 0.3s restore delay.
-        ThreadPool.QueueUserWorkItem(_ =>
+        //
+        // This has to be its own STA thread. The clipboard is an OLE surface, so
+        // Clipboard.SetText from a thread-pool (MTA) thread throws
+        // ThreadStateException every single time — which a bare `catch` swallows,
+        // leaving the user's clipboard permanently overwritten with the dictated
+        // text. Sleeping on the UI thread instead is not an option either: the
+        // paste we just sent needs a live message pump to land.
+        var restore = new Thread(() =>
         {
             Thread.Sleep(300);
             try
@@ -56,8 +63,14 @@ internal static class TextInjector
                 if (previous != null) Clipboard.SetText(previous);
                 else Clipboard.Clear();
             }
-            catch { /* best-effort */ }
-        });
+            catch (Exception ex)
+            {
+                AppLog.Log($"Clipboard restore failed: {ex.Message}");
+            }
+        })
+        { IsBackground = true, Name = "SunoFlow clipboard restore" };
+        restore.SetApartmentState(ApartmentState.STA);
+        restore.Start();
     }
 
     private static void SendCtrlV()

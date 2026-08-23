@@ -1,0 +1,89 @@
+rules_version = '2';
+
+// SunoFlow account data.
+//
+// Everything hangs off the signed-in user's own document. A user may read and
+// update their own profile and devices, and nothing else — no listing of other
+// accounts, no cross-user reads.
+//
+// Subscription state is deliberately NOT writable from the client beyond the
+// cancel/resume intent flags: price, trial dates and entitlement are set by the
+// server (or, today, on first sign-up) so a user cannot grant themselves a plan
+// by editing a document from the browser console.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    match /users/{uid} {
+      allow read: if isOwner(uid);
+
+      // Creating your own profile is allowed once, at sign-up — but only as a
+      // trial. Without these constraints "create my account with plan=active
+      // and a trial ending in 2099" is a single console call for anyone whose
+      // document does not exist yet.
+      allow create: if isOwner(uid)
+                    && request.resource.data.uid == uid
+                    && request.resource.data.plan == 'trial'
+                    && request.resource.data.cancelAtPeriodEnd == false
+                    && request.resource.data.currentPeriodEnd == null
+                    && !request.resource.data.keys().hasAny(
+                         ['razorpaySubscriptionId', 'razorpayCustomerId', 'billingStatus'])
+                    && request.resource.data.trialEndsAt is timestamp
+                    && request.resource.data.trialEndsAt >= request.time
+                    && request.resource.data.trialEndsAt <= request.time + duration.value(8, 'd');
+
+      // Billing is decided by Razorpay's webhook, never by a browser. The
+      // client may correct its display name and nothing else; every field that
+      // grants or extends access is frozen here.
+      //
+      // Without this, "activate my subscription" is a one-line console command.
+      allow update: if isOwner(uid)
+                    && request.resource.data.uid == resource.data.uid
+                    && request.resource.data.createdAt == resource.data.createdAt
+                    && request.resource.data.trialEndsAt == resource.data.trialEndsAt
+                    && request.resource.data.plan == resource.data.plan
+                    && request.resource.data.cancelAtPeriodEnd == resource.data.cancelAtPeriodEnd
+                    && request.resource.data.currentPeriodEnd == resource.data.currentPeriodEnd
+                    && request.resource.data.get('razorpaySubscriptionId', null)
+                       == resource.data.get('razorpaySubscriptionId', null)
+                    && request.resource.data.get('razorpayCustomerId', null)
+                       == resource.data.get('razorpayCustomerId', null)
+                    && request.resource.data.get('billingStatus', null)
+                       == resource.data.get('billingStatus', null);
+
+      allow delete: if false;
+
+      // Devices are created by the pairing function and kept up to date by the
+      // gateway, both of which use the Admin SDK and bypass these rules. The
+      // browser only ever reads them — a client that could write here could
+      // forge a device or point one at someone else's key.
+      match /devices/{deviceId} {
+        allow read: if isOwner(uid);
+        allow write: if false;
+      }
+    }
+
+    // Pairing tickets hold a one-time API key in flight, and api-key records
+    // hold the hashes the gateway checks. Neither is ever touched by a browser:
+    // the functions reach them through the Admin SDK.
+    match /pairings/{pairingId} {
+      allow read, write: if false;
+    }
+
+    match /apiKeys/{keyId} {
+      allow read, write: if false;
+    }
+
+    // Razorpay event ids, used to make webhook delivery idempotent.
+    match /webhookEvents/{eventId} {
+      allow read, write: if false;
+    }
+  }
+}

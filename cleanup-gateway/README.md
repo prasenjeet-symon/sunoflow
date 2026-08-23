@@ -1,29 +1,28 @@
 # SunoFlow cleanup gateway
 
-A single static Go binary that authenticates clients, rate-limits per key, and
-proxies cleanup requests to a local Ollama — the sole caller of Ollama, which
-stays on a private docker network. See `docs/CLEANUP_GATEWAY_ARCHITECTURE.md`
-for the full design.
+A single static Go binary that authenticates clients, rate-limits per account, and
+proxies cleanup requests to the Gemini API. It is the sole holder of the
+provider API key — no client ever sees it, which is the whole reason cleanup is
+server-side. See `docs/CLEANUP_GATEWAY_ARCHITECTURE.md` for the full design.
 
-## One-command local stack (Docker Compose)
+## One-command stack (Docker Compose)
 
 ```sh
 cd cleanup-gateway
-cp .env.example .env          # then edit ADMIN_TOKEN to a long random secret
+cp .env.example .env          # then set ADMIN_TOKEN and GEMINI_API_KEY
 docker compose up -d --build
 ```
 
-That brings up four services on a private bridge network:
+That brings up two services on a private bridge network:
 
-| service       | role                                           | exposed port        |
-|---------------|------------------------------------------------|---------------------|
-| `ollama`      | LLM backend (internal only)                    | — (none)            |
-| `ollama-init` | one-shot model puller                          | — (exits 0)         |
-| `gateway`     | the Go binary (auth, rate-limit, cleanup)      | 8080 (internal)     |
-| `nginx`       | edge proxy + rate limit                        | `127.0.0.1:8081`    |
+| service   | role                                      | exposed port     |
+|-----------|-------------------------------------------|------------------|
+| `gateway` | the Go binary (auth, rate-limit, cleanup) | 8080 (internal)  |
+| `nginx`   | edge proxy + rate limit                   | `127.0.0.1:8081` |
 
 Only nginx publishes a host port, and only on loopback — nothing here is
-internet-facing directly. Ollama is unreachable from the host.
+internet-facing directly. The gateway needs no inbound access and no local
+model runtime; outbound HTTPS to Gemini is its only external dependency.
 
 ### Point it at the Cloudflare tunnel
 
@@ -39,22 +38,23 @@ That ingress and DNS route are already configured, so once `docker compose up
 
 ```sh
 curl https://cleanup.mirrorli.art/health      # → {"status":"ok"}
-curl https://cleanup.mirrorli.art/ready       # → {"backend":"ollama","backend_ok":true,...}
+curl https://cleanup.mirrorli.art/ready       # → {"backend":"gemini","backend_ok":true,...}
 ```
 
 TLS is terminated by Cloudflare; nginx inside the compose stack is HTTP-only.
 
 ### First run
 
-`ollama-init` waits for Ollama, then pulls `OLLAMA_MODEL` (default
-`llama3.2:3b`, ~2 GB). Watch progress:
+There is no model to pull and no warm-up. The gateway refuses to start without
+`GEMINI_API_KEY`, so if the container is up, the backend is configured:
 
 ```sh
-docker compose logs -f ollama-init
+docker compose logs -f gateway
 ```
 
-Once it prints `model ready`, `/ready` flips to `backend_ok: true` and `/cleanup`
-returns cleaned text instead of the raw fallback.
+`/ready` reports `backend_ok: true` once Gemini answers a probe. If it stays
+`false`, the key or outbound HTTPS is the problem — `/cleanup` keeps serving,
+but falls back to returning the raw text uncleaned.
 
 ## Configure
 
@@ -63,15 +63,22 @@ All config is env-driven (12-factor). Edit `.env` and restart with
 
 ```sh
 ADMIN_TOKEN=<long random secret>      # REQUIRED. Guards /admin/*.
-OLLAMA_MODEL=llama3.2:3b              # server-controlled; change without a client release
+GEMINI_API_KEY=<AI Studio key>        # REQUIRED. Startup fails without it.
+GEMINI_MODEL=gemini-3.5-flash-lite    # server-controlled; change without a client release
+GEMINI_THINKING_LEVEL=low             # minimal|low|medium|high
 DEFAULT_QUOTA_RPM=60
 DEFAULT_QUOTA_DAILY=5000
 LOG_LEVEL=info                         # debug|info|warn|error
 ```
 
-Swap the model by editing `OLLAMA_MODEL` in `.env`, then
-`docker compose up -d && docker compose up -d ollama-init` (re-pulls the new
-model). No client release needed.
+Both quotas are **per account**, not per device: a customer who pairs three
+machines gets one allowance, not three. Usage is attributed to the account uid
+where the gateway knows it (any paired device) and to the key id otherwise (a
+legacy key, which belongs to no account).
+
+
+Swap the model by editing `GEMINI_MODEL` in `.env`, then `docker compose up -d`.
+No client release needed.
 
 ## Issue a key (manual, v1)
 
@@ -102,7 +109,7 @@ curl -X DELETE -H "Authorization: Bearer $ADMIN_TOKEN" \
 ```sh
 # Liveness
 curl https://cleanup.mirrorli.art/health
-# Readiness (checks Ollama)
+# Readiness (probes Gemini)
 curl https://cleanup.mirrorli.art/ready
 # Cleanup
 curl -X POST https://cleanup.mirrorli.art/cleanup \
@@ -123,10 +130,11 @@ curl http://127.0.0.1:8081/health
 - **Logs** are JSON on stdout: `docker compose logs -f gateway`. They contain
   metadata only (request id, key id, latency, status) — never transcript
   contents.
-- **Swap the model** by editing `OLLAMA_MODEL` in `.env` and re-running
-  `docker compose up -d ollama-init`. No client release needed.
-- **Backend swap** (Ollama → OpenAI/Claude) is interface-only in v1; implement
-  the backend and set `BACKEND=openai`. The cleanup handler is unchanged.
+- **Swap the model** by editing `GEMINI_MODEL` in `.env` and re-running
+  `docker compose up -d`. No client release needed.
+- **Adding a backend** means implementing `backend.Backend` and adding a case in
+  `cmd/gateway/main.go`; `BACKEND` then selects it. The cleanup handler and the
+  prompt are provider-agnostic and stay unchanged.
 - **Scaling:** v1 is single-host + SQLite (a docker volume). When a second
   host is needed, move the key store to Postgres and the rate limiter to Redis;
   the interfaces are designed so this is a storage swap, not a rewrite.

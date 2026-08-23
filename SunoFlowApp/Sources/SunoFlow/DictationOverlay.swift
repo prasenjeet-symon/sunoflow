@@ -24,7 +24,15 @@ final class DictationOverlay {
     private let panelSize = NSSize(width: 132, height: 42)
     private let topGap: CGFloat = 8
 
+    // Incremented on every show(). A hide()'s completion handler captures the
+    // value it saw when it started and bails out if show() ran in the meantime
+    // — otherwise a quick re-dictation re-shows the panel only to have the
+    // stale hide() callback dismiss it moments later, so the overlay
+    // intermittently fails to appear.
+    private var showGeneration = 0
+
     func show(mode: OverlayMode) {
+        showGeneration += 1
         if panel == nil {
             buildPanel()
         }
@@ -61,12 +69,18 @@ final class DictationOverlay {
         guard let panel = panel else { return }
         let bubble = self.bubble
         let up = NSPoint(x: panel.frame.origin.x, y: panel.frame.origin.y + 6)
+        let generation = showGeneration
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.16
             ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
             panel.animator().alphaValue = 0
             panel.animator().setFrameOrigin(up)
         } completionHandler: {
+            // A show() that started during this fade-out increments
+            // showGeneration, meaning the user re-dictated right after the
+            // previous transcript landed. In that case leave the panel up —
+            // dismissing it would kill the freshly-started overlay.
+            guard generation == self.showGeneration else { return }
             bubble?.stop()
             panel.orderOut(nil)
         }
@@ -157,11 +171,12 @@ private final class BubbleView: NSView {
         effect.autoresizingMask = [.width, .height]
         addSubview(effect)
 
-        // Gradient waveform, revealed through a mask of animated bars.
-        gradient.colors = [
-            NSColor(calibratedRed: 0.545, green: 0.486, blue: 1.0, alpha: 1.0).cgColor,  // violet
-            NSColor(calibratedRed: 1.0, green: 0.561, blue: 0.816, alpha: 1.0).cgColor,   // pink
-        ]
+        // Waveform, revealed through a mask of animated bars. Both stops are
+        // the same accent as the dashboard — the design has no gradients in it,
+        // and the colour is pitched to stay legible on the frosted HUD in both
+        // light and dark system appearances.
+        let accent = NSColor(calibratedRed: 0.357, green: 0.329, blue: 0.788, alpha: 1.0)
+        gradient.colors = [accent.cgColor, accent.cgColor]
         gradient.startPoint = CGPoint(x: 0, y: 0.5)
         gradient.endPoint = CGPoint(x: 1, y: 0.5)
         gradient.mask = barsMask

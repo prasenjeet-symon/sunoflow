@@ -11,7 +11,13 @@ import tempfile
 # Make ``sidecars.*`` importable when run from the repo root.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))))
 
-from sidecars.shared.corrections import Corrections, extract_correction_pairs
+from sidecars.shared.corrections import (
+    KIND_CORRECTION,
+    KIND_EXPANSION,
+    Corrections,
+    extract_correction_pairs,
+    infer_kind,
+)
 
 
 def _fresh():
@@ -30,7 +36,7 @@ def test_learn_mishearing():
     c, _ = _fresh()
     learned = c.learn_from_edit("hello jon", "hello John")
     assert learned == [{"from": "jon", "to": "John", "count": 1}]
-    assert c.list() == [{"key": "jon", "from": "jon", "to": "John", "count": 1}]
+    assert c.list() == [{"key": "jon", "from": "jon", "to": "John", "count": 1, "kind": "correction"}]
 
 
 def test_apply_case_insensitive_word_boundary():
@@ -104,7 +110,7 @@ def test_update_blank_from_restores_old():
     c.add("jon", "John")
     assert c.update("jon", "   ", "x") is False
     # original entry restored
-    assert c.list() == [{"key": "jon", "from": "jon", "to": "John", "count": 0}]
+    assert c.list() == [{"key": "jon", "from": "jon", "to": "John", "count": 0, "kind": "correction"}]
 
 
 def test_delete_and_clear():
@@ -131,3 +137,131 @@ def test_apply_empty_text_is_passthrough():
     c, _ = _fresh()
     c.add("jon", "John")
     assert c.apply("") == ""
+
+# --- entry kinds ---------------------------------------------------------------
+
+
+def test_infer_kind_respellings_are_corrections():
+    # The two sides of a mishearing look alike; that is the whole signal.
+    assert infer_kind("cavach", "Kavach") == KIND_CORRECTION
+    assert infer_kind("sunno flow", "SunoFlow") == KIND_CORRECTION
+    assert infer_kind("jon", "John") == KIND_CORRECTION
+
+
+def test_infer_kind_values_are_expansions():
+    for frm, to in [
+        ("my instagram", "https://instagram.com/someone"),
+        ("my email", "someone@example.com"),
+        ("my handle", "@someone"),
+        ("my site", "www.example.com"),
+        ("my number", "+91 98765 43210"),
+    ]:
+        assert infer_kind(frm, to) == KIND_EXPANSION, (frm, to)
+
+
+def test_expansion_is_never_blind_replaced():
+    """The reason expansions exist as a separate kind at all.
+
+    A global find-and-replace cannot tell a speaker offering their profile from
+    one talking about the site, so it must not try.
+    """
+    c, _ = _fresh()
+    c.add("my Instagram", "https://instagram.com/someone")
+    said = "I don't have an Instagram, and my Instagram is not public anyway."
+    assert c.apply(said) == said
+
+
+def test_correction_still_applies_after_expansions_exist():
+    c, _ = _fresh()
+    c.add("my Instagram", "https://instagram.com/someone")
+    c.add("cavach", "Kavach")
+    assert c.apply("the cavach system") == "the Kavach system"
+
+
+def test_apply_keeps_backslashes_literal():
+    """A replacement goes in as text, not as a re.sub template — otherwise a
+    value containing a backslash escape corrupts the output or raises."""
+    c, _ = _fresh()
+    c.add("the path", "C:\\1\\g<0>", kind=KIND_CORRECTION)
+    assert c.apply("use the path here") == "use C:\\1\\g<0> here"
+
+
+def test_apply_matches_from_starting_with_punctuation():
+    c, _ = _fresh()
+    c.add("@olduser", "@newuser", kind=KIND_CORRECTION)
+    assert c.apply("ping @olduser now") == "ping @newuser now"
+
+
+def test_explicit_kind_overrides_inference():
+    c, _ = _fresh()
+    c.add("my Instagram", "https://instagram.com/someone", kind=KIND_CORRECTION)
+    assert c.list()[0]["kind"] == KIND_CORRECTION
+
+
+def test_kind_inferred_for_entries_saved_before_the_field_existed():
+    """An old corrections.json has no `kind`; it must keep working untouched."""
+    c, path = _fresh()
+    with open(path, "w") as f:
+        f.write('{"cavach": {"from": "cavach", "to": "Kavach", "count": 3}}')
+    c = Corrections(path)
+    assert c.list()[0]["kind"] == KIND_CORRECTION
+    assert c.apply("the cavach system") == "the Kavach system"
+
+
+# --- what leaves the machine ---------------------------------------------------
+
+
+def test_relevant_for_sends_nothing_when_nothing_matches():
+    c, _ = _fresh()
+    c.add("cavach", "Kavach")
+    c.add("my Instagram", "https://instagram.com/someone")
+    assert c.relevant_for("a totally unrelated sentence") == []
+
+
+def test_relevant_for_matches_correction_literally():
+    c, _ = _fresh()
+    c.add("cavach", "Kavach")
+    assert c.relevant_for("the cavach system") == [
+        {"from": "cavach", "to": "Kavach", "kind": KIND_CORRECTION}
+    ]
+    # Substring hits don't count — "cavachs" is a different word.
+    assert c.relevant_for("scavacher") == []
+
+
+def test_relevant_for_matches_expansion_on_distinctive_words():
+    """The spoken lead-in varies, so an expansion matches on its content words."""
+    c, _ = _fresh()
+    c.add("my Instagram", "https://instagram.com/someone")
+    for said in [
+        "here is my instagram id",
+        "my Instagram handle is",
+        "you can find me on Instagram",
+    ]:
+        assert c.relevant_for(said) == [
+            {"from": "my Instagram", "to": "https://instagram.com/someone",
+             "kind": KIND_EXPANSION}
+        ], said
+
+
+def test_relevant_for_caps_and_prefers_most_used():
+    c, _ = _fresh()
+    for i in range(10):
+        c.add(f"term{i}", f"Term{i}")
+        c.data[f"term{i}"]["count"] = i
+    text = " ".join(f"term{i}" for i in range(10))
+    got = c.relevant_for(text, limit=3)
+    assert [e["from"] for e in got] == ["term9", "term8", "term7"]
+
+
+def test_relevant_for_keeps_expansions_when_capped():
+    """Expansions are hand-typed and never learned, so their count is always 0.
+    Sorting on count alone would drop exactly the entries the user cared enough
+    to add by hand."""
+    c, _ = _fresh()
+    for i in range(5):
+        c.add(f"term{i}", f"Term{i}")
+        c.data[f"term{i}"]["count"] = 100 + i
+    c.add("my Instagram", "https://instagram.com/someone")
+    text = "my instagram " + " ".join(f"term{i}" for i in range(5))
+    got = c.relevant_for(text, limit=2)
+    assert got[0]["kind"] == KIND_EXPANSION

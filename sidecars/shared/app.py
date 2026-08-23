@@ -14,11 +14,12 @@ import tempfile
 from collections import deque
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, File, Form, Query, UploadFile
+from fastapi import FastAPI, File, Form, Header, Query, UploadFile
+from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
 from sidecars.shared.audio import MIN_AUDIO_SECONDS, wav_duration_seconds
-from sidecars.shared.cleanup import clean_with_gateway
+from sidecars.shared.cleanup import NotEntitled, check_entitlement, clean_with_gateway
 from sidecars.shared.corrections import Corrections
 
 # Option A: keep the last few cleaned dictations so the model has continuity.
@@ -105,13 +106,40 @@ def create_app(adapter: SttAdapter, corrections_path: str) -> FastAPI:
             "model_present": adapter.is_present(),
         }
 
+    class NotEntitledResponse(JSONResponse):
+        """402 with the gateway's own wording, so the app shows it verbatim."""
+
+        def __init__(self, message: str, code: str = "not_entitled"):
+            super().__init__(
+                status_code=402,
+                content={"error": code, "message": message},
+            )
+
     @app.post("/transcribe")
     async def transcribe(
         file: UploadFile = File(...),
         cleanup: bool = Query(True),
         context: str = Form(""),
         screen: str = Form(""),
+        device_key: str = Header("", alias="X-SunoFlow-Device-Key"),
     ):
+        """Transcribe a clip, and refuse if this device may not dictate.
+
+        The device key travels per request from the app's credential store
+        rather than living in the sidecar's environment: re-pairing then takes
+        effect immediately with no restart, and the key is never written to disk
+        outside that store.
+        """
+        key = device_key.removeprefix("Bearer ").strip()
+        try:
+            return await _transcribe_inner(file, cleanup, context, screen, key)
+        except NotEntitled as exc:
+            # Deliberately NOT a soft failure: an expired or unconnected account
+            # stops working rather than quietly dropping to a free tier.
+            print(f"Refusing dictation — {exc}")
+            return NotEntitledResponse(str(exc), getattr(exc, "code", "not_entitled"))
+
+    async def _transcribe_inner(file, cleanup, context, screen, key):
         fd, tmp_path = tempfile.mkstemp(suffix=".wav")
         try:
             with os.fdopen(fd, "wb") as tmp:
@@ -144,14 +172,24 @@ def create_app(adapter: SttAdapter, corrections_path: str) -> FastAPI:
             os.unlink(tmp_path)
 
         if cleanup:
+            # Only the entries this transcript could plausibly need — the rest of
+            # the dictionary stays on the machine.
+            relevant = corrections.relevant_for(raw_text)
             cleaned_text = await run_in_threadpool(
-                clean_with_gateway, raw_text, context, list(recent_transcripts), screen
+                clean_with_gateway, raw_text, context, list(recent_transcripts), screen,
+                key, relevant,
             )
         else:
+            # Cleanup off still has to prove entitlement, or switching it off
+            # would be a free-dictation switch: it skips the only server call.
+            await run_in_threadpool(check_entitlement, key)
             cleaned_text = raw_text
 
-        # Learning system: apply the user's learned corrections as the final step
-        # so they always win over whatever the models produced.
+        # Apply the learned corrections as the final step so they always win over
+        # whatever the models produced. Expansions are not applied here — they
+        # need the model's judgement about whether the speaker was giving the
+        # value or just mentioning the thing, so with cleanup off they simply do
+        # not fire. See Corrections.apply.
         cleaned_text = corrections.apply(cleaned_text)
 
         # Remember what we produced so the next dictation has continuity.
@@ -170,15 +208,21 @@ def create_app(adapter: SttAdapter, corrections_path: str) -> FastAPI:
         return {"corrections": corrections.list()}
 
     @app.post("/corrections/add")
-    def add_correction(frm: str = Form(...), to: str = Form(...)):
-        """Manually add a correction (e.g. from the Settings UI)."""
-        added = corrections.add(frm, to)
+    def add_correction(frm: str = Form(...), to: str = Form(...), kind: str = Form("")):
+        """Manually add an entry (e.g. from the Settings UI).
+
+        ``kind`` is optional — the UI does not ask, and an unset kind is
+        inferred from the shape of the pair.
+        """
+        added = corrections.add(frm, to, kind)
         return {"added": added, "corrections": corrections.list()}
 
     @app.post("/corrections/update")
-    def update_correction(key: str = Form(...), frm: str = Form(...), to: str = Form(...)):
-        """Edit an existing correction's from/to text."""
-        updated = corrections.update(key, frm, to)
+    def update_correction(
+        key: str = Form(...), frm: str = Form(...), to: str = Form(...), kind: str = Form("")
+    ):
+        """Edit an existing entry's from/to text."""
+        updated = corrections.update(key, frm, to, kind)
         return {"updated": updated, "corrections": corrections.list()}
 
     @app.post("/corrections/delete")

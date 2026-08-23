@@ -30,7 +30,10 @@ sidecar/config.json
 sidecar/corrections.json
 sidecars/*/corrections.json
 
-# PyInstaller build output (frozen Windows sidecar)
+# PyInstaller build output (frozen sidecars)
+sidecar/.venv-build/
+sidecar/build/
+sidecar/dist/
 sidecars/windows/.venv-build/
 sidecars/windows/build/
 sidecars/windows/dist/
@@ -42,6 +45,10 @@ SunoFlowApp/signing/
 *.xcodeproj/xcuserdata/
 *.xcworkspace/xcuserdata/
 DerivedData/
+
+# ── Release output (release.sh) ────────────────────────
+*.dmg
+SunoFlow.app.zip
 
 # ── .NET (Windows tray app) ────────────────────────────
 apps/windows/SunoFlow/bin/
@@ -64,3 +71,11 @@ apps/windows/SunoFlow/.vs/
 # ── Local project memory (not for distribution) ─────────
 .ogcode/
 MEMORY.md
+# Firebase Functions dependencies
+functions/node_modules/
+
+# Local emulator secrets — never commit
+functions/.secret.local
+
+# Firebase CLI deploy cache — machine-local, regenerated on every deploy
+.firebase/

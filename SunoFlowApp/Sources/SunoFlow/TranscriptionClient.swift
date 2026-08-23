@@ -5,13 +5,63 @@ struct TranscriptionResult: Decodable {
     let cleaned: String
 }
 
+/// Which half of the dictionary an entry belongs to.
+///
+/// The two behave very differently at dictation time — a spelling is swapped in
+/// mechanically, a shorthand value is only substituted where the model judges
+/// the speaker was actually giving it — so the UI names the difference rather
+/// than showing one undifferentiated list. See docs/CONTRACT.md §corrections.
+enum CorrectionKind: String, CaseIterable, Identifiable {
+    case correction
+    case expansion
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .correction: return "Spelling"
+        case .expansion:  return "Shorthand"
+        }
+    }
+
+    var blurb: String {
+        switch self {
+        case .correction: return "A word dictation mishears, and how you write it."
+        case .expansion:  return "Something you say out loud, and the value it stands for."
+        }
+    }
+
+    var fromPlaceholder: String {
+        switch self {
+        case .correction: return "What it mishears"
+        case .expansion:  return "What you say"
+        }
+    }
+
+    var toPlaceholder: String {
+        switch self {
+        case .correction: return "What it should write"
+        case .expansion:  return "The value to write instead"
+        }
+    }
+}
+
 struct Correction: Decodable, Identifiable {
     let key: String
     let from: String
     let to: String
     let count: Int
+    /// Decoded as a plain String rather than as `CorrectionKind` on purpose: a
+    /// raw value the enum does not know makes Swift throw, and a throw here
+    /// empties the whole list silently. Absent altogether from a sidecar that
+    /// predates the two-kind dictionary, and those only ever held spellings.
+    private let kind: String?
 
     var id: String { key }
+
+    var resolvedKind: CorrectionKind {
+        CorrectionKind(rawValue: kind ?? "") ?? .correction
+    }
 }
 
 private struct CorrectionsResponse: Decodable {
@@ -61,6 +111,13 @@ private struct DownloadStartResponse: Decodable {
 
 enum TranscriptionError: Error {
     case badResponse
+    /// This Mac may not dictate. Carries the wording the gateway chose, so the
+    /// app shows one consistent explanation, plus a code telling the two very
+    /// different reasons apart: `not_entitled` (trial over, subscription
+    /// lapsed, device disconnected — fixed on the account page) and
+    /// `unreachable` (we could not check — fixed by reconnecting). Calling an
+    /// outage a cancelled subscription is a support ticket waiting to happen.
+    case notEntitled(code: String, message: String)
 }
 
 private func formURLEncoded(_ fields: [String: String]) -> Data {
@@ -113,6 +170,15 @@ enum TranscriptionClient {
         request.httpMethod = "POST"
         request.timeoutInterval = 30
 
+        // The sidecar is what talks to the cleanup gateway, so this Mac's device
+        // key has to travel with the request. Sending it per call rather than
+        // baking it into the sidecar's environment means re-pairing takes effect
+        // immediately, with no restart, and the key is never written to disk
+        // outside the Keychain.
+        if let deviceKey = Keychain.deviceKey() {
+            request.setValue("Bearer \(deviceKey)", forHTTPHeaderField: "X-SunoFlow-Device-Key")
+        }
+
         let boundary = "Boundary-\(UUID().uuidString)"
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
 
@@ -133,13 +199,23 @@ enum TranscriptionClient {
         body.append("--\(boundary)--\r\n".data(using: .utf8)!)
         request.httpBody = body
 
-        URLSession.shared.dataTask(with: request) { data, _, error in
+        URLSession.shared.dataTask(with: request) { data, response, error in
             if let error = error {
                 completion(.failure(error))
                 return
             }
             guard let data = data else {
                 completion(.failure(TranscriptionError.badResponse))
+                return
+            }
+            // 402 means this Mac may not dictate. Deliberately not a soft
+            // failure: nothing is pasted, and the user is told why.
+            if (response as? HTTPURLResponse)?.statusCode == 402 {
+                let body = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+                let message = body?["message"] as? String
+                    ?? "Your SunoFlow subscription isn't active."
+                let code = body?["error"] as? String ?? "not_entitled"
+                completion(.failure(TranscriptionError.notEntitled(code: code, message: message)))
                 return
             }
             do {
@@ -197,19 +273,32 @@ enum TranscriptionClient {
         post("corrections/clear", fields: [:]) { _ in completion() }
     }
 
-    /// Manually add a correction (from/to pair). The completion receives the
-    /// updated full corrections list. The wire field is `frm` (not `from`)
-    /// because `from` is a Python keyword and the FastAPI endpoint names the
-    /// parameter `frm` — sending `from` gets a silent 422.
-    static func addCorrection(from: String, to: String, completion: @escaping ([Correction]) -> Void) {
-        post("corrections/add", fields: ["frm": from, "to": to]) { data in
+    /// Manually add an entry (from/to pair). The completion receives the updated
+    /// full corrections list. The wire field is `frm` (not `from`) because
+    /// `from` is a Python keyword and the FastAPI endpoint names the parameter
+    /// `frm` — sending `from` gets a silent 422.
+    ///
+    /// A nil `kind` sends no `kind` field, leaving the sidecar to infer it from
+    /// the shape of the pair. That is the default: the classifier lives in one
+    /// place rather than being second-guessed here, and the list refreshes
+    /// straight after with the badge showing what it decided.
+    static func addCorrection(from: String, to: String, kind: CorrectionKind? = nil,
+                              completion: @escaping ([Correction]) -> Void) {
+        var fields = ["frm": from, "to": to]
+        if let kind { fields["kind"] = kind.rawValue }
+        post("corrections/add", fields: fields) { data in
             completion(Self.decodeCorrections(data))
         }
     }
 
-    /// Edit an existing correction's from/to text. Wire field is `frm` (see above).
-    static func updateCorrection(key: String, from: String, to: String, completion: @escaping ([Correction]) -> Void) {
-        post("corrections/update", fields: ["key": key, "frm": from, "to": to]) { data in
+    /// Edit an existing entry's from/to text. Wire field is `frm` (see above).
+    /// The kind is always sent here: an edit should not silently reclassify an
+    /// entry the user already placed.
+    static func updateCorrection(key: String, from: String, to: String, kind: CorrectionKind? = nil,
+                                 completion: @escaping ([Correction]) -> Void) {
+        var fields = ["key": key, "frm": from, "to": to]
+        if let kind { fields["kind"] = kind.rawValue }
+        post("corrections/update", fields: fields) { data in
             completion(Self.decodeCorrections(data))
         }
     }

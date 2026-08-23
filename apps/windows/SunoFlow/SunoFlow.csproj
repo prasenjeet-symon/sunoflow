@@ -2,7 +2,12 @@
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net8.0-windows</TargetFramework>
+    <!-- Versioned Windows TFM: carries a Win10 2004 (build 19041) SDK contract,
+         which makes the WinRT projection (Windows.Media.Ocr, Windows.Graphics.Imaging,
+         Windows.Foundation) available in-box — no NuGet package. Needed for the
+         screen-context OCR feature (ScreenContext.cs). -->
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
     <UseWindowsForms>true</UseWindowsForms>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
@@ -12,6 +17,13 @@
     <Platforms>x64</Platforms>
     <PlatformTarget>x64</PlatformTarget>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- Matches the PerMonitorV2 declaration in app.manifest, so the generated
+         ApplicationConfiguration.Initialize() does not ask for a different mode
+         than the manifest already committed the process to. The dashboard is
+         drawn in device-independent units and relies on WinForms scaling them. -->
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <!-- The brand mark, so Explorer, the taskbar and Alt-Tab show the ear. -->
+    <ApplicationIcon>Assets\app-icon.ico</ApplicationIcon>
     <AssemblyName>SunoFlow</AssemblyName>
     <RootNamespace>SunoFlow</RootNamespace>
     <Version>1.0.0</Version>
@@ -22,17 +34,22 @@
     <DisableWinExeOutputCheck>false</DisableWinExeOutputCheck>
   </PropertyGroup>
 
-  <!-- NAudio: mic capture + WAV writing. The only third-party dep. -->
   <ItemGroup>
+    <!-- NAudio: mic capture + WAV writing. -->
     <PackageReference Include="NAudio" Version="2.2.1" />
+    <!-- DPAPI (ProtectedData) is not in the box on .NET 8; it ships as this
+         Microsoft package. Used by AccountManager to encrypt the device key at
+         rest under the current Windows user. -->
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
   </ItemGroup>
 
-  <!-- Tray icons. The three states mirror the macOS SF Symbols (mic, recording, error). -->
+  <!-- Tray icons: the brand mark (an ear receiving sound) per state, mirroring
+       the macOS menu bar. Regenerate with `node tools\make-icons.js`. -->
   <ItemGroup>
-    <EmbeddedResource Include="Assets\mic-idle.ico" />
-    <EmbeddedResource Include="Assets\mic-recording.ico" />
-    <EmbeddedResource Include="Assets\mic-offline.ico" />
-    <EmbeddedResource Include="Assets\mic-processing.ico" />
+    <EmbeddedResource Include="Assets\tray-idle.ico" />
+    <EmbeddedResource Include="Assets\tray-recording.ico" />
+    <EmbeddedResource Include="Assets\tray-offline.ico" />
+    <EmbeddedResource Include="Assets\tray-processing.ico" />
     <EmbeddedResource Include="Assets\app-icon.ico" />
   </ItemGroup>
 

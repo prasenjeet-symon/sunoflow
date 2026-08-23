@@ -1,5 +1,6 @@
 #!/bin/bash
-# Rebuild SunoFlow and reload the running services in place.
+# Rebuild SunoFlow, install it where the LaunchAgent launches from, and reload
+# the running services in place.
 #
 # Why this exists: the app is signed with a stable self-signed identity and run
 # by a LaunchAgent. After a rebuild the on-disk binary gets a new code hash, and
@@ -17,6 +18,7 @@ AGENTS_DIR="$HOME/Library/LaunchAgents"
 SIDECAR_LABEL="com.sunoapp.sunoflow.sidecar"
 APP_LABEL="com.sunoapp.sunoflow.app"
 APP_PLIST="$AGENTS_DIR/$APP_LABEL.plist"
+APP_BUILT="SunoFlowApp/SunoFlow.app"
 HEALTH_URL="http://127.0.0.1:8765/health"
 
 echo "==> Building app..."
@@ -28,6 +30,26 @@ if [ ! -f "$APP_PLIST" ]; then
     echo "Relaunch manually with:  ./stop.sh && ./run.sh"
     echo "(or run ./install-autostart.sh once to enable auto-start management.)"
     exit 0
+fi
+
+# Where launchd will actually launch from. Read out of the plist rather than
+# assumed: build.sh writes $APP_BUILT, but the job runs whatever path it names —
+# usually /Applications/SunoFlow.app. Rebuilding without copying between the two
+# is invisible, and this script would faithfully restart the previous binary.
+APP_PROGRAM="$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$APP_PLIST" 2>/dev/null || true)"
+APP_DEST="${APP_PROGRAM%/Contents/MacOS/*}"
+case "$APP_DEST" in
+    /*/*.app) ;;
+    *)
+        echo "ERROR: could not read an .app path out of $APP_PLIST." >&2
+        echo "       ProgramArguments[0] = ${APP_PROGRAM:-<empty>}" >&2
+        exit 1
+        ;;
+esac
+
+if [ ! -x "$APP_BUILT/Contents/MacOS/SunoFlow" ]; then
+    echo "ERROR: the build produced no binary at $APP_BUILT." >&2
+    exit 1
 fi
 
 echo "==> Restarting sidecar..."
@@ -44,6 +66,34 @@ fi
 echo "==> Reloading app job (refreshes launchd's cached signature)..."
 pkill -x SunoFlow 2>/dev/null || true
 sleep 1
+
+# Install the build we just made. Deliberately after the pkill: replacing a
+# bundle out from under a running process is how you get a half-swapped app.
+if [ "$(cd "$APP_BUILT" && pwd -P)" = "$(cd "$APP_DEST" 2>/dev/null && pwd -P || echo /nonexistent)" ]; then
+    echo "    $APP_DEST is the build output itself — nothing to copy."
+else
+    echo "    installing to $APP_DEST"
+    # Stage beside the target and swap, so a copy that fails part-way leaves the
+    # working app in place instead of a broken one.
+    STAGING="$APP_DEST.new"
+    rm -rf "$STAGING"
+    if ! cp -R "$APP_BUILT" "$STAGING"; then
+        rm -rf "$STAGING"
+        echo "ERROR: could not stage the new build at $STAGING." >&2
+        echo "       Left $APP_DEST untouched." >&2
+        exit 1
+    fi
+    rm -rf "$APP_DEST"
+    mv "$STAGING" "$APP_DEST"
+    # A truncated copy still looks like a bundle; a broken seal does not. Better
+    # to stop here than to hand launchd something that will not start.
+    if ! codesign --verify --strict "$APP_DEST"; then
+        echo "ERROR: $APP_DEST failed signature verification after the copy." >&2
+        echo "       Rebuild with: (cd SunoFlowApp && ./build.sh) and rerun this." >&2
+        exit 1
+    fi
+fi
+
 launchctl bootout "$DOMAIN/$APP_LABEL" 2>/dev/null || true
 sleep 3   # bootstrapping too soon after bootout returns "5: Input/output error"
 

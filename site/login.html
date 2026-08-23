@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in — SunoFlow</title>
+<meta name="description" content="Sign in to your SunoFlow account with Google.">
+<meta name="robots" content="noindex">
+<meta name="theme-color" content="#ffffff">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="assets/styles.css?v=13">
+</head>
+<body>
+<div class="auth-wrap">
+  <div class="auth-col">
+    <a class="auth-mark" href="index.html" aria-label="SunoFlow home">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8.9 4.3c2.8 0 4.7 2 4.7 4.8 0 2.5-1.8 3.7-2.9 5.1-.7.9-.9 1.8-.9 2.9 0 1.5-1.2 2.6-2.6 2.6s-2.6-1.2-2.6-2.6c0-1.2.4-2 .4-3.1 0-1.6-1-2.8-1-4.9 0-2.8 2.1-4.8 4.9-4.8z"/><path d="M8.9 7.4c1.4 0 2.2 1 2.2 2.1 0 1.3-1.1 1.9-1.7 2.8-.4.6-.5 1.2-.5 1.9"/><path d="M16.6 10.2a3.6 3.6 0 0 0 0 5.2"/><path d="M19.9 8.2a6.8 6.8 0 0 0 0 9.2"/></svg><span>SunoFlow</span>
+    </a>
+
+    <h1 id="head">Welcome back.</h1>
+    <p class="sub" id="sub">Sign in to manage your devices and subscription.</p>
+
+    <div class="form-msg error" id="msg" role="alert"></div>
+
+    <button class="btn btn-google btn-block" type="button" id="google">
+      <svg class="g" viewBox="0 0 18 18" aria-hidden="true"><path fill="#4285F4" d="M17.64 9.2c0-.64-.06-1.25-.16-1.84H9v3.48h4.84a4.14 4.14 0 0 1-1.8 2.72v2.26h2.92c1.7-1.57 2.68-3.88 2.68-6.62z"/><path fill="#34A853" d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.92-2.26c-.8.54-1.84.86-3.04.86-2.34 0-4.32-1.58-5.03-3.7H.96v2.33A9 9 0 0 0 9 18z"/><path fill="#FBBC05" d="M3.97 10.72a5.4 5.4 0 0 1 0-3.44V4.95H.96a9 9 0 0 0 0 8.1l3.01-2.33z"/><path fill="#EA4335" d="M9 3.58c1.32 0 2.5.45 3.44 1.35l2.58-2.58C13.46.9 11.43 0 9 0A9 9 0 0 0 .96 4.95l3.01 2.33C4.68 5.16 6.66 3.58 9 3.58z"/></svg>
+      <span id="googleLabel">Continue with Google</span>
+    </button>
+
+    <p class="auth-note" id="note">
+      Google is the only way to sign in at the moment. We use it purely to
+      identify your account — nothing is posted anywhere on your behalf.
+    </p>
+  </div>
+
+  <p class="auth-foot"><a href="index.html">Back to the SunoFlow site</a></p>
+</div>
+
+<script type="module">
+  import { auth, db, friendlyError } from "./assets/firebase-init.js?v=13";
+  import {
+    GoogleAuthProvider, signInWithPopup, signInWithRedirect,
+    getRedirectResult, onAuthStateChanged,
+  } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
+
+  const el = (id) => document.getElementById(id);
+  const msg = el("msg");
+  const btn = el("google");
+
+  // The same page serves both entry points; ?new=1 comes from the trial CTAs.
+  if (new URLSearchParams(location.search).get("new") === "1") {
+    el("head").textContent = "Start your free week.";
+    el("sub").textContent = "Seven days of everything, then ₹99 a month. Cancel any time.";
+    el("googleLabel").textContent = "Sign up with Google";
+    document.title = "Create your account — SunoFlow";
+  }
+
+  const provider = new GoogleAuthProvider();
+  provider.setCustomParameters({ prompt: "select_account" });
+
+  const fail = (text) => {
+    msg.textContent = text;
+    msg.classList.add("show");
+    btn.disabled = false;
+  };
+
+  const nextPage = () => sessionStorage.getItem("afterLogin") || "dashboard.html";
+  // NB: the "already bounced" marker is deliberately NOT cleared here. Only the
+  // destination clears it, once it has actually seen a signed-in user. Clearing
+  // it on the way out would re-arm the bounce every cycle and the guard would
+  // never fire — which is exactly the loop it exists to stop.
+  const goNext = () => {
+    const to = nextPage();
+    sessionStorage.removeItem("afterLogin");
+    location.replace(to);
+  };
+
+  onAuthStateChanged(auth, (user) => { if (user) goNext(); });
+
+  // If we came back from the redirect fallback, surface any failure.
+  getRedirectResult(auth).catch((err) => fail(friendlyError(err)));
+
+  btn.addEventListener("click", async () => {
+    msg.classList.remove("show");
+    btn.disabled = true;
+    try {
+      await signInWithPopup(auth, provider);
+      goNext();
+    } catch (err) {
+      // Pop-ups get blocked often enough that falling back is worth it.
+      if (err && (err.code === "auth/popup-blocked" || err.code === "auth/operation-not-supported-in-this-environment")) {
+        try {
+          await signInWithRedirect(auth, provider);
+          return;
+        } catch (e2) {
+          fail(friendlyError(e2));
+          return;
+        }
+      }
+      fail(friendlyError(err));
+    }
+  });
+</script>
+</body>
+</html>
