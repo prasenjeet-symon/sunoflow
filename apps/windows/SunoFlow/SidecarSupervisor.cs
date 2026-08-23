@@ -57,7 +57,7 @@ internal sealed class SidecarSupervisor : IDisposable
     public SidecarSupervisor()
     {
         var baseDir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalAppData), "SunoFlow");
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SunoFlow");
         _exePath = ResolveExePath(baseDir);
         _logPath = Path.Combine(baseDir, "sidecar.log");
     }

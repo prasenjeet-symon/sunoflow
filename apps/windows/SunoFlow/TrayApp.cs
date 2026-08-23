@@ -196,7 +196,7 @@ internal sealed class TrayApp : IDisposable
         var ok = await TranscriptionClient.HealthAsync();
         _ui.Post(_ =>
         {
-            if (State is State.Recording or State.Processing) return;
+            if (CurrentState is State.Recording or State.Processing) return;
             if (ok)
             {
                 CurrentState = State.Idle;

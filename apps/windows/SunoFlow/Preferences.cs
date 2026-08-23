@@ -71,7 +71,7 @@ internal sealed class Preferences : INotifyPropertyChanged
         try
         {
             var dir = System.IO.Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalAppData), "SunoFlow");
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SunoFlow");
             System.IO.Directory.CreateDirectory(dir);
             var path = System.IO.Path.Combine(dir, "preferences.json");
             var json = JsonSerializer.Serialize(this, JsonOpts);
@@ -94,7 +94,7 @@ internal sealed class Preferences : INotifyPropertyChanged
         try
         {
             var path = System.IO.Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalAppData),
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 "SunoFlow", "preferences.json");
             if (System.IO.File.Exists(path))
             {

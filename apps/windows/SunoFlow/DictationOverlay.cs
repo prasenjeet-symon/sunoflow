@@ -57,7 +57,6 @@ internal sealed class DictationOverlay : Form
         FormBorderStyle = FormBorderStyle.None;
         StartPosition = FormStartPosition.Manual;
         ShowInTaskbar = false;
-        ShowActivated = false;
         TopMost = true;
         Size = new Size(CapsuleWidth + ShadowPad * 2, CapsuleHeight + ShadowPad * 2);
         _timer.Tick += (s, e) => Tick();
@@ -266,6 +265,11 @@ internal sealed class DictationOverlay : Form
         if (disposing) _timer.Dispose();
         base.Dispose(disposing);
     }
+
+    /// <summary>Never take focus when shown — the bubble appears while the user
+    /// is typing into another app. Pairs with WS_EX_NOACTIVATE below (this governs
+    /// Show(), that governs clicks).</summary>
+    protected override bool ShowWithoutActivation => true;
 
     protected override CreateParams CreateParams
     {

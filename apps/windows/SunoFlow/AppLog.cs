@@ -13,7 +13,7 @@ namespace SunoFlow;
 internal static class AppLog
 {
     private static readonly string LogDir =
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalAppData), "SunoFlow");
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SunoFlow");
 
     private static readonly string LogPath = Path.Combine(LogDir, "app-debug.log");
 
