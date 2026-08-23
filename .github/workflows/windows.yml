@@ -183,6 +183,12 @@ jobs:
   # --------------------------------------------------------------------------
   installer:
     name: Installer (dry build)
+    # A called workflow cannot be granted more than its caller, and the release
+    # workflow asks for contents:write to publish. Granting it here keeps that
+    # request satisfiable; it stays inert because publishing is gated on the ref
+    # being a tag, which a branch push never is.
+    permissions:
+      contents: write
     uses: ./.github/workflows/release.yml
     with:
       version: 0.0.0-ci
