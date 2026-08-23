@@ -132,10 +132,17 @@ jobs:
         working-directory: sidecars/windows
         run: |
           $dist = "dist\SunoFlowSidecar"
-          $dlls = Get-ChildItem -Recurse -Filter *.dll $dist | Select-Object -ExpandProperty Name
-          foreach ($want in @("onnxruntime_providers_directml.dll", "DirectML.dll")) {
-            if ($dlls -contains $want) { Write-Host "OK   $want" }
-            else { Write-Warning "MISSING $want — inference would fall back to CPU" }
+          # Inventory first: which native libraries the wheel actually ships
+          # decides what "present" even means. Recent onnxruntime-directml
+          # builds link the DML provider into the core binary rather than
+          # shipping a separate onnxruntime_providers_*.dll.
+          Write-Host "--- onnxruntime / DirectML binaries in the bundle ---"
+          Get-ChildItem -Recurse $dist -Include *.dll, *.pyd |
+            Where-Object { $_.Name -match "onnxruntime|DirectML" } |
+            ForEach-Object { "{0,10:N0} KB  {1}" -f ($_.Length / 1KB), $_.Name }
+          foreach ($want in @("DirectML.dll")) {
+            if (Get-ChildItem -Recurse -Filter $want $dist) { Write-Host "OK   $want" }
+            else { Write-Warning "MISSING $want — DirectML cannot bind" }
           }
           if (Test-Path "$dist\_internal\certifi\cacert.pem") { Write-Host "OK   certifi cacert.pem" }
           else { Write-Warning "MISSING certifi cacert.pem — model download would fail on SSL" }
