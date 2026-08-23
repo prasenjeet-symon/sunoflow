@@ -1,0 +1,169 @@
+# Windows track CI — the compiler we don't have on the Mac.
+#
+# Neither half of the Windows app can be built on macOS: the tray app needs the
+# net8.0-windows desktop SDK, and PyInstaller is not a cross-compiler. This
+# workflow runs both on a real Windows x64 host so a broken build is caught on
+# push instead of on the first Windows box we get our hands on.
+#
+# What this DOES prove: the C# compiles and publishes, the sidecar's shared core
+# passes its tests on Windows, and the PyInstaller bundle freezes and boots.
+# What it does NOT prove: DirectML. GitHub's runners have no DX12 GPU, so the
+# STT engine's provider binding and latency — the Windows track's real go/no-go
+# gate — still needs `sidecars/windows/validate_onnx.py` on real hardware.
+name: Windows
+
+on:
+  push:
+    paths:
+      - "apps/windows/**"
+      - "sidecars/**"
+      - ".github/workflows/windows.yml"
+  pull_request:
+    paths:
+      - "apps/windows/**"
+      - "sidecars/**"
+      - ".github/workflows/windows.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # --------------------------------------------------------------------------
+  # The C# tray app. This is the job that answers "does it compile".
+  # --------------------------------------------------------------------------
+  tray-app:
+    name: Tray app (dotnet build)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: SDK info
+        run: dotnet --info
+
+      - name: Restore
+        run: dotnet restore apps\windows\SunoFlow\SunoFlow.csproj -p:Platform=x64
+
+      # -warnaserror is deliberately NOT set: this is the codebase's first ever
+      # compile, and we want the full warning list as information, not as a
+      # wall of failures hiding the real errors.
+      - name: Build (Release, x64)
+        run: >
+          dotnet build apps\windows\SunoFlow\SunoFlow.csproj
+          -c Release -p:Platform=x64 --no-restore --nologo -v normal
+
+      - name: Publish (self-contained win-x64)
+        run: >
+          dotnet publish apps\windows\SunoFlow\SunoFlow.csproj
+          -c Release -r win-x64 --self-contained true -p:Platform=x64
+          --nologo -o publish\SunoFlow
+
+      - name: Confirm the exe exists
+        shell: pwsh
+        run: |
+          $exe = "publish\SunoFlow\SunoFlow.exe"
+          if (-not (Test-Path $exe)) { throw "SunoFlow.exe not produced" }
+          Get-Item $exe | Select-Object Name, Length, LastWriteTime | Format-List
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SunoFlow-tray-app-win-x64
+          path: publish/SunoFlow/
+          retention-days: 14
+
+  # --------------------------------------------------------------------------
+  # The sidecar's platform-agnostic core, on Windows rather than the Mac.
+  # No onnxruntime here: the adapter lazy-imports it inside load()/transcribe,
+  # so these tests need only the web stack.
+  # --------------------------------------------------------------------------
+  sidecar-tests:
+    name: Sidecar tests (pytest)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: "x64"
+
+      - name: Install test deps
+        run: python -m pip install --upgrade pip pytest fastapi httpx requests python-multipart
+
+      - name: Run tests
+        run: python -m pytest sidecars/shared/tests sidecars/windows/tests -q
+
+  # --------------------------------------------------------------------------
+  # The PyInstaller freeze. Reviewed-only until now — this is its first build.
+  # Boots the frozen exe and checks /health, which is as far as we can go
+  # without the 2.5 GB model.
+  # --------------------------------------------------------------------------
+  freeze-sidecar:
+    name: Sidecar freeze (PyInstaller)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: "x64"
+
+      - name: Freeze (build.ps1)
+        shell: pwsh
+        working-directory: sidecars/windows
+        run: .\build.ps1
+
+      # Informational: which execution providers the wheel actually carries.
+      # DmlExecutionProvider being listed means the DirectML EP is compiled in;
+      # it says nothing about whether it can bind to a GPU on this runner.
+      - name: Report ONNX Runtime providers
+        shell: pwsh
+        working-directory: sidecars/windows
+        run: |
+          .\.venv-build\Scripts\python.exe -c "import onnxruntime as ort; print('onnxruntime', ort.__version__); print('providers:', ort.get_available_providers())"
+
+      - name: Check the DirectML DLLs landed in the bundle
+        shell: pwsh
+        working-directory: sidecars/windows
+        run: |
+          $dist = "dist\SunoFlowSidecar"
+          $dlls = Get-ChildItem -Recurse -Filter *.dll $dist | Select-Object -ExpandProperty Name
+          foreach ($want in @("onnxruntime_providers_directml.dll", "DirectML.dll")) {
+            if ($dlls -contains $want) { Write-Host "OK   $want" }
+            else { Write-Warning "MISSING $want — inference would fall back to CPU" }
+          }
+          if (Test-Path "$dist\_internal\certifi\cacert.pem") { Write-Host "OK   certifi cacert.pem" }
+          else { Write-Warning "MISSING certifi cacert.pem — model download would fail on SSL" }
+
+      - name: Boot the frozen sidecar and hit /health
+        shell: pwsh
+        working-directory: sidecars/windows
+        run: |
+          $exe = "dist\SunoFlowSidecar\SunoFlowSidecar.exe"
+          $proc = Start-Process -FilePath $exe -PassThru `
+            -RedirectStandardOutput sidecar-out.log -RedirectStandardError sidecar-err.log
+          $ok = $false
+          foreach ($i in 1..30) {
+            Start-Sleep -Seconds 2
+            try {
+              $r = Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 http://127.0.0.1:8765/health
+              Write-Host "/health -> $($r.Content)"
+              $ok = $true
+              break
+            } catch { }
+          }
+          if ($proc -and -not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
+          Write-Host "--- sidecar stdout ---"; Get-Content sidecar-out.log -ErrorAction SilentlyContinue
+          Write-Host "--- sidecar stderr ---"; Get-Content sidecar-err.log -ErrorAction SilentlyContinue
+          if (-not $ok) { throw "Frozen sidecar never answered /health" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SunoFlowSidecar-win-x64
+          path: sidecars/windows/dist/SunoFlowSidecar/
+          retention-days: 14
