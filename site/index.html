@@ -4,18 +4,18 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SunoFlow — Talk instead of typing</title>
-<meta name="description" content="Press one shortcut, say what you mean, and SunoFlow writes it out for you — properly punctuated and ready to send — in any app on your Mac.">
+<meta name="description" content="Press one shortcut, say what you mean, and SunoFlow writes it out for you — properly punctuated and ready to send — in any app on your Mac or PC.">
 <meta name="theme-color" content="#ffffff">
 <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
 <link rel="canonical" href="https://sunoflow-app.web.app/">
 
 <meta property="og:type" content="website">
 <meta property="og:title" content="SunoFlow — Talk instead of typing">
-<meta property="og:description" content="Press one shortcut, say what you mean, and SunoFlow writes it out for you — in any app on your Mac.">
+<meta property="og:description" content="Press one shortcut, say what you mean, and SunoFlow writes it out for you — in any app on your Mac or PC.">
 <meta property="og:url" content="https://sunoflow-app.web.app/">
 <meta name="twitter:card" content="summary_large_image">
 
-<link rel="stylesheet" href="assets/styles.css?v=13">
+<link rel="stylesheet" href="assets/styles.css?v=14">
 </head>
 <body>
 
@@ -62,9 +62,9 @@
     <p class="hero-note">
       <span>7 days free, then ₹99 a month</span>
       <span>&middot;</span>
-      <span>Press <span class="keys"><kbd>⌥</kbd> <kbd>Space</kbd></span> anywhere</span>
+      <span>Press <span class="keys" data-hotkey><kbd>⌥</kbd> <kbd>Space</kbd></span> anywhere</span>
       <span>&middot;</span>
-      <span>For Mac</span>
+      <span>For Mac and Windows</span>
     </p>
 
     <div class="stage">
@@ -160,7 +160,7 @@
         <h3>Press the shortcut</h3>
         <p>
           Click wherever you were about to type and press
-          <span class="keys"><kbd>⌥</kbd> <kbd>Space</kbd></span>. A small bar
+          <span class="keys" data-hotkey><kbd>⌥</kbd> <kbd>Space</kbd></span>. A small bar
           appears to show it's listening.
         </p>
       </div>
@@ -369,7 +369,7 @@
       <div>
         <div class="n">Your voice</div>
         <p class="k">
-          Your recording is turned into words on your own Mac and then discarded.
+          Your recording is turned into words on your own computer and then discarded.
           No audio is ever uploaded, and nothing you say is kept.
         </p>
       </div>
@@ -413,7 +413,7 @@
       <details>
         <summary>Does anyone hear my recordings?</summary>
         <div class="answer">
-          No. Your voice is turned into text on your own Mac and the recording is
+          No. Your voice is turned into text on your own computer and the recording is
           thrown away immediately. Nothing is uploaded, nothing is stored, and no
           one — including us — can listen to it.
         </div>
@@ -425,7 +425,7 @@
           By default the finished text passes through a polishing step that tidies
           the grammar and punctuation, and that step runs online. It only ever sees
           the words, never the audio, and nothing is kept afterwards. If you'd
-          rather nothing left your Mac at all, you can turn the polishing step off
+          rather nothing left your computer at all, you can turn the polishing step off
           in Settings and still get your dictation.
         </div>
       </details>
@@ -451,16 +451,18 @@
       <details>
         <summary>What do I need to run it?</summary>
         <div class="answer">
-          A Mac with Apple silicon (any M-series machine) running macOS 13 or later.
+          On a Mac: Apple silicon (any M-series machine) running macOS 13 or later.
+          On Windows: a 64-bit Windows 10 or 11 PC with a DirectX 12 graphics card,
+          which covers essentially every machine sold in the last several years.
           The first time you open it, SunoFlow will ask for permission to use your
-          microphone and to type into other apps — it needs both to do its job.
+          microphone — it needs that to do its job.
         </div>
       </details>
 
       <details>
         <summary>Can I change the shortcut?</summary>
         <div class="answer">
-          Yes. <span class="keys"><kbd>⌥</kbd> <kbd>Space</kbd></span> is just the
+          Yes. <span class="keys" data-hotkey><kbd>⌥</kbd> <kbd>Space</kbd></span> is just the
           default — set it to whatever you like, along with which microphone it
           listens to.
         </div>
@@ -469,8 +471,10 @@
       <details>
         <summary>Is there a Windows version?</summary>
         <div class="answer">
-          A Windows version is in the works. The Mac app is the one that's ready
-          today.
+          Yes. SunoFlow runs on Windows 10 and 11 as well as on the Mac, with the
+          same shortcut, the same dictionary and the same on-device transcription.
+          The download on this page gives you whichever one matches the computer
+          you're reading this on.
         </div>
       </details>
     </div>
@@ -487,7 +491,17 @@
         <a class="btn btn-primary btn-lg" href="login.html?new=1">Start your free trial</a>
         <a class="btn btn-quiet btn-lg" href="pricing.html">See pricing</a>
       </div>
-      <p class="hero-note"><span>₹99 a month after the trial &middot; Requires a Mac with Apple silicon, running macOS 13 or later</span></p>
+
+      <!-- Both platforms are listed in the markup; app.js promotes the one the
+           visitor is on. With JS off, both stay visible and usable. -->
+      <div class="hero-cta" data-downloads>
+        <a class="btn btn-quiet" data-dl="mac"
+           href="https://github.com/prasenjeet-symon/sunoflow/releases/latest">Download for Mac</a>
+        <a class="btn btn-quiet" data-dl="windows"
+           href="https://github.com/prasenjeet-symon/sunoflow/releases/latest/download/SunoFlow-Setup.exe">Download for Windows</a>
+      </div>
+
+      <p class="hero-note"><span>₹99 a month after the trial &middot; Mac with Apple silicon (macOS 13+) or a 64-bit Windows 10/11 PC</span></p>
     </div>
   </div>
 </section>
@@ -505,7 +519,7 @@
           </svg>
           SunoFlow
         </a>
-        <p>Talk instead of typing. Anywhere on your Mac.</p>
+        <p>Talk instead of typing. Anywhere on your Mac or PC.</p>
       </div>
 
       <div class="foot-links">
@@ -519,7 +533,8 @@
         </div>
         <div class="foot-col">
           <span class="h">Get it</span>
-          <a href="https://github.com/prasenjeet-symon/sunoflow/releases/latest">Download for Mac</a>
+          <a data-dl="mac" href="https://github.com/prasenjeet-symon/sunoflow/releases/latest">Download for Mac</a>
+          <a data-dl="windows" href="https://github.com/prasenjeet-symon/sunoflow/releases/latest/download/SunoFlow-Setup.exe">Download for Windows</a>
           <a href="pricing.html">Pricing &amp; trial</a>
           <a href="https://github.com/prasenjeet-symon/sunoflow">Project on GitHub</a>
         </div>
@@ -528,11 +543,11 @@
 
     <div class="foot-base">
       <span>&copy; <span data-year>2026</span> SunoFlow</span>
-      <span>Not affiliated with Apple.</span>
+      <span>Not affiliated with Apple or Microsoft.</span>
     </div>
   </div>
 </footer>
 
-<script src="assets/app.js?v=13" defer></script>
+<script src="assets/app.js?v=14" defer></script>
 </body>
 </html>

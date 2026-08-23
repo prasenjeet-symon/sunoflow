@@ -179,6 +179,12 @@ em.hl {
 
 .hero-cta { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; margin-top: 34px; }
 
+/* Download buttons lead with the platform the visitor is actually on. The
+   markup order is Mac first, so only Windows needs moving; without the
+   data-os attribute (no JS, or a platform we don't build for) both simply
+   stay in source order. */
+:root[data-os="windows"] [data-dl="windows"] { order: -1; }
+
 .hero-note {
   margin-top: 18px;
   font-size: 14px;

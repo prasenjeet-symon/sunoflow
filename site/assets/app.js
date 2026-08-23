@@ -111,6 +111,44 @@
     }
   }
 
+  /* ---- platform-aware downloads ----
+     Both platforms' links are always in the markup. This only decides which
+     one leads, so a visitor with JS off, on Linux, or on anything we cannot
+     identify still sees every option rather than none. */
+  var platform = (function () {
+    var hint = (navigator.userAgentData && navigator.userAgentData.platform) ||
+               navigator.platform || "";
+    var ua = navigator.userAgent || "";
+    if (/win/i.test(hint) || /windows/i.test(ua)) return "windows";
+    if (/mac/i.test(hint) || /macintosh|mac os x/i.test(ua)) {
+      // An iPad calls itself a Macintosh. A touchscreen is what gives it away,
+      // and there is no iPad build to offer it.
+      return navigator.maxTouchPoints > 1 ? "" : "mac";
+    }
+    return "";
+  })();
+
+  if (platform) {
+    // The attribute drives the ordering in CSS; the classes carry the visual
+    // weight, so the button you can actually use is the solid one. Only the
+    // CTA row is restyled — the footer's [data-dl] links are plain text links
+    // and would turn into buttons if they picked up the same classes.
+    document.documentElement.setAttribute("data-os", platform);
+    document.querySelectorAll("[data-downloads] [data-dl]").forEach(function (el) {
+      var mine = el.getAttribute("data-dl") === platform;
+      el.classList.toggle("btn-primary", mine);
+      el.classList.toggle("btn-quiet", !mine);
+    });
+  }
+
+  if (platform === "windows") {
+    // Same shortcut, different key cap: Option on a Mac is Alt on a PC. Only
+    // the modifier changes, so leave the rest of the combo alone.
+    document.querySelectorAll("[data-hotkey] kbd:first-child").forEach(function (k) {
+      k.textContent = "Alt";
+    });
+  }
+
   /* ---- year in the footer ---- */
   var y = document.querySelector("[data-year]");
   if (y) y.textContent = new Date().getFullYear();
