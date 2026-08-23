@@ -42,7 +42,7 @@ internal sealed class TrayApp : IDisposable
 
     /// <summary>Current recording/dictation state. Setting it refreshes the
     /// tray icon and status menu text, mirroring the macOS <c>didSet</c>.</summary>
-    private State State
+    private State CurrentState
     {
         get => _state;
         set { _state = value; UpdateIcon(); UpdateStatusText(); }
@@ -199,11 +199,11 @@ internal sealed class TrayApp : IDisposable
             if (State is State.Recording or State.Processing) return;
             if (ok)
             {
-                State = State.Idle;
+                CurrentState = State.Idle;
             }
             else
             {
-                State = State.SidecarOffline;
+                CurrentState = State.SidecarOffline;
                 // In installed mode the tray app keeps the sidecar alive (the
                 // Windows counterpart of the macOS LaunchAgent KeepAlive). In
                 // dev mode this is a no-op.
@@ -228,7 +228,7 @@ internal sealed class TrayApp : IDisposable
                 // Never leave the user stuck: a press while processing cancels to idle.
                 AppLog.Log("Press during processing — cancelling back to idle");
                 _overlay.HideOverlay();
-                State = State.Idle;
+                CurrentState = State.Idle;
                 break;
             case State.Idle:
                 StartRecording();
@@ -261,13 +261,13 @@ internal sealed class TrayApp : IDisposable
         {
             _recorder = new AudioRecorder(Preferences.Instance.MicDeviceId);
             _ = _recorder.StartRecording();
-            State = State.Recording;
+            CurrentState = State.Recording;
             _overlay.Show(DictationOverlay.Mode.Recording);
             _maxRecTimer?.Dispose();
             _maxRecTimer = new System.Windows.Forms.Timer { Interval = Preferences.Instance.MaxRecordingSeconds * 1000 };
             _maxRecTimer.Tick += (s, e) =>
             {
-                if (State == State.Recording)
+                if (CurrentState == State.Recording)
                 {
                     AppLog.Log("Max recording duration reached — auto-stopping");
                     StopAndTranscribe();
@@ -280,7 +280,7 @@ internal sealed class TrayApp : IDisposable
             _levelTimer = new System.Windows.Forms.Timer { Interval = 80 };
             _levelTimer.Tick += (s, e) =>
             {
-                if (State == State.Recording) _overlay.UpdateLevel(_recorder.CurrentLevel);
+                if (CurrentState == State.Recording) _overlay.UpdateLevel(_recorder.CurrentLevel);
             };
             _levelTimer.Start();
         }
@@ -304,11 +304,11 @@ internal sealed class TrayApp : IDisposable
         if (fileURL == null)
         {
             _overlay.HideOverlay();
-            State = State.Idle;
+            CurrentState = State.Idle;
             return;
         }
         _recorder.StopRecording();
-        State = State.Processing;
+        CurrentState = State.Processing;
         _overlay.UpdateMode(DictationOverlay.Mode.Processing);
 
         // Read the text just before the cursor while the field is still focused
@@ -353,13 +353,13 @@ internal sealed class TrayApp : IDisposable
             _ui.Post(_ =>
             {
                 // If the user cancelled while we were transcribing, drop the result.
-                if (State != State.Processing)
+                if (CurrentState != State.Processing)
                 {
                     TryDelete(wavPath);
                     return;
                 }
                 _overlay.HideOverlay();
-                State = State.Idle;
+                CurrentState = State.Idle;
                 if (outcome.NotEntitled != null)
                 {
                     // Nothing is pasted. The account has lapsed, so this is a

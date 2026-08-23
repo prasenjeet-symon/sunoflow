@@ -172,7 +172,7 @@ internal sealed class DictationOverlay : Form
 
     // MARK: - Drawing
 
-    private void Paint(Graphics g)
+    private void Render(Graphics g)
     {
         g.Clear(Color.Transparent);
         g.SmoothingMode = SmoothingMode.AntiAlias;
@@ -224,7 +224,7 @@ internal sealed class DictationOverlay : Form
         if (!IsHandleCreated || IsDisposed) return;
 
         using var bitmap = new Bitmap(Width, Height, PixelFormat.Format32bppArgb);
-        using (var g = Graphics.FromImage(bitmap)) Paint(g);
+        using (var g = Graphics.FromImage(bitmap)) Render(g);
 
         IntPtr screenDc = GetDC(IntPtr.Zero);
         IntPtr memoryDc = CreateCompatibleDC(screenDc);

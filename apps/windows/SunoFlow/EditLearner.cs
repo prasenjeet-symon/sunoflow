@@ -23,7 +23,7 @@ internal sealed class EditLearner
     }
 
     private Pending? _pending;
-    private Timer? _fallbackTimer;
+    private System.Threading.Timer? _fallbackTimer;
 
     private const int MaxSnapshotChars = 4000;
     private const int FallbackDelayMs = 30_000;
@@ -41,7 +41,7 @@ internal sealed class EditLearner
             if (text == null) return;
             _pending = new Pending { Handle = hwnd, Snapshot = Clamp(text) };
             _fallbackTimer?.Dispose();
-            _fallbackTimer = new Timer(_ => CaptureIfNeeded(), null, FallbackDelayMs, Timeout.Infinite);
+            _fallbackTimer = new System.Threading.Timer(_ => CaptureIfNeeded(), null, FallbackDelayMs, Timeout.Infinite);
         }, TaskScheduler.Default);
     }
 
