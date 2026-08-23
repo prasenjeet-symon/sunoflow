@@ -14,6 +14,11 @@ name: Windows
 
 on:
   push:
+    # Branches only. A tag push would otherwise run this workflow too, and its
+    # installer job calls the release workflow — which, seeing a tag ref, would
+    # try to publish a release the release workflow is already publishing. One
+    # of the two then dies on "a release with the same tag name already exists".
+    branches: ["**"]
     paths:
       - "apps/windows/**"
       - "sidecars/**"
