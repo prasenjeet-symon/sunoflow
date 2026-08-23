@@ -124,6 +124,23 @@ func TestCleanupRules_Unchanged(t *testing.T) {
 	}
 }
 
+// TestCleanupRules_FormattingCueAmbiguityGuard guards the disambiguation
+// caveat: several formatting cues ("number one", "title", "bold", "italic")
+// are ordinary words with no EMOJI-style marker to separate a structural
+// instruction from everyday use, so the prompt must tell the model to leave
+// literal uses alone.
+func TestCleanupRules_FormattingCueAmbiguityGuard(t *testing.T) {
+	if !strings.Contains(CleanupRules, "number one reason") {
+		t.Error("formatting-cue ambiguity example missing (number one)")
+	}
+	if !strings.Contains(CleanupRules, "bold move") {
+		t.Error("formatting-cue ambiguity example missing (bold)")
+	}
+	if !strings.Contains(CleanupRules, "job title is director") {
+		t.Error("formatting-cue ambiguity example missing (title)")
+	}
+}
+
 // --- dictionary ---------------------------------------------------------------
 
 // Deliberately NOT cavach/Kavach: that pair is CleanupRules' own worked example,

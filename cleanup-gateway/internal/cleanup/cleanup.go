@@ -76,6 +76,22 @@ cues:
 - "heading" / "title" followed by text -> a markdown heading "# "
 - "bold" before a word/phrase      -> wrap it in **...**
 - "italic" before a word/phrase    -> wrap it in *...*
+Most of these words also show up constantly with their ordinary meaning, not as
+a cue, and unlike EMOJI (which needs the trailing word "emoji") most have no
+marker to tell the two apart. Only apply a cue when the sentence reads as a
+structural instruction to you; when the word is just being used for what it
+normally means, leave it exactly as dictated. Do NOT apply a cue in cases like
+these:
+- "you're the number one reason I'm here" (a claim, not a list)
+- "what's the title of that book" / "his job title is director" (asking about
+  or stating a title, not naming a heading to create)
+- "that's a bold move" (an ordinary adjective, not a wrap-in-bold instruction)
+- "she has a good eye for italic typefaces" (talking about italics, not asking
+  for any)
+Where you are not confident the speaker meant the cue rather than the word's
+ordinary sense, leave the words unchanged — a missed formatting cue is a minor
+annoyance; a wrongly "formatted" sentence silently drops or restructures words
+the speaker never asked to touch.
 
 EMOJI — when the speaker says the name of an emoji (often followed by the word
 "emoji"), replace those words with the actual emoji character. Examples:
