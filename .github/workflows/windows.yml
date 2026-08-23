@@ -174,3 +174,15 @@ jobs:
           name: SunoFlowSidecar-win-x64
           path: sidecars/windows/dist/SunoFlowSidecar/
           retention-days: 14
+
+  # --------------------------------------------------------------------------
+  # The release pipeline's own build, run on ordinary pushes so the installer
+  # script cannot rot unnoticed between tags. Publishing is keyed off the ref
+  # being a tag, so this can only ever leave an artifact behind — which doubles
+  # as a ready-to-install build for testing on a real Windows machine.
+  # --------------------------------------------------------------------------
+  installer:
+    name: Installer (dry build)
+    uses: ./.github/workflows/release.yml
+    with:
+      version: 0.0.0-ci

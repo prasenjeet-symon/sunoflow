@@ -21,6 +21,15 @@ on:
         description: "Version for a dry-run build (nothing is published)"
         required: true
         default: "0.0.0-dev"
+  # Callable so the CI workflow can build the installer on ordinary pushes.
+  # Publishing keys off the ref being a tag, so a call from a branch can only
+  # ever produce an artifact.
+  workflow_call:
+    inputs:
+      version:
+        description: "Version for the dry build"
+        required: true
+        type: string
 
 permissions:
   contents: write
