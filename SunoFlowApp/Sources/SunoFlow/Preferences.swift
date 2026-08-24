@@ -31,6 +31,8 @@ final class Preferences: ObservableObject {
         static let maxRecordingSeconds = "maxRecordingSeconds"
         static let cleanupEnabled = "cleanupEnabled"
         static let screenContextEnabled = "screenContextEnabled"
+        static let offerCopyWhenUnfocused = "offerCopyWhenUnfocused"
+        static let onboardingCompleted = "onboardingCompleted"
     }
 
     /// Core Audio device UID to record from. Empty means "system default input".
@@ -66,6 +68,21 @@ final class Preferences: ObservableObject {
         didSet { defaults.set(screenContextEnabled, forKey: Key.screenContextEnabled) }
     }
 
+    /// When a finished dictation has nowhere to paste — no text field focused,
+    /// or no Accessibility permission to press Cmd+V — show the transcript at the
+    /// bottom of the screen with a button that copies it, instead of typing into
+    /// nothing. Off returns to pasting blindly and hoping something catches it.
+    @Published var offerCopyWhenUnfocused: Bool {
+        didSet { defaults.set(offerCopyWhenUnfocused, forKey: Key.offerCopyWhenUnfocused) }
+    }
+
+    /// False until first-run setup has been completed (or explicitly skipped).
+    /// Stored rather than inferred from "is everything configured", so someone
+    /// who deletes their model later gets the model page, not the whole wizard.
+    @Published var onboardingCompleted: Bool {
+        didSet { defaults.set(onboardingCompleted, forKey: Key.onboardingCompleted) }
+    }
+
     private init() {
         defaults.register(defaults: [
             Key.micDeviceUID: "",
@@ -74,6 +91,8 @@ final class Preferences: ObservableObject {
             Key.maxRecordingSeconds: 60,
             Key.cleanupEnabled: true,
             Key.screenContextEnabled: false,
+            Key.offerCopyWhenUnfocused: true,
+            Key.onboardingCompleted: false,
         ])
         // didSet does not fire for assignments inside init, so these load the
         // stored values without redundantly writing them back.
@@ -83,6 +102,8 @@ final class Preferences: ObservableObject {
         maxRecordingSeconds = defaults.integer(forKey: Key.maxRecordingSeconds)
         cleanupEnabled = defaults.bool(forKey: Key.cleanupEnabled)
         screenContextEnabled = defaults.bool(forKey: Key.screenContextEnabled)
+        offerCopyWhenUnfocused = defaults.bool(forKey: Key.offerCopyWhenUnfocused)
+        onboardingCompleted = defaults.bool(forKey: Key.onboardingCompleted)
     }
 
     private func persistHotkey() {

@@ -102,19 +102,38 @@ Quits the app and stops the sidecar.
 ## Using it
 
 1. Click into any text field in any app.
-2. Press **Option+Space** — a small frosted "bubble" pops in at the top-center of
-   the screen with a gradient waveform, and the menu bar icon turns into a filled
-   mic.
+2. Press **Option+Space** — a small paper pill settles in at the top-center of
+   the screen with a violet waveform, and the menu bar icon turns into a filled
+   mic. It's the same paper, hairline and accent as the dashboard: everything
+   SunoFlow floats over your screen is drawn from one set of tokens.
 3. Speak — the waveform reacts to your voice (it swells in the center and tapers
    at the edges).
-4. Press **Option+Space** again to stop — the bubble's waveform shifts to a
+4. Press **Option+Space** again to stop — the pill's waveform shifts to a
    gentle "thinking" animation while it transcribes and cleans up, then the
    result is pasted at your cursor automatically (your existing clipboard
-   contents are restored right after) and the bubble fades away.
+   contents are restored right after) and the pill fades away.
 
-The menu bar dropdown also shows live status and your last transcript. If
-Accessibility isn't granted, the transcript is copied to the clipboard instead
-of being auto-pasted, so you can paste it manually.
+The menu bar dropdown also shows live status and your last transcript.
+
+### When there's nowhere to paste
+
+Pasting only works if something is focused to receive it. If you dictate while
+reading a web page, or after clicking onto the desktop, a simulated Cmd+V goes
+nowhere and the transcript is lost — which looks exactly like dictation failing.
+
+So before inserting, SunoFlow asks the Accessibility API what has focus. When
+there is no editable target it doesn't paste at all: a card rises at the
+bottom-center of the screen with the whole transcript and a **Copy text** button,
+so the words are one click from your clipboard. The same card appears when
+Accessibility isn't granted, since without it the app can't press Cmd+V at all.
+
+It's drawn in the dashboard's design language rather than as a system HUD — the
+same paper, ink, hairline rules and single filled action, pinned to the light
+appearance the palette was drawn for. The hairline that closes the transcript
+doubles as the clock: it drains as the card's time runs out, longer transcripts
+get longer on screen, and the countdown pauses while your pointer is over it.
+Turn the whole behaviour off in Settings → General → "Nowhere to paste" if you'd
+rather it always pasted and took its chances.
 
 Menu bar icon states:
 - ⚠️ — sidecar isn't running/reachable (run `./run.sh`)

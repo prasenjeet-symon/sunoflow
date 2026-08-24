@@ -13,7 +13,13 @@ final class HotkeyManager {
 
     var onHotkey: (() -> Void)?
 
-    func register(keyCode: UInt32, modifiers: UInt32) {
+    /// True when the last `register` actually took the shortcut. A failure is
+    /// silent to the user — the key simply does nothing — so setup asks this
+    /// rather than assuming.
+    private(set) var isRegistered = false
+
+    @discardableResult
+    func register(keyCode: UInt32, modifiers: UInt32) -> Bool {
         // Make register idempotent: if a handler/hotkey is already installed,
         // tear it down first so we never overwrite (and leak) the Carbon refs.
         unregister()
@@ -55,15 +61,19 @@ final class HotkeyManager {
         let id = EventHotKeyID(signature: HotkeyManager.signature, id: HotkeyManager.hotKeyID)
         let registerStatus = RegisterEventHotKey(keyCode, modifiers, id, GetApplicationEventTarget(), 0, &hotKeyRef)
         NSLog("[SunoFlow] RegisterEventHotKey status=\(registerStatus)")
+        isRegistered = registerStatus == noErr && hotKeyRef != nil
+        return isRegistered
     }
 
     /// Swap the active hotkey for a new key/modifier combination.
-    func reregister(keyCode: UInt32, modifiers: UInt32) {
+    @discardableResult
+    func reregister(keyCode: UInt32, modifiers: UInt32) -> Bool {
         unregister()
-        register(keyCode: keyCode, modifiers: modifiers)
+        return register(keyCode: keyCode, modifiers: modifiers)
     }
 
     func unregister() {
+        isRegistered = false
         if let ref = hotKeyRef {
             UnregisterEventHotKey(ref)
             hotKeyRef = nil

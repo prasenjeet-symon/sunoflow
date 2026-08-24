@@ -33,6 +33,8 @@ enum Theme {
     // MARK: Ink
 
     static let ink   = Color(red: 0.090, green: 0.090, blue: 0.106)   // #17171B
+    /// Ink, one step lighter — the hover state of the single filled action.
+    static let inkRaised = Color(red: 0.160, green: 0.160, blue: 0.190) // #29292F
     static let body  = Color(red: 0.353, green: 0.353, blue: 0.396)   // #5A5A65
     static let faint = Color(red: 0.549, green: 0.549, blue: 0.588)   // #8C8C96
 
@@ -69,6 +71,67 @@ enum Theme {
     static let spring = Animation.spring(response: 0.30, dampingFraction: 0.95)
     static let gentle = Animation.easeOut(duration: 0.20)
     static let quick  = Animation.easeOut(duration: 0.13)
+}
+
+// MARK: - AppKit mirrors
+
+/// The floating panels are drawn by hand in AppKit rather than composed in
+/// SwiftUI, so the same tokens have to exist as `NSColor`s. Each one is derived
+/// from the `Theme` value above rather than re-typed from the hex, so the sheet
+/// and the panels can never drift apart.
+extension NSColor {
+    static let sunoPaper      = NSColor(Theme.paper)
+    static let sunoWash       = NSColor(Theme.wash)
+    static let sunoRule       = NSColor(Theme.rule)
+    static let sunoRuleStrong = NSColor(Theme.ruleStrong)
+    static let sunoInk        = NSColor(Theme.ink)
+    static let sunoInkRaised  = NSColor(Theme.inkRaised)
+    static let sunoBody       = NSColor(Theme.body)
+    static let sunoFaint      = NSColor(Theme.faint)
+    static let sunoAccent     = NSColor(Theme.accent)
+    static let sunoSuccess    = NSColor(Theme.success)
+    static let sunoWarning    = NSColor(Theme.warning)
+}
+
+extension NSView {
+    /// Paints a floating surface as a sheet of paper: the fill, the hairline
+    /// that gives it an edge, and the one lift this design permits.
+    ///
+    /// The sheet itself has no shadows, because it is all one plane. A panel
+    /// floating over someone else's window genuinely is on another plane, and
+    /// white paper over a white document would otherwise have no edge at all.
+    /// So the panels — and only the panels — get the smallest shadow that
+    /// separates them, with the hairline border still doing the real work.
+    ///
+    /// Note the `shadow` assignment. AppKit syncs a layer-backed view's
+    /// `shadow` — nil by default — onto its backing layer as it displays, which
+    /// silently wipes any shadow set on the layer alone. Handing the view a
+    /// shadow object first is what makes the lift stick.
+    func applySunoPaper(cornerRadius: CGFloat, lift: CGFloat) {
+        wantsLayer = true
+        shadow = NSShadow()
+        guard let layer = layer else { return }
+        layer.backgroundColor = NSColor.sunoPaper.cgColor
+        layer.cornerRadius = cornerRadius
+        layer.borderWidth = 1
+        layer.borderColor = NSColor.sunoRuleStrong.cgColor
+        layer.shadowColor = NSColor.sunoInk.cgColor
+        layer.shadowOpacity = 0.13
+        layer.shadowRadius = lift
+        layer.shadowOffset = CGSize(width: 0, height: -lift / 3.5)
+    }
+}
+
+extension Theme {
+    /// `Theme.spring` for Core Animation, which is parameterised by stiffness
+    /// and damping instead of response and damping fraction:
+    /// `stiffness = (2π / response)²`, `damping = 2 · fraction · √stiffness`.
+    /// Same curve, same restraint — a settle, not a bounce.
+    enum Spring {
+        static let mass: CGFloat = 1
+        static let stiffness: CGFloat = 438  // response 0.30
+        static let damping: CGFloat = 40     // dampingFraction 0.95
+    }
 }
 
 // MARK: - Type scale
@@ -303,7 +366,7 @@ struct SunoPrimaryButtonStyle: ButtonStyle {
             .padding(.horizontal, 15)
             .padding(.vertical, 7)
             .background(
-                Capsule().fill(hovering ? Color(red: 0.16, green: 0.16, blue: 0.19) : Theme.ink)
+                Capsule().fill(hovering ? Theme.inkRaised : Theme.ink)
             )
             .opacity(isEnabled ? (configuration.isPressed ? 0.9 : 1) : 0.32)
             .animation(Theme.quick, value: configuration.isPressed)

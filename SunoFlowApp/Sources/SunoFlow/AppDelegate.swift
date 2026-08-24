@@ -2,6 +2,18 @@ import AVFoundation
 import Cocoa
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    /// The running delegate. First-run setup reaches it to borrow the shortcut
+    /// and to ask whether that shortcut registered at all.
+    static private(set) var shared: AppDelegate?
+
+    /// Set by first-run setup while it is asking the user to press the shortcut.
+    /// Returning true swallows the press, so proving the key works does not also
+    /// start a dictation the user did not ask for.
+    var hotkeyInterceptor: (() -> Bool)?
+
+    /// Whether the configured shortcut is actually ours. False means another app
+    /// owns the combination and the key will silently do nothing.
+    var hotkeyRegistered: Bool { hotkeyManager.isRegistered }
     private enum State {
         case sidecarOffline
         case idle
@@ -13,6 +25,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let hotkeyManager = HotkeyManager()
     private let audioRecorder = AudioRecorder()
     private let overlay = DictationOverlay()
+    private let transcriptCard = TranscriptCard()
     private let editLearner = EditLearner()
     private var state: State = .sidecarOffline {
         didSet {
@@ -28,6 +41,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let correctionsMenu = NSMenu()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        AppDelegate.shared = self
+
         // The stored device key may have been written by a copy of the app at a
         // different path (a build directory, before it was installed). Rewrite
         // it from here so macOS stops treating every read as untrusted.
@@ -45,7 +60,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.overlay.updateLevel(level)
         }
 
-        hotkeyManager.onHotkey = { [weak self] in self?.toggleRecording() }
+        hotkeyManager.onHotkey = { [weak self] in
+            if self?.hotkeyInterceptor?() == true { return }
+            self?.toggleRecording()
+        }
         let prefs = Preferences.shared
         hotkeyManager.register(keyCode: prefs.hotkeyKeyCode, modifiers: prefs.hotkeyModifiers)
 
@@ -69,6 +87,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         SidecarSupervisor.shared.ensureRunning()
 
         startHealthPolling()
+
+        // A first run gets the setup wizard rather than a menu-bar icon and no
+        // idea what to do next. Everything above has already registered the
+        // hotkey and started the sidecar, so setup can report on both.
+        if !Preferences.shared.onboardingCompleted {
+            AppLog.log("First run — showing setup")
+            OnboardingWindowController.shared.show()
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -113,6 +139,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         correctionsMenuItem = NSMenuItem(title: "Learned Corrections", action: nil, keyEquivalent: "")
         correctionsMenuItem.submenu = correctionsMenu
         menu.addItem(correctionsMenuItem)
+
+        let setupItem = NSMenuItem(title: "Run setup again…", action: #selector(openOnboarding), keyEquivalent: "")
+        setupItem.target = self
+        menu.addItem(setupItem)
 
         let settingsItem = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
         settingsItem.target = self
@@ -197,6 +227,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         SettingsWindowController.shared.show()
     }
 
+    /// Kept reachable from the menu so someone who skipped setup, or who is
+    /// setting up a second Mac, can walk the same path again rather than
+    /// hunting through settings pages for the pieces.
+    @objc private func openOnboarding() {
+        OnboardingWindowController.shared.show()
+    }
+
     private func updateStatusText() {
         let text: String
         switch state {
@@ -278,6 +315,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             SettingsWindowController.shared.show()
             return
         }
+
+        // A card left over from the last dictation is about to be answered by
+        // this one — take it down before the overlay comes up.
+        transcriptCard.dismiss()
 
         // Before recording the next utterance, learn from any edits the user made
         // to the previously pasted text.
@@ -432,22 +473,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let trusted = TextInjector.hasAccessibilityPermission
         AppLog.log("Accessibility trusted before insert: \(trusted)")
+        let offerCopy = Preferences.shared.offerCopyWhenUnfocused
 
-        if trusted {
-            TextInjector.insert(cleaned)
-            AppLog.log("Inserted via paste (\(cleaned.count) chars)")
-            // Snapshot the field so we can learn from any edits the user makes.
-            editLearner.noteInsertion()
-        } else {
-            // Fallback: we can't simulate Cmd+V without Accessibility, but we can
-            // still put the text on the clipboard so the user can paste manually.
-            let pasteboard = NSPasteboard.general
-            pasteboard.clearContents()
-            pasteboard.setString(cleaned, forType: .string)
+        guard trusted else {
+            // We can't simulate Cmd+V without Accessibility. Hand the transcript
+            // to the card so it is one click from the clipboard; without the
+            // card, fall back to copying it and saying so in the menu.
             NSSound.beep()
-            lastTranscriptMenuItem?.title = "Last (copied — grant Accessibility): \(preview)"
-            AppLog.log("Accessibility NOT granted — copied to clipboard instead of auto-pasting")
+            if offerCopy {
+                lastTranscriptMenuItem?.title = "Last (not pasted — grant Accessibility): \(preview)"
+                AppLog.log("Accessibility NOT granted — offering the transcript to copy")
+                transcriptCard.present(cleaned, reason: .noAccessibility)
+            } else {
+                let pasteboard = NSPasteboard.general
+                pasteboard.clearContents()
+                pasteboard.setString(cleaned, forType: .string)
+                lastTranscriptMenuItem?.title = "Last (copied — grant Accessibility): \(preview)"
+                AppLog.log("Accessibility NOT granted — copied to clipboard instead of auto-pasting")
+            }
+            return
         }
+
+        // Pasting into something that can't take text loses the transcript
+        // silently, which reads as dictation having failed. Ask what has focus
+        // first, and when there is no target, offer the text instead.
+        let target = offerCopy ? FocusInspector.currentTarget() : .unknown
+        guard target != .notEditable else {
+            lastTranscriptMenuItem?.title = "Last (nothing focused — copy it): \(preview)"
+            AppLog.log("No editable target — offering the transcript to copy")
+            transcriptCard.present(cleaned, reason: .noFocus)
+            return
+        }
+
+        TextInjector.insert(cleaned)
+        AppLog.log("Inserted via paste (\(cleaned.count) chars)")
+        // Snapshot the field so we can learn from any edits the user makes.
+        editLearner.noteInsertion()
     }
 
     // MARK: - Permissions

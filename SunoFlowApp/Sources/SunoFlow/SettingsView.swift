@@ -525,6 +525,10 @@ struct SettingsView: View {
     // Sidecar (transcription engine) reachability.
     @State private var sidecarOnline = false
 
+    // Hosted text-polishing pass reachability. Named for what the user sees it
+    // do, not for the gateway/backend behind it.
+    @State private var polishOnline = false
+
     // Permission status.
     @State private var micPermission: Bool = false
     @State private var accessibilityPermission: Bool = false
@@ -553,19 +557,22 @@ struct SettingsView: View {
         Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1"
     }
 
+    /// Total subsystems tracked in the overview status list.
+    private let subsystemCount = 4
+
     /// Number of subsystems that are healthy (for the overview header).
     private var healthyCount: Int {
-        [sidecarOnline, micPermission, accessibilityPermission].filter { $0 }.count
+        [sidecarOnline, micPermission, accessibilityPermission, polishOnline].filter { $0 }.count
     }
 
-    private var allReady: Bool { healthyCount == 3 }
+    private var allReady: Bool { healthyCount == subsystemCount }
 
     private var heroSubtitle: String {
         guard !allReady else {
             let combo = KeyCombo.display(keyCode: prefs.hotkeyKeyCode, modifiers: prefs.hotkeyModifiers)
             return "Press \(combo) anywhere to dictate."
         }
-        let pending = 3 - healthyCount
+        let pending = subsystemCount - healthyCount
         return pending == 1
             ? "1 item still needs attention before dictation works everywhere."
             : "\(pending) items still need attention before dictation works everywhere."
@@ -716,7 +723,7 @@ struct SettingsView: View {
                 }
                 Spacer(minLength: 12)
                 StatusText(
-                    text: allReady ? "All systems ready" : "\(3 - healthyCount) need attention",
+                    text: allReady ? "All systems ready" : "\(subsystemCount - healthyCount) need attention",
                     color: allReady ? Theme.success : Theme.warning
                 )
             }
@@ -760,7 +767,7 @@ struct SettingsView: View {
 
     private var statusGroup: some View {
         VStack(spacing: 0) {
-            SectionLabel(text: "Status", trailing: "\(healthyCount) of 3 ready")
+            SectionLabel(text: "Status", trailing: "\(healthyCount) of \(subsystemCount) ready")
             Rule(strong: true)
             statusRow(
                 title: "Transcription engine",
@@ -790,7 +797,17 @@ struct SettingsView: View {
                 ok: accessibilityPermission,
                 okText: "Allowed",
                 failText: "Not allowed",
-                hint: "Required so SunoFlow can type into other apps.",
+                hint: "Required so SunoFlow can type into other apps."
+            )
+            statusRow(
+                title: "Text polish",
+                systemImage: "sparkles",
+                ok: polishOnline,
+                okText: "Online",
+                failText: "Offline",
+                hint: polishOnline
+                    ? "Dictation is tidied up before it's typed out."
+                    : "Dictation still works, but arrives unpolished until this reconnects.",
                 divider: false
             )
             Rule(strong: true)
@@ -1063,6 +1080,7 @@ struct SettingsView: View {
             startupGroup
             hotkeyGroup
             recordingGroup
+            unfocusedGroup
             screenContextGroup
         }
     }
@@ -1132,6 +1150,21 @@ struct SettingsView: View {
                     Stepper("", value: $prefs.maxRecordingSeconds, in: 10...600, step: 5)
                         .labelsHidden()
                 }
+            }
+            Rule(strong: true)
+        }
+    }
+
+    private var unfocusedGroup: some View {
+        VStack(spacing: 0) {
+            SectionLabel(text: "Nowhere to paste")
+            Rule(strong: true)
+            settingRow(
+                "Offer the text instead",
+                "When a dictation finishes and no text field is focused, SunoFlow shows what you said at the bottom of the screen with a button to copy it — rather than typing into nothing and losing it.",
+                divider: false
+            ) {
+                brandToggle($prefs.offerCopyWhenUnfocused)
             }
             Rule(strong: true)
         }
@@ -1529,6 +1562,11 @@ struct SettingsView: View {
                     loadCorrections()
                     fetchModelStatus()
                 }
+            }
+        }
+        TranscriptionClient.checkCleanupGateway { ok in
+            DispatchQueue.main.async {
+                polishOnline = ok
             }
         }
     }

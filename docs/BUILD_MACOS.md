@@ -333,6 +333,7 @@ the platform-agnostic corrections + cleanup-gateway POST logic that
 | `launchctl kickstart -k` app job → "spawn failed" | launchd cached old code hash after rebuild | Use `./redeploy.sh` (bootout + bootstrap-fresh), not `kickstart -k` |
 | App starts stale dev build on reboot | App plist points at repo dev build | Re-run `./install-autostart.sh` — it now prefers `/Applications/SunoFlow.app` over the dev build automatically |
 | Dictation transcribes but nothing pastes | Accessibility not granted | System Settings → Privacy & Security → Accessibility → add SunoFlow |
+| A card offers the text to copy instead of pasting it | Nothing editable was focused when the transcript landed (`FocusInspector` logs the role it saw) | Click into the field first; if the app was misread, turn off Settings → General → "Nowhere to paste" |
 | Screen context always empty | Screen Recording not granted | Settings → Screen Context ON; grant Screen Recording (note: black image, not nil, without it) |
 | `/cleanup` returns raw un-cleaned text (no error) | Gateway unreachable / bad key | Soft-fail is by design; check network + `SUNOFLOW_CLEANUP_KEY` env |
 | `/health` says `model_loaded:false` forever | Model download incomplete | `curl http://127.0.0.1:8765/model/status`; ensure all 5 files present in `~/Library/Application Support/SunoFlow/model` |

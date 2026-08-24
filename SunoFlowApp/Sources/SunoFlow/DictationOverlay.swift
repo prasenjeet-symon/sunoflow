@@ -2,8 +2,9 @@ import Cocoa
 
 /// A panel that never becomes key or main, so showing it never steals keyboard
 /// focus from the text field the user is dictating into (critical — otherwise
-/// the paste would land in the wrong place).
-private final class NonActivatingPanel: NSPanel {
+/// the paste would land in the wrong place). Shared with `TranscriptCard`,
+/// which needs the same guarantee while still accepting clicks.
+final class NonActivatingPanel: NSPanel {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 }
@@ -13,16 +14,27 @@ enum OverlayMode {
     case processing
 }
 
-/// A small, elegant floating "bubble" at the top-center of the screen shown
-/// during dictation — a compact frosted capsule with a gradient waveform that
-/// reacts to the voice, a springy pop-in, and a soft drop shadow. Non-activating
-/// and click-through, so it never takes focus.
+/// The small pill at the top-centre of the screen shown while dictating: a
+/// sheet of paper the size of a badge, with an accent waveform that reacts to
+/// the voice. Non-activating and click-through, so it never takes focus.
+///
+/// Drawn from the same tokens as the dashboard and `TranscriptCard` — paper,
+/// hairline, one accent, `Theme.spring` for the motion — so the two things that
+/// float over other apps look like one product. See `applySunoPaper`.
 final class DictationOverlay {
     private var panel: NonActivatingPanel?
     private var bubble: BubbleView?
 
-    private let panelSize = NSSize(width: 132, height: 42)
+    /// The pill itself. The panel is larger — see `BubbleView.margin`.
+    private let pillSize = NSSize(width: 132, height: 42)
     private let topGap: CGFloat = 8
+
+    private var panelSize: NSSize {
+        NSSize(
+            width: pillSize.width + BubbleView.margin * 2,
+            height: pillSize.height + BubbleView.margin * 2
+        )
+    }
 
     // Incremented on every show(). A hide()'s completion handler captures the
     // value it saw when it started and bails out if show() ran in the meantime
@@ -39,19 +51,14 @@ final class DictationOverlay {
         guard let panel = panel, let bubble = bubble else { return }
 
         bubble.mode = mode
-        let target = topCenterOrigin()
-
-        // Begin slightly higher and transparent, then slide down + fade in,
-        // while the waveform pops with a spring.
-        panel.setFrameOrigin(NSPoint(x: target.x, y: target.y + 8))
+        panel.setFrameOrigin(topCenterOrigin())
         panel.alphaValue = 0
         panel.orderFrontRegardless()
 
         NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.24
+            ctx.duration = 0.20 // Theme.gentle
             ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
             panel.animator().alphaValue = 1
-            panel.animator().setFrameOrigin(target)
         }
         bubble.start()
         bubble.playEntrance()
@@ -71,7 +78,7 @@ final class DictationOverlay {
         let up = NSPoint(x: panel.frame.origin.x, y: panel.frame.origin.y + 6)
         let generation = showGeneration
         NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.16
+            ctx.duration = 0.13 // Theme.quick
             ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
             panel.animator().alphaValue = 0
             panel.animator().setFrameOrigin(up)
@@ -101,8 +108,13 @@ final class DictationOverlay {
         panel.hidesOnDeactivate = false
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        panel.hasShadow = true // soft drop shadow follows the frosted capsule
+        // The pill draws its own lift, inside a panel deliberately larger than
+        // it so that shadow has somewhere to fall.
+        panel.hasShadow = false
         panel.ignoresMouseEvents = true
+        // Same reasoning as the settings window: this palette was drawn light,
+        // so pin the appearance instead of letting macOS invent a dark variant.
+        panel.appearance = NSAppearance(named: .aqua)
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
 
         let bubble = BubbleView(frame: NSRect(origin: .zero, size: panelSize))
@@ -116,23 +128,27 @@ final class DictationOverlay {
     private func topCenterOrigin() -> NSPoint {
         let screen = NSScreen.main ?? NSScreen.screens.first
         guard let screen = screen else { return .zero }
-        // visibleFrame excludes the menu bar, so this sits just below it, centered.
+        // visibleFrame excludes the menu bar, so the pill sits just below it,
+        // centred. The margin is transparent, so it is subtracted back out.
         let vf = screen.visibleFrame
+        let size = panelSize
         return NSPoint(
-            x: (vf.midX - panelSize.width / 2).rounded(),
-            y: (vf.maxY - panelSize.height - topGap).rounded()
+            x: (vf.midX - size.width / 2).rounded(),
+            y: (vf.maxY - topGap - size.height + BubbleView.margin).rounded()
         )
     }
 }
 
-/// The capsule bubble: a frosted pill with a dense, gradient-tinted waveform
-/// that animates with the audio level.
+/// The pill: paper with a hairline edge, and a dense accent waveform that
+/// animates with the audio level.
 private final class BubbleView: NSView {
     var mode: OverlayMode = .recording
 
-    private let effect = NSVisualEffectView()
-    private let gradient = CAGradientLayer()
-    private let barsMask = CALayer()
+    /// Transparent breathing room around the pill for its shadow to fall into.
+    static let margin: CGFloat = 16
+
+    private let pill = NSView()
+    private let waveform = CALayer()
     private var bars: [CALayer] = []
     private var heights: [CGFloat] = []
 
@@ -160,34 +176,21 @@ private final class BubbleView: NSView {
     }
 
     private func setup() {
-        // Frosted capsule that stays visible on any background, light or dark.
-        effect.material = .hudWindow
-        effect.blendingMode = .behindWindow
-        effect.state = .active
-        effect.wantsLayer = true
-        effect.layer?.cornerRadius = bounds.height / 2
-        effect.layer?.masksToBounds = true
-        effect.frame = bounds
-        effect.autoresizingMask = [.width, .height]
-        addSubview(effect)
-
-        // Waveform, revealed through a mask of animated bars. Both stops are
-        // the same accent as the dashboard — the design has no gradients in it,
-        // and the colour is pitched to stay legible on the frosted HUD in both
-        // light and dark system appearances.
-        let accent = NSColor(calibratedRed: 0.357, green: 0.329, blue: 0.788, alpha: 1.0)
-        gradient.colors = [accent.cgColor, accent.cgColor]
-        gradient.startPoint = CGPoint(x: 0, y: 0.5)
-        gradient.endPoint = CGPoint(x: 1, y: 0.5)
-        gradient.mask = barsMask
-        effect.layer?.addSublayer(gradient)
-
+        // Layer-backed before the waveform is attached: applySunoPaper sets this
+        // too, but not until layout, and a nil layer would silently swallow the
+        // sublayer and leave an empty pill.
+        pill.wantsLayer = true
+        addSubview(pill)
+        waveform.masksToBounds = false
+        pill.layer?.addSublayer(waveform)
         layoutBubble()
     }
 
     override func layout() {
         super.layout()
-        effect.layer?.cornerRadius = bounds.height / 2
+        pill.frame = bounds.insetBy(dx: BubbleView.margin, dy: BubbleView.margin)
+        // A capsule, like every other rounded thing in this design.
+        pill.applySunoPaper(cornerRadius: pill.bounds.height / 2, lift: 10)
         layoutBubble()
     }
 
@@ -195,15 +198,12 @@ private final class BubbleView: NSView {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
 
-        let waveRect = CGRect(
+        waveform.frame = CGRect(
             x: insetX, y: insetY,
-            width: bounds.width - insetX * 2,
-            height: bounds.height - insetY * 2
+            width: pill.bounds.width - insetX * 2,
+            height: pill.bounds.height - insetY * 2
         )
-        gradient.frame = waveRect
-        barsMask.frame = CGRect(origin: .zero, size: waveRect.size)
-
-        rebuildBarsIfNeeded(waveWidth: waveRect.width)
+        rebuildBarsIfNeeded(waveWidth: waveform.bounds.width)
         layoutBars()
         CATransaction.commit()
     }
@@ -217,9 +217,9 @@ private final class BubbleView: NSView {
         bars.removeAll()
         for _ in 0..<count {
             let bar = CALayer()
-            bar.backgroundColor = NSColor.white.cgColor // mask: coverage is what matters
+            bar.backgroundColor = NSColor.sunoAccent.cgColor
             bar.cornerRadius = barWidth / 2
-            barsMask.addSublayer(bar)
+            waveform.addSublayer(bar)
             bars.append(bar)
         }
         heights = Array(repeating: barWidth, count: count)
@@ -229,8 +229,8 @@ private final class BubbleView: NSView {
         guard !bars.isEmpty else { return }
         let count = bars.count
         let totalWidth = CGFloat(count) * barWidth + CGFloat(count - 1) * barGap
-        let startX = (barsMask.bounds.width - totalWidth) / 2
-        let midY = barsMask.bounds.height / 2
+        let startX = (waveform.bounds.width - totalWidth) / 2
+        let midY = waveform.bounds.height / 2
 
         CATransaction.begin()
         CATransaction.setDisableActions(true)
@@ -267,17 +267,28 @@ private final class BubbleView: NSView {
         layoutBars()
     }
 
-    /// Springy "bubble" pop of the waveform when the overlay appears.
+    /// The pill settles down from above as the waveform scales in. `Theme.spring`
+    /// is near-critically damped, so both land rather than bounce.
     func playEntrance() {
+        if let layer = pill.layer {
+            let settle = CASpringAnimation(keyPath: "transform")
+            settle.fromValue = NSValue(caTransform3D: CATransform3DMakeTranslation(0, 14, 0))
+            settle.toValue = NSValue(caTransform3D: CATransform3DIdentity)
+            settle.mass = Theme.Spring.mass
+            settle.stiffness = Theme.Spring.stiffness
+            settle.damping = Theme.Spring.damping
+            settle.duration = settle.settlingDuration
+            layer.add(settle, forKey: "arrive")
+        }
+
         let pop = CASpringAnimation(keyPath: "transform.scale")
-        pop.fromValue = 0.7
+        pop.fromValue = 0.82
         pop.toValue = 1.0
-        pop.mass = 1
-        pop.stiffness = 240
-        pop.damping = 15
-        pop.initialVelocity = 6
+        pop.mass = Theme.Spring.mass
+        pop.stiffness = Theme.Spring.stiffness
+        pop.damping = Theme.Spring.damping
         pop.duration = pop.settlingDuration
-        gradient.add(pop, forKey: "pop")
+        waveform.add(pop, forKey: "pop")
     }
 
     private func tick() {
@@ -289,7 +300,7 @@ private final class BubbleView: NSView {
 
         guard !bars.isEmpty else { return }
         let minH = barWidth
-        let maxH = barsMask.bounds.height
+        let maxH = waveform.bounds.height
         let span = maxH - minH
         let count = bars.count
 
