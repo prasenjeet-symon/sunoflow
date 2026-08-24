@@ -325,7 +325,10 @@ internal sealed class SettingsForm : Form
         Relayout();
         RefreshHeaderStatus();
 
-        if (_page == Page.Model) _modelTimer.Start();
+        // The 1s model-status poll only matters on pages that show download
+        // progress. Stop it first, then start it for the pages that need it.
+        _modelTimer.Stop();
+        if (_page == Page.Model || _page == Page.Overview) _modelTimer.Start();
     }
 
     /// <summary>Empties a container and disposes what it held. Clearing alone
@@ -532,6 +535,11 @@ internal sealed class SettingsForm : Form
     private SectionHeader? _ovStatusHeader;
     private TextBlock? _ovLead, _ovLeadDetail;
     private ValueText? _ovHotkey, _ovMicValue, _ovAutoStop, _ovScreen, _ovLogin, _ovCorrections;
+    // Inline model-download progress, shown on Overview beneath the model row.
+    private SunoButton? _ovModelRetry;
+    private SunoProgress? _ovModelProgress;
+    private TextBlock? _ovModelBytes;
+    private SunoRow? _ovModelErrorRow;
 
     private void BuildOverview()
     {
@@ -572,6 +580,23 @@ internal sealed class SettingsForm : Form
                                   divider: false,
                                   trailing: new Row(_ovModelButton, _ovModelStatus));
         _content.Controls.Add(_ovModelRow);
+
+        // Inline progress beneath the model row — visible only while a download
+        // is moving, so the Overview page (where the Download CTA lives) shows
+        // the bar, bytes, file count and errors instead of sending the user to
+        // the Model tab to see them.
+        _ovModelProgress = new SunoProgress { Visible = false, Margin = new Padding(24, 0, 0, 6) };
+        _content.Controls.Add(_ovModelProgress);
+        _ovModelBytes = new TextBlock("", Theme.Caption, Theme.Faint)
+        { Visible = false, Margin = new Padding(24, 0, 0, 8) };
+        _content.Controls.Add(_ovModelBytes);
+        _ovModelRetry = new SunoButton("Retry", ButtonKind.Primary) { Visible = false };
+        _ovModelRetry.Click += (s, e) => StartDownload();
+        _ovModelErrorRow = new SunoRow("Download failed", "",
+            Glyph.Alert, Theme.Danger, divider: false, trailing: _ovModelRetry)
+        { Visible = false, ReserveIconColumn = true };
+        _content.Controls.Add(_ovModelErrorRow);
+
         _content.Controls.Add(new RuleLine(strong: true));
 
         _content.Controls.Add(new SectionHeader("Current setup"));
@@ -663,6 +688,24 @@ internal sealed class SettingsForm : Form
         _ovModelButton.Enabled = !_downloadStarting;
         (_ovModelRow.Trailing as Row)?.Refit();
 
+        // Inline download progress beneath the model row: progress bar + byte
+        // counter while downloading, error row with Retry on failure.
+        bool err = ms is { Phase: "error" } || (ms is { Active: false } && ms != null && !string.IsNullOrEmpty(ms.Error));
+        _ovModelProgress!.Visible = downloading && ms is { Phase: not "loading" };
+        if (_ovModelProgress.Visible && ms != null && ms.FileTotal > 0)
+            _ovModelProgress.SetProgress(ms.Downloaded, ms.FileTotal);
+        _ovModelBytes!.Visible = _ovModelProgress.Visible;
+        if (_ovModelBytes.Visible && ms != null)
+            _ovModelBytes.SetText(ms.FileTotal > 0
+                ? $"{FormatBytes(ms.Downloaded)} of {FormatBytes(ms.FileTotal)}  ·  File {ms.OverallDone + 1} of {Math.Max(ms.OverallTotal, 1)}"
+                : $"{FormatBytes(ms.Downloaded)}  ·  File {ms.OverallDone + 1} of {Math.Max(ms.OverallTotal, 1)}");
+
+        _ovModelErrorRow!.Visible = err;
+        if (err && ms != null)
+            _ovModelErrorRow.SetSubtitle(string.IsNullOrEmpty(ms.Error)
+                ? "Something went wrong during the download." : ms.Error);
+        _ovModelRetry!.Enabled = !_downloadStarting && _sidecarOnline;
+
         _ovHotkey!.Set(HotkeyDisplay);
         _ovMicValue!.Set(MicDisplayName);
         _ovAutoStop!.Set($"{_prefs.MaxRecordingSeconds} seconds");
@@ -671,6 +714,14 @@ internal sealed class SettingsForm : Form
         _ovLogin!.Set(_launchAtLogin ? "Enabled" : "Disabled",
                       _launchAtLogin ? Theme.Success : Theme.Faint);
         _ovCorrections!.Set(_corrections.Length.ToString());
+
+        // Run the 1s model poll while we don't yet know the model status or a
+        // download is in flight on this page; stop it once the model is loaded,
+        // missing, or in a terminal error so we don't hammer the sidecar forever.
+        bool active = _modelStatus is { Active: true };
+        bool unknown = _modelStatus == null && _sidecarOnline;
+        if (active || unknown) _modelTimer.Start();
+        else _modelTimer.Stop();
 
         Relayout();
     }

@@ -743,6 +743,8 @@ struct SettingsView: View {
             setupGroup
             actionNeededGroup
         }
+        .onAppear { startModelPolling() }
+        .onDisappear { stopModelPolling() }
     }
 
     /// The one sentence that answers "is this thing working?".
@@ -914,27 +916,101 @@ struct SettingsView: View {
     /// Circular gauge of healthy subsystems, animated as services come up.
 
 
+    /// A rich inline model card for the Overview. Shows progress bar + byte
+    /// counters while downloading, an error + Retry on failure, or a Download
+    /// button when the model isn't present yet. Tapping the title navigates to
+    /// the Model tab for the full view.
     private func modelBanner(_ st: ModelStatus) -> some View {
-        Button {
-            withAnimation(Theme.spring) { selectedTab = .model }
-        } label: {
-            HStack(spacing: 10) {
-                Image(systemName: st.active ? "arrow.down.circle" : "exclamationmark.circle")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(Theme.warning)
-                Text(st.active
-                     ? "Downloading the speech model — \(st.overall_done) of \(st.overall_total) files"
-                     : "The speech model hasn't been downloaded yet")
-                    .font(.sunoValue)
-                    .foregroundStyle(Theme.ink)
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(Theme.faint)
-                Spacer(minLength: 0)
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                withAnimation(Theme.spring) { selectedTab = .model }
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: st.active ? "arrow.down.circle" : "exclamationmark.circle")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(st.phase == "error" ? Theme.danger : Theme.warning)
+                    Text(bannerTitle(st))
+                        .font(.sunoValue)
+                        .foregroundStyle(Theme.ink)
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Theme.faint)
+                }
+                .contentShape(Rectangle())
             }
-            .contentShape(Rectangle())
+            .buttonStyle(.plain)
+
+            // Inline detail beneath the title row.
+            if st.active && st.phase != "loading" && !st.current_file.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    SunoProgressBar(
+                        value: Double(st.downloaded),
+                        total: Double(max(st.file_total, 1))
+                    )
+                    HStack {
+                        Text("\(byteString(st.downloaded)) of \(byteString(max(st.file_total, 1)))")
+                        Spacer()
+                        Text("File \(st.overall_done + 1) of \(st.overall_total)")
+                    }
+                    .font(.sunoCaption)
+                    .foregroundStyle(Theme.faint)
+                    .monospacedDigit()
+                }
+                .padding(.top, 10)
+            } else if st.active && st.phase == "loading" {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small).scaleEffect(0.7)
+                    Text("Loading model into memory…")
+                        .font(.sunoCaption)
+                        .foregroundStyle(Theme.faint)
+                }
+                .padding(.top, 10)
+            } else if st.phase == "error" {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(st.error.isEmpty ? "Something went wrong during the download." : st.error)
+                        .font(.sunoCaption)
+                        .foregroundStyle(Theme.danger)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("Retry") { startDownload() }
+                        .buttonStyle(.sunoPrimary)
+                        .disabled(modelDownloadStarting || !sidecarOnline)
+                }
+                .padding(.top, 10)
+            } else if st.model_present {
+                HStack(spacing: 10) {
+                    Button(startingEngine ? "Starting…" : "Start engine") { startEngine() }
+                        .buttonStyle(.sunoPrimary)
+                        .disabled(startingEngine)
+                    Text("Downloaded — restart the engine to activate it.")
+                        .font(.sunoCaption)
+                        .foregroundStyle(Theme.faint)
+                }
+                .padding(.top, 10)
+            } else {
+                HStack(spacing: 10) {
+                    Button(modelDownloadStarting ? "Starting…" : "Download model") { startDownload() }
+                        .buttonStyle(.sunoPrimary)
+                        .disabled(modelDownloadStarting || !sidecarOnline)
+                    if !sidecarOnline {
+                        Text("Start the engine first.")
+                            .font(.sunoCaption)
+                            .foregroundStyle(Theme.faint)
+                    }
+                }
+                .padding(.top, 10)
+            }
         }
-        .buttonStyle(.plain)
+    }
+
+    private func bannerTitle(_ st: ModelStatus) -> String {
+        if st.phase == "error" { return "Download failed" }
+        if st.active {
+            return st.phase == "loading"
+                ? "Loading the speech model…"
+                : "Downloading the speech model — \(st.overall_done + 1) of \(st.overall_total) files"
+        }
+        return "The speech model hasn't been downloaded yet"
     }
 
 
