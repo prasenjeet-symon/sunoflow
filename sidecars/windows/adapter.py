@@ -189,11 +189,6 @@ class ParakeetOnnxAdapter(SttAdapter):
                 with self._dl_lock:
                     self._dl_state["overall_done"] = i + 1
 
-            with self._dl_lock:
-                self._dl_state.update(phase="loading", current_file="")
-            self.load()
-            with self._dl_lock:
-                self._dl_state.update(phase="done", active=False)
         except Exception as exc:
             print(f"Model download failed: {exc}")
             # Strip any URL from the surfaced error so the upstream model
@@ -201,6 +196,26 @@ class ParakeetOnnxAdapter(SttAdapter):
             safe = re.sub(r"https?://\S+", "[download URL]", str(exc))
             with self._dl_lock:
                 self._dl_state.update(phase="error", active=False, error=safe)
+            return
+
+        # Loading is a separate failure from downloading, and saying so matters:
+        # by this point 2.5 GB is on disk, and reporting "download failed" would
+        # invite the user to fetch all of it again to fix something the download
+        # had nothing to do with.
+        try:
+            with self._dl_lock:
+                self._dl_state.update(phase="loading", current_file="")
+            self.load()
+            with self._dl_lock:
+                self._dl_state.update(phase="done", active=False)
+        except Exception as exc:
+            print(f"Model downloaded but failed to load: {exc}")
+            safe = re.sub(r"https?://\S+", "[download URL]", str(exc))
+            with self._dl_lock:
+                self._dl_state.update(
+                    phase="error", active=False,
+                    error=f"The model downloaded, but the engine could not start it: {safe}",
+                )
 
     def status_snapshot(self) -> dict:
         with self._dl_lock:

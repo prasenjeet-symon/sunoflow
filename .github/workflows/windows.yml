@@ -154,6 +154,18 @@ jobs:
           if (Test-Path "$dist\_internal\certifi\cacert.pem") { Write-Host "OK   certifi cacert.pem" }
           else { Write-Warning "MISSING certifi cacert.pem — model download would fail on SSL" }
 
+      # The bundle's STT stack is imported lazily, so booting the exe and
+      # getting a healthy /health proves nothing about whether a dictation
+      # would work. This forces those imports. A bundle that is missing a
+      # module, a DLL or a package's metadata fails here instead of on a
+      # user's PC after a 2.5 GB download.
+      - name: Self-test the frozen bundle (forces the heavy imports)
+        shell: pwsh
+        working-directory: sidecars/windows
+        run: |
+          & ".\dist\SunoFlowSidecar\SunoFlowSidecar.exe" --selftest
+          if ($LASTEXITCODE -ne 0) { throw "Frozen bundle failed its self-test" }
+
       - name: Boot the frozen sidecar and hit /health
         shell: pwsh
         working-directory: sidecars/windows

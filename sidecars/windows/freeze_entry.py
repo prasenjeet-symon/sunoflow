@@ -51,6 +51,37 @@ def _writable_corrections_path() -> str:
     return user_file
 
 
+def selftest() -> int:
+    """Import everything the bundle needs and report whether it worked.
+
+    The sidecar imports its STT stack lazily, so the app can start, serve
+    /health and look perfectly healthy while `import onnx_asr` is broken — which
+    is exactly what shipped once, when PyInstaller left out the package metadata
+    that onnx_asr reads its own version from. Booting the exe proved nothing
+    about it. This forces every heavy import that a real dictation would need,
+    so a bundle missing one fails in CI rather than on a user's PC after they
+    have downloaded 2.5 GB.
+    """
+    try:
+        import onnxruntime as ort
+        print(f"onnxruntime {ort.__version__}")
+        print(f"providers: {ort.get_available_providers()}")
+
+        import onnx_asr
+        print(f"onnx_asr {onnx_asr.__version__}")
+
+        from sidecars.windows.adapter import build_app  # noqa: F401
+        import uvicorn  # noqa: F401
+        import fastapi  # noqa: F401
+        import requests  # noqa: F401
+        import huggingface_hub  # noqa: F401
+        print("selftest: OK")
+        return 0
+    except Exception as exc:
+        print(f"selftest: FAILED — {type(exc).__name__}: {exc}")
+        return 1
+
+
 def main() -> None:
     # Imported here (not at module top) so a misconfigured frozen env fails with
     # a clear traceback rather than a bootloader-level import error.
@@ -62,4 +93,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    if "--selftest" in sys.argv:
+        sys.exit(selftest())
     main()

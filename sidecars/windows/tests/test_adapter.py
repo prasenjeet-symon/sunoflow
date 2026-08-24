@@ -238,3 +238,36 @@ def test_load_attempts_import_when_files_present(tmp_path, monkeypatch):
     assert captured["providers"] == ["DmlExecutionProvider", "CPUExecutionProvider"]
     # transcribe_file delegates to recognize().
     assert a.transcribe_file(str(tmp_path / "x.wav")) == "fake transcript"
+
+def test_load_failure_after_download_is_not_reported_as_a_download_failure(tmp_path, monkeypatch):
+    """A model that downloads and then fails to load must say so.
+
+    This shipped as a real bug: PyInstaller left out the package metadata that
+    ``onnx_asr`` reads its own version from, so ``import onnx_asr`` raised, and
+    because loading happened inside the download's try block the dashboard
+    announced "Download failed" over 2.5 GB of perfectly good files. The user's
+    only obvious move was to download all of it again, which could not help.
+    """
+    monkeypatch.setattr("sidecars.windows.adapter.MODEL_DIR", str(tmp_path))
+    for f in MODEL_FILES:
+        (tmp_path / f).write_bytes(b"x")
+
+    a = ParakeetOnnxAdapter()
+    # Every file is already present, so the download loop is a no-op and the
+    # only thing left to fail is the load.
+    monkeypatch.setattr(
+        a, "load",
+        lambda: (_ for _ in ()).throw(Exception("No package metadata was found for onnx-asr")),
+    )
+
+    a._run_download()
+
+    snap = a.status_snapshot()
+    assert snap["phase"] == "error"
+    assert snap["active"] is False
+    # The message must point at loading, not at the download.
+    assert "could not start" in snap["error"]
+    assert "No package metadata" in snap["error"]
+    # And every file is still counted as fetched, so the client can offer
+    # "start the engine" rather than "download it all again".
+    assert snap["overall_done"] == len(MODEL_FILES)

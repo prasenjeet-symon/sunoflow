@@ -48,6 +48,7 @@ from PyInstaller.utils.hooks import (
     collect_data_files,
     collect_dynamic_libs,
     collect_submodules,
+    copy_metadata,
 )
 
 block_cipher = None
@@ -133,6 +134,22 @@ except ImportError:
 # onnx-asr assets (configs, tokenizer data).
 datas += collect_data_files("onnx_asr")
 datas += collect_data_files("huggingface_hub")
+
+# Package *metadata* (the .dist-info directories), which PyInstaller does not
+# bundle by default. onnx_asr reads its own version at import time:
+#
+#     from importlib.metadata import version as _version
+#     __version__ = _version("onnx-asr")
+#
+# Without the metadata that raises PackageNotFoundError and `import onnx_asr`
+# fails outright — which surfaced as a model download that appeared to fail
+# after successfully fetching all 2.5 GB, because loading is the step right
+# after it. recursive=True picks up its dependencies' metadata too; these
+# directories are tiny and the failure mode is a hard crash, so the trade is
+# heavily one-sided. tqdm reads its own version the same way and is pulled in
+# by huggingface_hub.
+datas += copy_metadata("onnx-asr", recursive=True)
+datas += copy_metadata("tqdm")
 
 # certifi's cacert.pem is the CA bundle requests/urllib3 use for HTTPS. Without
 # it the model download (HTTPS to huggingface.co) fails with SSL certificate
