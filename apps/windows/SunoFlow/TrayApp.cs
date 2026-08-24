@@ -45,6 +45,14 @@ internal sealed class TrayApp : IDisposable
     /// and to ask whether starting it is even possible on this install.</summary>
     internal static TrayApp? Shared { get; private set; }
 
+    /// <summary>Set by first-run setup while it is asking the user to press the
+    /// shortcut. Returning true swallows the press.</summary>
+    internal Func<bool>? HotkeyInterceptor { get; set; }
+
+    /// <summary>Whether the configured shortcut is actually ours. False means
+    /// another app owns the combination and the key will do nothing.</summary>
+    internal bool HotkeyRegistered => _hotkey.IsRegistered;
+
     /// <summary>Current recording/dictation state. Setting it refreshes the
     /// tray icon and status menu text, mirroring the macOS <c>didSet</c>.</summary>
     private State CurrentState
@@ -77,7 +85,14 @@ internal sealed class TrayApp : IDisposable
         UpdateStatusText();
         UpdateHotkeyLabels();
 
-        _hotkey.HotkeyPressed += (s, e) => ToggleRecording();
+        _hotkey.HotkeyPressed += (s, e) =>
+        {
+            // First-run setup borrows the shortcut to prove it works. A press
+            // there must not also start a dictation — at that point there is
+            // usually no model yet, so it would only produce a refusal.
+            if (HotkeyInterceptor?.Invoke() == true) return;
+            ToggleRecording();
+        };
         var prefs = Preferences.Instance;
         _hotkey.Register(prefs.HotkeyCode, prefs.HotkeyModifiers);
 
@@ -111,6 +126,16 @@ internal sealed class TrayApp : IDisposable
         _healthTimer.Tick += (s, e) => _ = CheckHealth();
         _healthTimer.Start();
         _ = CheckHealth();
+
+        // A first run gets the setup wizard rather than a tray icon and no idea
+        // what to do next. ShowOnboarding posts to the UI context instead of
+        // showing inline, because the message loop has not started yet at this
+        // point in construction and a form shown now would not pump.
+        if (!Preferences.Instance.OnboardingCompleted)
+        {
+            AppLog.Log("First run — showing setup");
+            ShowOnboarding();
+        }
     }
 
     // --- Tray menu ----------------------------------------------------------------
@@ -132,6 +157,10 @@ internal sealed class TrayApp : IDisposable
         _correctionsItem.DropDown = _correctionsMenu;
         _correctionsItem.DropDown.Opening += (s, e) => _ = RefreshCorrectionsMenu();
         menu.Items.Add(_correctionsItem);
+
+        var setupItem = new ToolStripMenuItem("Run setup again…");
+        setupItem.Click += (s, e) => ShowOnboarding();
+        menu.Items.Add(setupItem);
 
         var settingsItem = new ToolStripMenuItem("Settings…");
         settingsItem.Click += (s, e) => OpenSettings();
@@ -496,10 +525,42 @@ internal sealed class TrayApp : IDisposable
     }
 
     private SettingsForm? _settings;
+    private OnboardingForm? _onboarding;
 
     /// <summary>Bring the dashboard up. <paramref name="onModelPage"/> lands
     /// straight on Speech Model, for the case where a dictation was refused
     /// because the model is missing.</summary>
+    /// <summary>Take a new shortcut now. Setup uses this when the configured one
+    /// turns out to be owned by another app.</summary>
+    internal bool RebindHotkey(int keyCode, int modifiers)
+    {
+        // Setting the preference is enough — the PropertyChanged handler above
+        // re-registers. Doing it again here would take the same combo twice.
+        Preferences.Instance.HotkeyCode = keyCode;
+        Preferences.Instance.HotkeyModifiers = modifiers;
+        return _hotkey.IsRegistered;
+    }
+
+    /// <summary>Bring up first-run setup. Kept reachable from the tray menu so
+    /// someone who skipped it, or who is setting up a second PC, can walk the
+    /// same path again rather than hunting through settings pages.</summary>
+    internal void ShowOnboarding()
+    {
+        _ui.Post(_ =>
+        {
+            if (_onboarding is { IsDisposed: false })
+            {
+                if (_onboarding.WindowState == FormWindowState.Minimized)
+                    _onboarding.WindowState = FormWindowState.Normal;
+                _onboarding.Activate();
+                return;
+            }
+            _onboarding = new OnboardingForm();
+            _onboarding.FormClosed += (s, e) => _onboarding = null;
+            _onboarding.Show();
+        }, null);
+    }
+
     internal void OpenSettings(bool onModelPage = false)
     {
         // May be invoked from the SingleInstance listener's threadpool thread.

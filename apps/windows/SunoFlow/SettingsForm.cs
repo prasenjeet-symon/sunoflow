@@ -141,34 +141,6 @@ internal sealed class SettingsForm : Form
         Controls.Add(_sidebar);
     }
 
-    /// <summary>
-    /// Sends the mouse wheel to the sheet under the pointer.
-    ///
-    /// Every control on the page is non-selectable — the design has no focus rings
-    /// in it — so nothing inside the scrolling host ever holds focus, and Windows
-    /// delivers <c>WM_MOUSEWHEEL</c> to the focused control rather than the one
-    /// being pointed at. Without this the dashboard simply would not scroll.
-    /// </summary>
-    private sealed class WheelRouter : IMessageFilter
-    {
-        private const int WM_MOUSEWHEEL = 0x020A;
-        private readonly Panel _target;
-
-        public WheelRouter(Panel target) => _target = target;
-
-        public bool PreFilterMessage(ref Message m)
-        {
-            if (m.Msg != WM_MOUSEWHEEL) return false;
-            if (_target.IsDisposed || !_target.IsHandleCreated || !_target.Visible) return false;
-            if (!_target.RectangleToScreen(_target.ClientRectangle).Contains(Control.MousePosition)) return false;
-
-            int delta = (short)(m.WParam.ToInt64() >> 16);
-            var offset = _target.AutoScrollPosition;   // reported negative, assigned positive
-            _target.AutoScrollPosition = new Point(-offset.X, -offset.Y - delta);
-            return true;
-        }
-    }
-
     /// <summary>The brand lockup at the top of the navigation column.</summary>
     private sealed class BrandHeader : Control
     {
@@ -1771,5 +1743,34 @@ internal sealed class Row : Panel, IReflow
             child.Top = (height - child.Height) / 2;
         }
         Size = new Size(Math.Max(1, x), Math.Max(1, height));
+    }
+}
+
+/// <summary>
+/// Sends the mouse wheel to the sheet under the pointer.
+///
+/// Every control on these pages is non-selectable — the design has no focus rings
+/// in it — so nothing inside a scrolling host ever holds focus, and Windows
+/// delivers <c>WM_MOUSEWHEEL</c> to the focused control rather than the one being
+/// pointed at. Without this neither the dashboard nor first-run setup would
+/// scroll at all.
+/// </summary>
+internal sealed class WheelRouter : IMessageFilter
+{
+    private const int WM_MOUSEWHEEL = 0x020A;
+    private readonly Panel _target;
+
+    public WheelRouter(Panel target) => _target = target;
+
+    public bool PreFilterMessage(ref Message m)
+    {
+        if (m.Msg != WM_MOUSEWHEEL) return false;
+        if (_target.IsDisposed || !_target.IsHandleCreated || !_target.Visible) return false;
+        if (!_target.RectangleToScreen(_target.ClientRectangle).Contains(Control.MousePosition)) return false;
+
+        int delta = (short)(m.WParam.ToInt64() >> 16);
+        var offset = _target.AutoScrollPosition;   // reported negative, assigned positive
+        _target.AutoScrollPosition = new Point(-offset.X, -offset.Y - delta);
+        return true;
     }
 }

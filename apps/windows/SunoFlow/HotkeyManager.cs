@@ -29,8 +29,14 @@ internal sealed class HotkeyManager : IDisposable
 
     public HotkeyManager() => _sink.HotkeyReceived += () => HotkeyPressed?.Invoke(this, EventArgs.Empty);
 
-    /// <summary>Register a system-wide hotkey. Replaces any prior registration.</summary>
-    public void Register(int keyCode, int modifiers)
+    /// <summary>True when the last <see cref="Register"/> actually took the
+    /// shortcut. A failure here is silent to the user — the key simply does
+    /// nothing — so setup asks for this rather than assuming.</summary>
+    public bool IsRegistered { get; private set; }
+
+    /// <summary>Register a system-wide hotkey. Replaces any prior registration.
+    /// Returns false when the combination is already owned by another app.</summary>
+    public bool Register(int keyCode, int modifiers)
     {
         Unregister();
         // MOD_NOREPEAT prevents auto-repeat while the key is held — essential for a toggle.
@@ -39,19 +45,23 @@ internal sealed class HotkeyManager : IDisposable
         {
             AppLog.Log($"RegisterHotKey failed (code={keyCode}, mods={modifiers}) — " +
                        "another app may own this shortcut");
-            return;
+            IsRegistered = false;
+            return false;
         }
         _currentId = id;
+        IsRegistered = true;
+        return true;
     }
 
     /// <summary>Swap the active hotkey for a new key/modifier combination.</summary>
-    public void Reregister(int keyCode, int modifiers) => Register(keyCode, modifiers);
+    public bool Reregister(int keyCode, int modifiers) => Register(keyCode, modifiers);
 
     public void Unregister()
     {
         if (_currentId < 0) return;
         UnregisterHotKey(_sink.Handle, _currentId);
         _currentId = -1;
+        IsRegistered = false;
     }
 
     public void Dispose()

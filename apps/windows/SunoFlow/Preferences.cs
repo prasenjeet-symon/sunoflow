@@ -31,6 +31,12 @@ internal sealed class Preferences : INotifyPropertyChanged
     public bool CleanupEnabled { get; set; } = true;
     public bool ScreenContextEnabled { get; set; } = false;
 
+    /// <summary>False until first-run setup has been completed (or explicitly
+    /// skipped). Stored rather than inferred from "is everything configured",
+    /// so someone who deletes their model later gets the model page, not the
+    /// whole wizard again.</summary>
+    public bool OnboardingCompleted { get; set; } = false;
+
     // The hotkey pair raises PropertyChanged so the TrayApp can re-register the
     // system-wide shortcut the moment the user picks a new combo in Settings.
     private int _hotkeyCode = DefaultHotkeyCode;
