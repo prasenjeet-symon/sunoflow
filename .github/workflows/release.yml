@@ -84,6 +84,18 @@ jobs:
         working-directory: sidecars/windows
         run: .\build.ps1
 
+      # The same gate CI runs, on the bundle that actually ships. The sidecar
+      # imports its STT stack lazily, so a bundle missing a module, a DLL or a
+      # package's metadata freezes and boots perfectly while being unable to
+      # transcribe a word — which is exactly how v1.0.2 went out. Failing here
+      # costs a red release run; not failing here costs a broken download.
+      - name: Self-test the frozen bundle
+        shell: pwsh
+        working-directory: sidecars/windows
+        run: |
+          & ".\dist\SunoFlowSidecar\SunoFlowSidecar.exe" --selftest
+          if ($LASTEXITCODE -ne 0) { throw "Frozen bundle failed its self-test — refusing to build an installer around it" }
+
       - name: Stage the sidecar bundle
         shell: pwsh
         run: |
