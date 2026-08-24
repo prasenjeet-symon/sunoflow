@@ -112,9 +112,10 @@
   }
 
   /* ---- platform-aware downloads ----
-     Both platforms' links are always in the markup. This only decides which
-     one leads, so a visitor with JS off, on Linux, or on anything we cannot
-     identify still sees every option rather than none. */
+     Both builds are always in the markup and CSS decides which one the row
+     shows, so a visitor with JS off, on Linux, or on anything we cannot
+     identify still sees every option rather than none. All this does is name
+     the platform. */
   var platform = (function () {
     var hint = (navigator.userAgentData && navigator.userAgentData.platform) ||
                navigator.platform || "";
@@ -128,16 +129,31 @@
     return "";
   })();
 
+  var BUILDS = {
+    mac: {
+      href: "https://github.com/prasenjeet-symon/sunoflow/releases/latest",
+      label: "Download for Mac"
+    },
+    windows: {
+      href: "https://github.com/prasenjeet-symon/sunoflow/releases/latest/download/SunoFlow-Setup.exe",
+      // "PC" rather than "Windows" only because the header label has to fit
+      // beside the nav at the narrowest width that still shows it.
+      label: "Download for PC"
+    }
+  };
+
   if (platform) {
-    // The attribute drives the ordering in CSS; the classes carry the visual
-    // weight, so the button you can actually use is the solid one. Only the
-    // CTA row is restyled — the footer's [data-dl] links are plain text links
-    // and would turn into buttons if they picked up the same classes.
+    // Everything visual hangs off this one attribute, so the CTA, the quiet
+    // link to the other build and the requirement line can never disagree
+    // about which platform we decided on.
     document.documentElement.setAttribute("data-os", platform);
-    document.querySelectorAll("[data-downloads] [data-dl]").forEach(function (el) {
-      var mine = el.getAttribute("data-dl") === platform;
-      el.classList.toggle("btn-primary", mine);
-      el.classList.toggle("btn-quiet", !mine);
+
+    // The header carries a single button rather than both, because there is
+    // no room beside the nav for a choice. It only becomes specific once we
+    // know what to be specific about.
+    document.querySelectorAll("[data-dl-auto]").forEach(function (el) {
+      el.href = BUILDS[platform].href;
+      el.textContent = BUILDS[platform].label;
     });
   }
 

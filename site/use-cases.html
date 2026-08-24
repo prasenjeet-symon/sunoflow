@@ -15,7 +15,7 @@
 <meta property="og:url" content="https://sunoflow-app.web.app/use-cases.html">
 <meta name="twitter:card" content="summary_large_image">
 
-<link rel="stylesheet" href="assets/styles.css?v=14">
+<link rel="stylesheet" href="assets/styles.css?v=15">
 </head>
 <body>
 
@@ -37,7 +37,9 @@
       <a href="login.html">Sign in</a>
     </nav>
 
-    <a class="btn btn-primary" href="login.html?new=1">Start free trial</a>
+    <!-- app.js names the platform and points this at the matching build; the
+         plain label and the releases page are what a visitor gets without it. -->
+    <a class="btn btn-primary" data-dl-auto href="https://github.com/prasenjeet-symon/sunoflow/releases/latest">Download</a>
   </div>
 </header>
 
@@ -353,11 +355,32 @@
         Most people install it for one job and end up using it for six. Seven days
         free is long enough to find out which six are yours.
       </p>
-      <div class="hero-cta">
-        <a class="btn btn-primary btn-lg" href="login.html?new=1">Start your free trial</a>
+      <!-- Both builds sit in the markup and CSS narrows the row to the one that
+           will actually run, so a visitor we cannot identify still sees both. -->
+      <div class="hero-cta" data-downloads>
+        <a class="btn btn-primary btn-lg" data-dl="mac" href="https://github.com/prasenjeet-symon/sunoflow/releases/latest">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5v11m0 0-4.2-4.2M12 14.5l4.2-4.2"/><path d="M4.5 17v1.6a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V17"/></svg>Download for Mac
+        </a>
+        <a class="btn btn-primary btn-lg" data-dl="windows" href="https://github.com/prasenjeet-symon/sunoflow/releases/latest/download/SunoFlow-Setup.exe">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5v11m0 0-4.2-4.2M12 14.5l4.2-4.2"/><path d="M4.5 17v1.6a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V17"/></svg>Download for Windows
+        </a>
         <a class="btn btn-quiet btn-lg" href="pricing.html">See pricing</a>
       </div>
-      <p class="hero-note"><span>₹99 a month after the trial &middot; Cancel any time</span></p>
+
+      <p class="dl-alt">
+        <span data-dl-alt="windows">On a PC? <a href="https://github.com/prasenjeet-symon/sunoflow/releases/latest/download/SunoFlow-Setup.exe">Download for Windows</a></span>
+        <span data-dl-alt="mac">On a Mac? <a href="https://github.com/prasenjeet-symon/sunoflow/releases/latest">Download for Mac</a></span>
+      </p>
+
+      <p class="hero-note">
+        <span>Free for 7 days, then ₹99 a month</span>
+        <span>&middot;</span>
+        <span>Cancel any time</span>
+        <span>&middot;</span>
+        <span data-req="mac">Apple silicon, macOS 13 or later</span>
+        <span data-req="windows">64-bit Windows 10 or 11</span>
+        <span data-req="any">For Mac and Windows</span>
+      </p>
     </div>
   </div>
 </section>
@@ -403,6 +426,6 @@
   </div>
 </footer>
 
-<script src="assets/app.js?v=14" defer></script>
+<script src="assets/app.js?v=15" defer></script>
 </body>
 </html>

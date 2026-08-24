@@ -163,7 +163,10 @@ em.hl {
 .wordmark svg { width: 20px; height: 20px; color: var(--ink); }
 
 .nav-links { display: flex; align-items: center; gap: 30px; margin-left: auto; font-size: 15px; color: var(--body); }
-.nav-links a { transition: color .16s ease; }
+/* The header CTA changes width once the platform is known, so the nav has
+   to give way by tightening rather than by breaking a label in half. */
+.nav-links a { white-space: nowrap; transition: color .16s ease; }
+@media (max-width: 1000px) { .nav-links { gap: 22px; } }
 .nav-links a:hover { color: var(--ink); }
 
 .masthead .btn { padding: 10px 20px; font-size: 14.5px; }
@@ -179,11 +182,32 @@ em.hl {
 
 .hero-cta { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; margin-top: 34px; }
 
-/* Download buttons lead with the platform the visitor is actually on. The
-   markup order is Mac first, so only Windows needs moving; without the
-   data-os attribute (no JS, or a platform we don't build for) both simply
-   stay in source order. */
-:root[data-os="windows"] [data-dl="windows"] { order: -1; }
+/* ---------- platform-aware downloads ----------
+   Every CTA carries both builds in the markup, so a visitor with JS off, on
+   Linux, or on anything we cannot identify still sees both choices rather
+   than none. Once app.js has named the platform, the row narrows to the one
+   build that will actually run and the other steps down to the quiet line
+   underneath — one solid button per screen, never two competing for it. */
+:root[data-os="mac"]     [data-downloads] [data-dl="windows"],
+:root[data-os="windows"] [data-downloads] [data-dl="mac"] { display: none; }
+
+/* The build we did not pick, offered as plain text rather than a third
+   button. Hidden entirely until a platform is known, because with both
+   buttons already showing it would only repeat them. */
+.dl-alt { display: none; margin-top: 16px; font-size: 14px; color: var(--faint); text-align: center; }
+:root[data-os] .dl-alt { display: block; }
+.dl-alt [data-dl-alt] { display: none; }
+:root[data-os="mac"]     .dl-alt [data-dl-alt="windows"],
+:root[data-os="windows"] .dl-alt [data-dl-alt="mac"] { display: inline; }
+.dl-alt a { color: var(--body); text-decoration: underline; text-underline-offset: 3px; }
+.dl-alt a:hover { color: var(--ink); }
+
+/* The requirement line under the CTA names the machine the visitor is
+   actually on; the generic wording is the fallback when we don't know. */
+.hero-note [data-req] { display: none; }
+:root:not([data-os])     .hero-note [data-req="any"],
+:root[data-os="mac"]     .hero-note [data-req="mac"],
+:root[data-os="windows"] .hero-note [data-req="windows"] { display: inline; }
 
 .hero-note {
   margin-top: 18px;
@@ -411,6 +435,7 @@ kbd {
 .finale h2 { font-size: clamp(2.2rem, 5vw, 3.6rem); }
 .finale .lede { margin: 20px auto 0; }
 .finale .hero-cta { margin-top: 32px; }
+.dl-alt + .hero-note { margin-top: 10px; }
 
 /* ---------- footer ---------- */
 footer { border-top: 1px solid var(--line); padding-block: clamp(40px, 5vw, 58px); }
@@ -422,6 +447,12 @@ footer { border-top: 1px solid var(--line); padding-block: clamp(40px, 5vw, 58px
 .foot-col .h { font-size: 12.5px; font-weight: 620; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); }
 .foot-col a { font-size: 15px; color: var(--body); transition: color .16s ease; }
 .foot-col a:hover { color: var(--ink); }
+/* The footer list leads with the visitor's platform as well, so nothing on
+   the page disagrees about which build we think they want. The heading is
+   pulled ahead of both so promoting a link can never jump it. */
+.foot-col .h { order: -2; }
+:root[data-os="mac"]     .foot-col [data-dl="mac"],
+:root[data-os="windows"] .foot-col [data-dl="windows"] { order: -1; }
 .foot-base {
   margin-top: clamp(32px, 4vw, 46px); padding-top: 22px; border-top: 1px solid var(--line);
   display: flex; flex-wrap: wrap; gap: 10px 22px; justify-content: space-between;
