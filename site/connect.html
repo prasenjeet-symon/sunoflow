@@ -39,6 +39,25 @@
   <p class="auth-foot"><a href="dashboard.html">Back to your account</a></p>
 </div>
 
+<!--
+  Platform-aware copy, set before the module script runs so Windows users never
+  see a flash of "Mac". The app passes its real platform through the pairDevice
+  function into the `?platform=` query param; userAgent is the fallback for links
+  opened without it.
+-->
+<script>
+  (function () {
+    var p = new URLSearchParams(location.search).get("platform");
+    var win = p ? p === "windows" : /Windows/i.test(navigator.userAgent);
+    var d = win ? "PC" : "Mac";
+    var h = document.getElementById("head"); if (h) h.textContent = "Connect your " + d + ".";
+    var n = document.getElementById("note"); if (n) n.textContent =
+      "Only approve a code you can see in the SunoFlow app on the machine you're " +
+      "connecting. A code lets that " + d + " dictate using your subscription.";
+    window.SUNO_IS_WIN = win;
+  })();
+</script>
+
 <script type="module">
   import { auth } from "./assets/firebase-init.js?v=13";
   import { onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
@@ -47,6 +66,11 @@
 
   const el = (id) => document.getElementById(id);
   const msg = el("msg"), input = el("code"), btn = el("approve");
+  const isWin = window.SUNO_IS_WIN;
+  // The page the browser should return to once the user has signed in. Carried in
+  // the URL so it survives the signInWithRedirect round-trip; sessionStorage is
+  // kept as a belt-and-suspenders fallback.
+  const returnUrl = location.pathname + location.search;
 
   const fns = getFunctions(undefined, "asia-south1");
   if (["localhost", "127.0.0.1"].includes(location.hostname)) {
@@ -66,6 +90,7 @@
   // is wrong with the session and redirecting again would loop forever — so say
   // so and let the user click, rather than trapping them.
   const BOUNCED = "connectBouncedToLogin";
+  const signInHref = "login.html?next=" + encodeURIComponent(returnUrl);
 
   onAuthStateChanged(auth, (user) => {
     if (user) {
@@ -76,12 +101,12 @@
     if (sessionStorage.getItem(BOUNCED)) {
       show("You're not signed in. Open the sign-in page, then come back to this link.");
       el("pane").innerHTML =
-        '<a class="btn btn-primary btn-block" href="login.html">Go to sign in</a>';
+        '<a class="btn btn-primary btn-block" href="' + signInHref + '">Go to sign in</a>';
       return;
     }
     sessionStorage.setItem(BOUNCED, "1");
-    sessionStorage.setItem("afterLogin", location.pathname + location.search);
-    location.replace("login.html");
+    sessionStorage.setItem("afterLogin", returnUrl);
+    location.replace(signInHref);
   });
 
   input.addEventListener("input", () => {
@@ -102,7 +127,7 @@
     try {
       const approve = httpsCallable(fns, "approveDevice");
       const res = await approve({ userCode: code });
-      const name = res.data?.device?.name || "Your Mac";
+      const name = res.data?.device?.name || (isWin ? "Your PC" : "Your Mac");
       el("head").textContent = "Connected.";
       el("sub").textContent = `${name} can now dictate with your account. You can close this tab — the app has already picked it up.`;
       el("pane").innerHTML = '<a class="btn btn-quiet btn-block" href="dashboard.html">See your devices</a>';

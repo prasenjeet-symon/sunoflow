@@ -74,7 +74,7 @@ export const pairDevice = onRequest({ cors: true }, async (req, res) => {
   res.json({
     device_code: deviceCode,
     user_code: code,
-    verification_uri: `https://sunoflow-app.web.app/connect.html?code=${encodeURIComponent(code)}`,
+    verification_uri: `https://sunoflow-app.web.app/connect.html?code=${encodeURIComponent(code)}&platform=${(platform || "").toLowerCase().startsWith("win") ? "windows" : "mac"}`,
     interval: POLL_INTERVAL_SEC,
     expires_in: PAIRING_TTL_MIN * 60,
   });

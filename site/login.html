@@ -64,12 +64,27 @@
     btn.disabled = false;
   };
 
-  const nextPage = () => sessionStorage.getItem("afterLogin") || "dashboard.html";
+  // The return destination is carried in the URL (`?next=`) so it survives the
+  // signInWithRedirect round-trip, with sessionStorage as a fallback for the
+  // connect-page bounce that predates the query param.
+  const nextPage = () =>
+    new URLSearchParams(location.search).get("next") ||
+    sessionStorage.getItem("afterLogin") ||
+    "dashboard.html";
+
+  // Fires from BOTH the onAuthStateChanged listener and the signInWithPopup
+  // promise on a successful sign-in. Without this guard the second call runs
+  // after `afterLogin` is cleared, falls back to dashboard.html, and — because
+  // location.replace is deferred and the last call wins — strands the user on
+  // the dashboard instead of the connect page they came from.
+  let went = false;
   // NB: the "already bounced" marker is deliberately NOT cleared here. Only the
   // destination clears it, once it has actually seen a signed-in user. Clearing
   // it on the way out would re-arm the bounce every cycle and the guard would
   // never fire — which is exactly the loop it exists to stop.
   const goNext = () => {
+    if (went) return;
+    went = true;
     const to = nextPage();
     sessionStorage.removeItem("afterLogin");
     location.replace(to);
