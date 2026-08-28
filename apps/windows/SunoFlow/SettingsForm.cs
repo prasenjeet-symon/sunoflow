@@ -1,9 +1,11 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using Windows.Media.Ocr;
 
 namespace SunoFlow;
 
@@ -389,6 +391,19 @@ internal sealed class SettingsForm : Form
     {
         base.OnShown(e);
         Application.AddMessageFilter(_wheel);
+
+        // Measure the page again now that there is a handle and a monitor. The
+        // constructor's ShowPage ran before either existed, so its heights were
+        // measured at whatever DPI happened to be current then.
+        //
+        // This form has so far got away with it: docking the sidebar Left after
+        // the host was already docked Fill shrinks the host, and that resize
+        // fires the SizeChanged that lays the page out a second time. That is
+        // luck, not design — it is exactly what OnboardingForm lacks, and why
+        // that window came up blank. Not worth leaving to a side effect of
+        // control ordering that any future edit could remove.
+        Relayout();
+
         // First poll after the handle exists: an async continuation that marshals
         // to a window with no handle yet would throw and be swallowed, leaving the
         // page stuck on "Checking…".
@@ -396,6 +411,15 @@ internal sealed class SettingsForm : Form
         _ = PollHealth();
         _ = PollCorrections();
         _ = PollModel();
+    }
+
+    protected override void OnDpiChanged(DpiChangedEventArgs e)
+    {
+        base.OnDpiChanged(e);
+        // Moved to a monitor at a different scale. WinForms rescales child bounds
+        // proportionally, but these heights came from TextRenderer measuring
+        // wrapped text — re-measuring is the only way to get them right.
+        Relayout();
     }
 
     protected override void OnFormClosed(FormClosedEventArgs e)
@@ -493,16 +517,40 @@ internal sealed class SettingsForm : Form
 
     /// <summary>Subsystems the overview tracks. The model is one of them: an app
     /// that calls itself ready while it cannot transcribe a single word is
-    /// lying to the user.</summary>
-    private const int SubsystemCount = 4;
+    /// lying to the user. Screen context only counts when the user has turned
+    /// it on — it's an opt-in accuracy aid, not a baseline requirement, so an
+    /// intentionally-off feature must not make "All systems ready" unreachable.
+    /// </summary>
+    private int SubsystemCount => 4 + (_prefs.ScreenContextEnabled ? 1 : 0);
 
     /// <summary>The model is only "ready" when it is loaded in memory — present
     /// on disk but unloaded still cannot transcribe.</summary>
     private bool ModelReady => _modelStatus?.ModelLoaded == true;
 
+    /// <summary>True when at least one OCR recognizer language is installed —
+    /// the Windows analogue of the macOS Screen Recording TCC grant. Without a
+    /// language pack, <c>OcrEngine</c> is null and screen-context OCR returns
+    /// the empty string, so the feature is effectively blocked.</summary>
+    private static bool OcrLanguagePackAvailable
+    {
+        get
+        {
+            try { return OcrEngine.AvailableRecognizerLanguages.Count > 0; }
+            catch (Exception ex)
+            {
+                AppLog.Log($"Could not check OCR languages: {ex.Message}");
+                return false;
+            }
+        }
+    }
+
+    /// <summary>True only when the feature is enabled AND an OCR language pack
+    /// is installed, i.e. on-screen OCR is actually contributing context.</summary>
+    private bool ScreenContextHealthy => _prefs.ScreenContextEnabled && OcrLanguagePackAvailable;
+
     private int HealthyCount =>
         (_sidecarOnline ? 1 : 0) + (_micAvailable ? 1 : 0) + (AccountConnected ? 1 : 0)
-        + (ModelReady ? 1 : 0);
+        + (ModelReady ? 1 : 0) + (ScreenContextHealthy ? 1 : 0);
 
     private static string[] SafeDeviceNames()
     {
@@ -529,9 +577,9 @@ internal sealed class SettingsForm : Form
 
     // MARK: - Overview
 
-    private SunoRow? _ovEngineRow, _ovMicRow, _ovAccountRow, _ovModelRow;
-    private StatusText? _ovEngineStatus, _ovMicStatus, _ovAccountStatus, _ovModelStatus;
-    private SunoButton? _ovEngineButton, _ovModelButton;
+    private SunoRow? _ovEngineRow, _ovMicRow, _ovAccountRow, _ovModelRow, _ovScreenRow;
+    private StatusText? _ovEngineStatus, _ovMicStatus, _ovAccountStatus, _ovModelStatus, _ovScreenStatus;
+    private SunoButton? _ovEngineButton, _ovModelButton, _ovScreenButton;
     private SectionHeader? _ovStatusHeader;
     private TextBlock? _ovLead, _ovLeadDetail;
     private ValueText? _ovHotkey, _ovMicValue, _ovAutoStop, _ovScreen, _ovLogin, _ovCorrections;
@@ -596,6 +644,20 @@ internal sealed class SettingsForm : Form
             Glyph.Alert, Theme.Danger, divider: false, trailing: _ovModelRetry)
         { Visible = false, ReserveIconColumn = true };
         _content.Controls.Add(_ovModelErrorRow);
+
+        // Screen context — the Windows analogue of the macOS Screen Recording
+        // status row. Only visible when the user has opted in. "Reading" when an
+        // OCR language pack is installed (the green path); "Blocked" with a
+        // button to the Language & region settings when no pack is present —
+        // that is the Windows soft-fail cause (no TCC equivalent here).
+        _ovScreenStatus = new StatusText("", Theme.Faint);
+        _ovScreenButton = new SunoButton("Open settings", ButtonKind.Primary) { Visible = false };
+        _ovScreenButton.Click += (s, e) => OpenOcrLanguageSettings();
+        _ovScreenRow = new SunoRow("Screen context", "", Glyph.Screen, Theme.Faint,
+                                    divider: false,
+                                    trailing: new Row(_ovScreenButton, _ovScreenStatus))
+        { Visible = false, ReserveIconColumn = true };
+        _content.Controls.Add(_ovScreenRow);
 
         _content.Controls.Add(new RuleLine(strong: true));
 
@@ -706,6 +768,24 @@ internal sealed class SettingsForm : Form
                 ? "Something went wrong during the download." : ms.Error);
         _ovModelRetry!.Enabled = !_downloadStarting && _sidecarOnline;
 
+        // Screen context status row — only shown when the feature is enabled.
+        // The "blocked" condition is "no OCR language pack installed" (the
+        // Windows soft-fail cause; there is no screen-capture permission gate),
+        // surfaced with a button straight to Language & region settings.
+        bool screenOn = _prefs.ScreenContextEnabled;
+        bool screenOk = screenOn && OcrLanguagePackAvailable;
+        _ovScreenRow!.Visible = screenOn;
+        if (screenOn)
+        {
+            _ovScreenRow.SetSubtitle(screenOk
+                ? "On-screen words are read with OCR so names and terminology match what you're looking at."
+                : "Install an OCR language pack so SunoFlow can read the screen for context.");
+            _ovScreenRow.SetIcon(Glyph.Screen, screenOk ? Theme.Success : Theme.Warning);
+            _ovScreenStatus!.Set(screenOk ? "Reading" : "Blocked",
+                                screenOk ? Theme.Success : Theme.Warning);
+            _ovScreenButton!.Visible = !screenOk;
+        }
+
         _ovHotkey!.Set(HotkeyDisplay);
         _ovMicValue!.Set(MicDisplayName);
         _ovAutoStop!.Set($"{_prefs.MaxRecordingSeconds} seconds");
@@ -742,6 +822,25 @@ internal sealed class SettingsForm : Form
             RefreshOverview();
         };
         settle.Start();
+    }
+
+    /// <summary>Opens the Windows Language &amp; region settings — where the OCR
+    /// language pack (an optional language feature) is installed, which is the
+    /// Windows equivalent of granting macOS Screen Recording access.</summary>
+    private static void OpenOcrLanguageSettings()
+    {
+        try
+        {
+            // ms-settings:regionlanguage is the deep link to Time & language →
+            // Language & region, where the user adds a language and toggles its
+            // "OCR" optional feature. Available on Windows 10 1703+.
+            Process.Start(new ProcessStartInfo("ms-settings:regionlanguage")
+            { UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            AppLog.Log($"Could not open Language settings: {ex.Message}");
+        }
     }
 
     // MARK: - Account
