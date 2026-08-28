@@ -3,12 +3,14 @@ import os
 import re
 import tempfile
 import threading
+import time
 import wave
 from collections import deque
 from contextlib import asynccontextmanager
 from difflib import SequenceMatcher
 
 import requests
+from requests.adapters import HTTPAdapter, Retry
 from fastapi.responses import JSONResponse
 from fastapi import FastAPI, File, Form, Query, UploadFile, Header
 from starlette.concurrency import run_in_threadpool
@@ -28,13 +30,35 @@ MODEL_ID = "mlx-community/parakeet-tdt-0.6b-v3"
 # its connectivity status; the sidecar no longer surfaces /config or /models.
 # Override with SUNOFLOW_CLEANUP_URL / SUNOFLOW_CLEANUP_KEY for dev (e.g.
 # point at a local docker-compose stack).
-CLEANUP_URL = os.environ.get("SUNOFLOW_CLEANUP_URL", "https://cleanup.mirrorli.art/cleanup")
+CLEANUP_URL = os.environ.get("SUNOFLOW_CLEANUP_URL", "http://162.19.81.108:40009/cleanup")
 ENTITLEMENT_URL = CLEANUP_URL.rsplit("/", 1)[0] + "/entitlement"
 # No default. A key used to ship here, identical in every install, which meant
 # anyone who downloaded SunoFlow could use the gateway for free and it could not
 # be revoked without breaking everyone. The device key now arrives per request
 # from the app's Keychain; this remains only as a dev override.
 CLEANUP_KEY = os.environ.get("SUNOFLOW_CLEANUP_KEY", "")
+
+# One pooled connection to the gateway, kept warm across dictations.
+#
+# The module-level requests.post/get helpers build a throwaway Session per call,
+# so every dictation paid for a DNS lookup, a TCP handshake and a TLS handshake
+# before it could send its first byte — ~0.4s measured, sitting squarely between
+# the user's last word and their pasted text.
+#
+# urllib3 checks a pooled connection before reusing it and dials a fresh one
+# when the peer has closed it, so an idle gap between dictations is handled
+# already. The single retry covers the rarer socket that dies without notice —
+# a laptop that changed network since the last dictation. Both calls here are
+# safe to repeat: the entitlement check is a plain read, and a cleanup POST that
+# does arrive twice costs one extra gateway call and nothing else. Not retrying
+# is the expensive option — it soft-fails the dictation to raw text, or refuses
+# it outright on a device with no valid lease.
+_ADAPTER = HTTPAdapter(max_retries=Retry(
+    total=1, connect=1, read=1, status=0, allowed_methods=None, backoff_factor=0,
+))
+_session = requests.Session()
+_session.mount("https://", _ADAPTER)
+_session.mount("http://", _ADAPTER)  # dev/test point the URLs at plain HTTP
 
 # --- Managed model directory ---------------------------------------------------
 # For distribution the app ships WITHOUT the model bundled. The user downloads
@@ -509,18 +533,84 @@ def _refusal_message(resp) -> str:
     return (body.get("message") or "").strip() or _DEFAULT_BLOCKED
 
 
-def _allow_or_raise(key: str, why: str) -> None:
+def _allow_or_raise(key: str, why: str, quiet: bool = False) -> None:
     """Decide what an inconclusive gateway result means for this dictation.
 
     Falls back to the signed lease: a device that checked in recently keeps
     working through the outage, one that has not is refused. Returning normally
     means "carry on with the raw transcript".
+
+    ``quiet`` silences the diagnostic print for the background refresh thread,
+    which pokes the gateway after the caller has already returned and whose
+    outage messages would otherwise noise up logs (and tests) for no benefit.
     """
     if lease.allows_offline(key):
-        print(f"Cleanup gateway unavailable ({why}); continuing on a valid lease.")
+        if not quiet:
+            print(f"Cleanup gateway unavailable ({why}); continuing on a valid lease.")
         return
-    print(f"Cleanup gateway unavailable ({why}) and no valid lease; refusing.")
+    if not quiet:
+        print(f"Cleanup gateway unavailable ({why}) and no valid lease; refusing.")
     raise NotEntitled(_UNREACHABLE, code="unreachable")
+
+
+# How long a successful live entitlement check authorizes the cleanup-off path
+# to keep dictating without another blocking round trip. The on-disk lease is the
+# real authority (72h); this cache is only the "skip the network call" grace, so
+# a revoked account stops working within ~this many seconds, not 72h.
+_ENTITLEMENT_CACHE_TTL = 600
+
+# fingerprint(key) -> (last_check_monotonic, lease_path_at_check). The lease path
+# is stored so the cache auto-invalidates when tests (or a relocated install)
+# point lease.LEASE_PATH elsewhere — otherwise the module-level dict would leak
+# "entitled" verdicts across configs that happen to share a key.
+_entitlement_cache: dict[str, tuple[float, str]] = {}
+
+
+def _check_entitlement_live(key: str, quiet: bool = False) -> None:
+    """Perform the blocking GET to /entitlement and classify the result.
+
+    On 2xx the signed lease is refreshed. On a refusal NotEntitled is raised. On
+    anything inconclusive the lease decides via _allow_or_raise. ``quiet`` is
+    forwarded to _allow_or_raise for the background refresh thread.
+    """
+    try:
+        resp = _session.get(ENTITLEMENT_URL, headers={"Authorization": f"Bearer {key}"}, timeout=10)
+    except Exception as exc:
+        _allow_or_raise(key, str(exc), quiet=quiet)
+        return
+
+    message = _refusal_message(resp)
+    if message:
+        raise NotEntitled(message)
+    if not resp.ok:
+        _allow_or_raise(key, f"HTTP {resp.status_code}", quiet=quiet)
+        return
+
+    try:
+        lease.save(resp.json().get("lease") or "", key)
+    except Exception:
+        pass
+
+
+def _refresh_entitlement_in_background(key: str) -> None:
+    """Best-effort, silent background refresh of the lease.
+
+    Runs on a daemon thread, swallows every error (a failed refresh just leaves
+    the previous lease in place until it lapses), and only records a cache hit
+    on a genuine 2xx so a refusal or outage never extends the skip window.
+    """
+
+    def _run() -> None:
+        try:
+            _check_entitlement_live(key, quiet=True)
+        except Exception:
+            return
+        # _check_entitlement_live returned normally → 2xx or a lease-covered
+        # outage. Only a 2xx actually refreshed the lease; in both cases the
+        # device is entitled right now, so the cache is valid.
+        _entitlement_cache[lease.fingerprint(key)] = (time.monotonic(), lease.LEASE_PATH)
+
+    threading.Thread(target=_run, name="sf-entitlement-refresh", daemon=True).start()
 
 
 def check_entitlement(key: str) -> None:
@@ -528,28 +618,33 @@ def check_entitlement(key: str) -> None:
 
     Used when the cleanup pass is switched off — otherwise turning cleanup off
     would skip the only server call and hand out unlimited free dictation.
+
+    To keep cleanup-off dictation from blocking STT on a remote round trip every
+    time, a valid on-disk lease plus a recent successful check short-circuits the
+    network call and refreshes the lease in the background. The first call (or
+    one after the cache grace expires) still blocks, exactly as before.
     """
     key = key or CLEANUP_KEY
     if not key:
         raise NotEntitled(_NOT_CONNECTED, code="not_connected")
 
-    try:
-        resp = requests.get(ENTITLEMENT_URL, headers={"Authorization": f"Bearer {key}"}, timeout=10)
-    except Exception as exc:
-        _allow_or_raise(key, str(exc))
+    fp = lease.fingerprint(key)
+    cached = _entitlement_cache.get(fp)
+    if (
+        cached
+        and cached[1] == lease.LEASE_PATH
+        and (time.monotonic() - cached[0]) < _ENTITLEMENT_CACHE_TTL
+        and lease.allows_offline(key)
+    ):
+        # Recent check + still-valid lease → trust it off the network and refresh
+        # quietly in the background.
+        _refresh_entitlement_in_background(key)
         return
 
-    message = _refusal_message(resp)
-    if message:
-        raise NotEntitled(message)
-    if not resp.ok:
-        _allow_or_raise(key, f"HTTP {resp.status_code}")
-        return
-
-    try:
-        lease.save(resp.json().get("lease") or "", key)
-    except Exception:
-        pass
+    _check_entitlement_live(key)
+    # Reached only on a 2xx (lease refreshed) or a lease-covered outage. Record
+    # the cache so the next cleanup-off call within the grace window skips.
+    _entitlement_cache[fp] = (time.monotonic(), lease.LEASE_PATH)
 
 
 def clean_with_gateway(
@@ -595,7 +690,7 @@ def clean_with_gateway(
         payload["dictionary"] = dictionary
 
     try:
-        resp = requests.post(
+        resp = _session.post(
             CLEANUP_URL,
             headers={"Authorization": f"Bearer {key}"},
             json=payload,

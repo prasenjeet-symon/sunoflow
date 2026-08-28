@@ -88,6 +88,52 @@ def test_an_entitled_call_banks_its_lease(gateway):
     assert mac_lease.load() == token
 
 
+def test_cleanup_off_skips_the_network_call_when_a_recent_check_cached(gateway, monkeypatch):
+    """A valid lease plus a recent successful entitlement check must short-circuit
+    the cleanup-off round trip — the whole point of the cache. The second call
+    makes no live HTTP request to /entitlement and still returns entitled."""
+    # First call: live check against the stub, banks a lease, primes the cache.
+    token = gateway.issue_lease(KEY)
+    gateway.replies(200, {"ok": True, "lease": token})
+    mac.check_entitlement(KEY)
+    assert mac_lease.load() == token
+
+    # Turn the gateway into a refusal. Without the cache, the next cleanup-off
+    # call would hit the stub and be blocked. With the cache it must stay served.
+    gateway.replies(402, {"error": "trial_expired", "message": "Nope."})
+    mac.check_entitlement(KEY)  # must NOT raise — cache short-circuits
+
+
+def test_the_cache_does_not_extend_a_refusal(gateway):
+    """A refused account never banks a cache entry, so the next call is still a
+    live check — the cache cannot turn a refusal into free dictation."""
+    gateway.replies(402, {"error": "trial_expired", "message": "Nope."})
+    with pytest.raises(mac.NotEntitled):
+        mac.check_entitlement(KEY)
+    # Second call must also refuse (no cache hit from the first).
+    with pytest.raises(mac.NotEntitled):
+        mac.check_entitlement(KEY)
+
+
+def test_an_expired_lease_is_not_rescued_by_the_cache(gateway, monkeypatch):
+    """A cache entry is only usable while the on-disk lease is still valid. Once
+    the lease lapses, the cache must miss and the call must go live again."""
+    # Prime: live check banks a lease and primes the cache.
+    token = gateway.issue_lease(KEY)
+    gateway.replies(200, {"ok": True, "lease": token})
+    mac.check_entitlement(KEY)
+
+    # Expire the lease on disk, then make the gateway unreachable.
+    gateway.bank_lease(KEY, ttl=-60)
+    gateway.unreachable()
+
+    # The cache entry exists but the lease is invalid, so it must miss and the
+    # live check must run → unreachable → blocked.
+    with pytest.raises(mac.NotEntitled) as exc:
+        mac.check_entitlement(KEY)
+    assert exc.value.code == "unreachable"
+
+
 # --- the route, not just the helpers -----------------------------------------
 #
 # The tests above call the gateway helpers directly. That is not enough: a live
@@ -219,3 +265,23 @@ def test_the_macos_sidecar_sends_the_dictionary(gateway):
 def test_the_macos_sidecar_omits_an_empty_dictionary(gateway):
     mac.clean_with_gateway("hello world", key=KEY, dictionary=[])
     assert "dictionary" not in gateway.last_request()
+
+
+# --- the connection is kept, not rebuilt per dictation ------------------------
+
+def test_dictations_share_one_connection(gateway, monkeypatch):
+    """Dictation is a latency product: a new DNS lookup and TCP/TLS handshake per
+    call is ~0.4s the user spends staring at an empty cursor, for nothing."""
+    connections = gateway_stub.count_connections(monkeypatch)
+    for _ in range(3):
+        mac.clean_with_gateway("hello world", key=KEY)
+    assert connections.count == 1
+
+
+def test_the_entitlement_check_shares_that_connection(gateway, monkeypatch):
+    """Cleanup-off dictation goes to the same host and must not dial its own."""
+    gateway.replies(200, {"cleaned": "Hello world.", "lease": gateway.issue_lease(KEY)})
+    connections = gateway_stub.count_connections(monkeypatch)
+    mac.clean_with_gateway("hello world", key=KEY)
+    mac.check_entitlement(KEY)
+    assert connections.count == 1
