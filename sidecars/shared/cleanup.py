@@ -24,6 +24,7 @@ Override SUNOFLOW_CLEANUP_URL / SUNOFLOW_CLEANUP_KEY for dev (e.g. point at a
 local docker-compose stack).
 """
 import os
+import platform
 import threading
 import time
 
@@ -62,6 +63,28 @@ _session.mount("http://", _ADAPTER)  # dev/test point the URLs at plain HTTP
 # without breaking everyone. The device key now arrives per request from the
 # app's Keychain; this remains only as a dev override.
 CLEANUP_KEY = os.environ.get("SUNOFLOW_CLEANUP_KEY", "")
+
+# Identifies this install to the gateway, as "<os>/<version>" — the only thing
+# that makes a Windows-vs-Mac split possible in the product numbers, since the
+# gateway otherwise sees two identical HTTP clients.
+#
+# Deliberately coarse. It is a platform name and a version string, not a machine
+# fingerprint: no hostname, no serial, no username, nothing that identifies the
+# device beyond the device key the request already carries.
+#
+# The version falls back to "dev" because the sidecar has no reliable way to know
+# the app's version on its own — the app can pass SUNOFLOW_VERSION when it spawns
+# the sidecar, and until it does, the OS half is still correct.
+_CLIENT_OS = {"Darwin": "mac", "Windows": "windows", "Linux": "linux"}.get(
+    platform.system(), "unknown"
+)
+CLIENT_ID = f"{_CLIENT_OS}/{os.environ.get('SUNOFLOW_VERSION', 'dev')}"
+
+def _headers(key: str) -> dict:
+    """Auth plus the client identity, on every gateway call."""
+    return {"Authorization": f"Bearer {key}", "X-SunoFlow-Client": CLIENT_ID}
+
+
 
 # Statuses that mean "we reached the gateway and it refused us".
 REFUSAL_STATUSES = (401, 402, 403)
@@ -150,7 +173,7 @@ def _check_entitlement_live(key: str, quiet: bool = False) -> None:
     forwarded to _allow_or_raise for the background refresh thread.
     """
     try:
-        resp = _session.get(ENTITLEMENT_URL, headers={"Authorization": f"Bearer {key}"}, timeout=10)
+        resp = _session.get(ENTITLEMENT_URL, headers=_headers(key), timeout=10)
     except Exception as exc:
         _allow_or_raise(key, str(exc), quiet=quiet)
         return
@@ -261,7 +284,7 @@ def clean_with_gateway(
     try:
         resp = _session.post(
             CLEANUP_URL,
-            headers={"Authorization": f"Bearer {key}"},
+            headers=_headers(key),
             json=payload,
             timeout=60,
         )

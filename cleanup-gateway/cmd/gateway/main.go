@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/sunoflow/cleanup-gateway/internal/account"
+	"github.com/sunoflow/cleanup-gateway/internal/analytics"
 	"github.com/sunoflow/cleanup-gateway/internal/backend"
 	"github.com/sunoflow/cleanup-gateway/internal/config"
 	"github.com/sunoflow/cleanup-gateway/internal/ratelimit"
@@ -60,6 +61,16 @@ func main() {
 	}
 	logger.Info("backend selected", "backend", be.Name(), "model", activeModel)
 
+	// Product analytics. An empty POSTHOG_API_KEY leaves this disabled and every
+	// Capture below becomes a no-op — no key, no events, no network calls.
+	stats := analytics.New(cfg.PostHogAPIKey, analytics.Host(cfg.PostHogHost), logger)
+	defer stats.Close()
+	if stats.Enabled() {
+		logger.Info("analytics enabled", "host", analytics.Host(cfg.PostHogHost))
+	} else {
+		logger.Info("analytics disabled (no POSTHOG_API_KEY)")
+	}
+
 	srv := &server.Server{
 		Backend:     be,
 		Store:       st,
@@ -67,6 +78,7 @@ func main() {
 		QuotaRPM:    cfg.QuotaRPM,
 		QuotaDaily:  cfg.QuotaDaily,
 		LeaseSecret: cfg.LeaseSecret,
+		Analytics:   stats,
 	}
 	limiter := ratelimit.New(st, cfg.QuotaRPM, cfg.QuotaDaily, logger)
 

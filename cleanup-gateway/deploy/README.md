@@ -45,6 +45,8 @@ GEMINI_TIMEOUT=20s
 GEMINI_THINKING_LEVEL=low             # minimal|low|medium|high
 DB_PATH=/var/lib/sunoflow-gateway/keys.db
 LOG_LEVEL=info
+POSTHOG_API_KEY=                      # empty = analytics off, nothing is sent
+POSTHOG_HOST=https://us.i.posthog.com # or https://eu.i.posthog.com
 DEFAULT_QUOTA_RPM=60
 DEFAULT_QUOTA_DAILY=5000
 ```
@@ -105,6 +107,40 @@ curl -X POST https://api.example.com/cleanup \
   -d '{"text":"um so I think we should um ship this on friday"}'
 # → {"cleaned":"So I think we should ship this on Friday."}
 ```
+
+## Product analytics
+
+`POSTHOG_API_KEY` turns on PostHog reporting; leaving it empty is a full off
+switch — no events, no goroutine, no network calls. It is the ingest (project)
+key, not a personal API key.
+
+It lives here rather than in the two client apps because every dictation already
+passes through this service, the account uid is already resolved here (so "how
+many users" is an answer, not a guess from installs), and changing what is
+measured is a gateway restart instead of two app releases and a wait for
+everyone to update.
+
+Two events:
+
+- `dictation` — one per `/cleanup`. Properties: `os`, `app_version`, `cleanup`,
+  `transcript_chars`, `cleaned_chars`, `had_screen`, `had_context`,
+  `dictionary_terms`, `latency_ms`.
+- `entitlement_check` — one per `/entitlement`. **Not a dictation count.** The
+  sidecar caches a successful check for ten minutes, so with cleanup switched
+  off this fires roughly once per ten minutes of use rather than once per
+  dictation. It exists so a cleanup-off user still appears in the user count;
+  their dictation volume is not observable from the server.
+
+`distinct_id` is the account uid, so one customer with three machines is one
+user. The OS split comes from the `X-SunoFlow-Client: <os>/<version>` header the
+sidecar sends; installs that predate it report `unknown` rather than vanishing.
+
+**What is never sent:** transcript, cleaned text, screen OCR, cursor context,
+dictionary entries, audio, IP address. `$ip` is explicitly null, both because
+server-side the only IP visible is this host's (which would place every user in
+one datacentre) and because it is not ours to collect. A test in
+`internal/server/analytics_test.go` posts a dictation full of marker strings and
+fails if any of them reach the events payload.
 
 ## Operational notes
 

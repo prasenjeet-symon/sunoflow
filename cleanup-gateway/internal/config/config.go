@@ -33,6 +33,16 @@ type Config struct {
 	FirebaseProject     string // Firebase project id, e.g. sunoflow-app
 	FirebaseCredentials string // path to a service-account json; empty = ADC
 
+	// Product analytics (PostHog). An empty PostHogAPIKey disables it entirely
+	// and nothing is sent anywhere, which is how a local or self-hosted
+	// deployment runs — the same posture as an empty FirebaseProject.
+	//
+	// This is the ingest (project) key, which is write-only by design. It is
+	// still configuration rather than source: a deployment that wants no
+	// analytics should not have to edit code to get it.
+	PostHogAPIKey string
+	PostHogHost   string
+
 	QuotaRPM   int // default per-key requests/minute
 	QuotaDaily int // default per-key requests/day
 
@@ -62,6 +72,8 @@ func Load() (Config, error) {
 		FirebaseProject:     envStr("FIREBASE_PROJECT", ""),
 		FirebaseCredentials: envStr("FIREBASE_CREDENTIALS", ""),
 		LogLevel:            envStr("LOG_LEVEL", "info"),
+		PostHogAPIKey:       envStr("POSTHOG_API_KEY", ""),
+		PostHogHost:         envStr("POSTHOG_HOST", "https://us.i.posthog.com"),
 		QuotaRPM:            envInt("DEFAULT_QUOTA_RPM", 60),
 		QuotaDaily:          envInt("DEFAULT_QUOTA_DAILY", 5000),
 		LeaseSecret:         envStr("LEASE_SECRET", ""),

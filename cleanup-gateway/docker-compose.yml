@@ -25,6 +25,9 @@ services:
       GEMINI_THINKING_LEVEL: ${GEMINI_THINKING_LEVEL:-low}
       DB_PATH: /data/keys.db
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Product analytics. Empty = off, and nothing is sent.
+      POSTHOG_API_KEY: ${POSTHOG_API_KEY:-}
+      POSTHOG_HOST: ${POSTHOG_HOST:-https://us.i.posthog.com}
       DEFAULT_QUOTA_RPM: ${DEFAULT_QUOTA_RPM:-60}
       DEFAULT_QUOTA_DAILY: ${DEFAULT_QUOTA_DAILY:-5000}
       # Trial / subscription enforcement. Empty project = nothing enforced.

@@ -10,8 +10,10 @@ import (
 	"time"
 
 	"github.com/sunoflow/cleanup-gateway/internal/account"
+	"github.com/sunoflow/cleanup-gateway/internal/analytics"
 	"github.com/sunoflow/cleanup-gateway/internal/auth"
 	"github.com/sunoflow/cleanup-gateway/internal/backend"
+	"github.com/sunoflow/cleanup-gateway/internal/caller"
 	"github.com/sunoflow/cleanup-gateway/internal/cleanup"
 	"github.com/sunoflow/cleanup-gateway/internal/ratelimit"
 	"github.com/sunoflow/cleanup-gateway/internal/store"
@@ -27,6 +29,39 @@ type Server struct {
 	// LeaseSecret signs the offline entitlement leases handed to entitled
 	// callers. Empty falls back to account.DefaultLeaseSecret.
 	LeaseSecret string
+	// Analytics counts dictations and users. Nil, or configured without an API
+	// key, means nothing is reported and every call here is a no-op.
+	Analytics *analytics.Client
+}
+
+// clientHeader is how a sidecar says what it is: "<os>/<version>", e.g.
+// "mac/1.1.2". Absent on installs that predate it, which is why both halves
+// default rather than being required.
+const clientHeader = "X-SunoFlow-Client"
+
+// parseClient splits the client header into an OS and a version, defaulting
+// both to "unknown" so a missing or malformed header shows up in the numbers as
+// an old install rather than as no install.
+func parseClient(h string) (os, version string) {
+	h = strings.TrimSpace(h)
+	if h == "" {
+		return "unknown", "unknown"
+	}
+	// Bounded before use: this is an attacker-controlled header, and an
+	// unbounded one would become an unbounded property in every event.
+	if len(h) > 64 {
+		h = h[:64]
+	}
+	osPart, verPart, found := strings.Cut(h, "/")
+	osPart = strings.TrimSpace(osPart)
+	verPart = strings.TrimSpace(verPart)
+	if osPart == "" {
+		osPart = "unknown"
+	}
+	if !found || verPart == "" {
+		verPart = "unknown"
+	}
+	return osPart, verPart
 }
 
 // now is overridable for tests.
@@ -144,8 +179,34 @@ func (s *Server) handleCleanup(w http.ResponseWriter, r *http.Request) {
 	}
 	dict := cleanup.NormalizeDict(req.Dictionary)
 
+	started := time.Now()
 	cleaned := s.runCleanup(r.Context(), text, context, recent, screen, dict)
 	writeJSON(w, http.StatusOK, cleanupResponse{Cleaned: cleaned, Lease: leaseFor(r)})
+
+	// One dictation, counted. Lengths and flags only — the transcript, the
+	// cleaned text, the screen OCR and the dictionary are all in scope right
+	// here and none of them leave this function.
+	clientOS, clientVersion := parseClient(r.Header.Get(clientHeader))
+	id, _ := caller.From(r.Context())
+	s.Analytics.Capture(analytics.Event{
+		Name:       "dictation",
+		DistinctID: id.MeterKey(),
+		Properties: map[string]any{
+			"os":               clientOS,
+			"app_version":      clientVersion,
+			"cleanup":          true,
+			"transcript_chars": len(text),
+			"cleaned_chars":    len(cleaned),
+			"had_screen":       screen != "",
+			"had_context":      context != "",
+			"dictionary_terms": len(dict),
+			"latency_ms":       time.Since(started).Milliseconds(),
+		},
+		PersonProperties: map[string]any{
+			"os":          clientOS,
+			"app_version": clientVersion,
+		},
+	})
 }
 
 // runCleanup applies the two-pass cleanup contract:
@@ -206,6 +267,31 @@ func chain(handler http.Handler, middlewares ...func(http.Handler) http.Handler)
 // where that client collects its offline lease.
 func (s *Server) handleEntitlement(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "lease": leaseFor(r)})
+
+	// Deliberately NOT counted as a dictation. This endpoint is what a client
+	// with cleanup switched off calls, but the sidecar caches a successful
+	// check for ten minutes, so it fires roughly once per ten minutes of use
+	// rather than once per dictation. Counting it as a dictation would report a
+	// number that is wrong by however much someone dictates in that window.
+	//
+	// It is still worth an event: without one, a user who turns cleanup off
+	// disappears from the user count entirely, which is a worse answer than
+	// counting them as active with their dictations unknown.
+	clientOS, clientVersion := parseClient(r.Header.Get(clientHeader))
+	id, _ := caller.From(r.Context())
+	s.Analytics.Capture(analytics.Event{
+		Name:       "entitlement_check",
+		DistinctID: id.MeterKey(),
+		Properties: map[string]any{
+			"os":          clientOS,
+			"app_version": clientVersion,
+			"cleanup":     false,
+		},
+		PersonProperties: map[string]any{
+			"os":          clientOS,
+			"app_version": clientVersion,
+		},
+	})
 }
 
 // leaseFor returns the lease the account middleware minted for this request, or
