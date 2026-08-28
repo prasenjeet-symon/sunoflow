@@ -11,6 +11,8 @@ import json
 import threading
 import time
 
+import urllib3
+
 
 class _Server(http.server.ThreadingHTTPServer):
     """Threaded on purpose.
@@ -119,6 +121,32 @@ def serve(cleanup_mod, lease_mod, monkeypatch, tmp_path):
     monkeypatch.setattr(lease_mod, "LEASE_PATH", str(tmp_path / "lease.json"))
 
     return server, Gateway(cleanup_mod, lease_mod, monkeypatch, port)
+
+
+class Connections:
+    """How many fresh TCP connections the sidecar has opened."""
+
+    count = 0
+
+
+def count_connections(monkeypatch):
+    """Start counting the sockets the sidecar dials, until the test ends.
+
+    Connection reuse is invisible in the response body, so counting sockets is
+    the only way to catch a slide back to ``requests.post``/``requests.get``.
+    Those build a throwaway Session per call, which puts a DNS lookup and a TCP
+    and TLS handshake — ~0.4s — between the user's last word and their pasted
+    text, on every single dictation.
+    """
+    counter = Connections()
+    original = urllib3.connection.HTTPConnection.connect
+
+    def counted(self, *args, **kwargs):
+        counter.count += 1
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(urllib3.connection.HTTPConnection, "connect", counted)
+    return counter
 
 
 def verdicts(cleanup_mod, key):

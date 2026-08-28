@@ -130,6 +130,46 @@ def test_an_entitled_call_returns_cleaned_text_and_banks_the_lease(gateway):
     assert cleanup.clean_with_gateway("hello world", key=KEY) == "hello world"
 
 
+def test_cleanup_off_skips_the_network_call_when_a_recent_check_cached(gateway):
+    """A valid lease plus a recent successful entitlement check must short-circuit
+    the cleanup-off round trip — the whole point of the cache. The second call
+    makes no live HTTP request to /entitlement and still returns entitled."""
+    token = gateway.issue_lease(KEY)
+    gateway.replies(200, {"ok": True, "lease": token})
+    cleanup.check_entitlement(KEY)
+    assert lease.load() == token
+
+    # Turn the gateway into a refusal. Without the cache, the next cleanup-off
+    # call would hit the stub and be blocked. With the cache it must stay served.
+    gateway.replies(402, {"error": "trial_expired", "message": "Nope."})
+    cleanup.check_entitlement(KEY)  # must NOT raise — cache short-circuits
+
+
+def test_the_cache_does_not_extend_a_refusal(gateway):
+    """A refused account never banks a cache entry, so the next call is still a
+    live check — the cache cannot turn a refusal into free dictation."""
+    gateway.replies(402, {"error": "trial_expired", "message": "Nope."})
+    with pytest.raises(cleanup.NotEntitled):
+        cleanup.check_entitlement(KEY)
+    with pytest.raises(cleanup.NotEntitled):
+        cleanup.check_entitlement(KEY)
+
+
+def test_an_expired_lease_is_not_rescued_by_the_cache(gateway):
+    """A cache entry is only usable while the on-disk lease is still valid. Once
+    the lease lapses, the cache must miss and the call must go live again."""
+    token = gateway.issue_lease(KEY)
+    gateway.replies(200, {"ok": True, "lease": token})
+    cleanup.check_entitlement(KEY)
+
+    gateway.bank_lease(KEY, ttl=-60)
+    gateway.unreachable()
+
+    with pytest.raises(cleanup.NotEntitled) as exc:
+        cleanup.check_entitlement(KEY)
+    assert exc.value.code == "unreachable"
+
+
 def test_an_empty_cleaned_field_falls_back_to_raw(gateway):
     gateway.replies(200, {"cleaned": "   "})
     assert cleanup.clean_with_gateway("hello world", key=KEY) == "hello world"
@@ -160,3 +200,23 @@ def test_no_dictionary_field_when_nothing_is_relevant(gateway):
     did not touch any of it."""
     cleanup.clean_with_gateway("hello world", key=KEY, dictionary=[])
     assert "dictionary" not in gateway.last_request()
+
+
+# --- the connection is kept, not rebuilt per dictation ------------------------
+
+def test_dictations_share_one_connection(gateway, monkeypatch):
+    """Dictation is a latency product: a new DNS lookup and TCP/TLS handshake per
+    call is ~0.4s the user spends staring at an empty cursor, for nothing."""
+    connections = gateway_stub.count_connections(monkeypatch)
+    for _ in range(3):
+        cleanup.clean_with_gateway("hello world", key=KEY)
+    assert connections.count == 1
+
+
+def test_the_entitlement_check_shares_that_connection(gateway, monkeypatch):
+    """Cleanup-off dictation goes to the same host and must not dial its own."""
+    gateway.replies(200, {"cleaned": "Hello world.", "lease": gateway.issue_lease(KEY)})
+    connections = gateway_stub.count_connections(monkeypatch)
+    cleanup.clean_with_gateway("hello world", key=KEY)
+    cleanup.check_entitlement(KEY)
+    assert connections.count == 1
