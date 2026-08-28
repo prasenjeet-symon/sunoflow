@@ -35,6 +35,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     private var healthCheckTimer: Timer?
     private var maxRecordingTimer: Timer?
+    /// Screen OCR for the dictation currently being recorded, started the
+    /// moment recording began. See `beginScreenContextCapture`. Nil when this
+    /// dictation is not collecting screen context.
+    private var screenContextCapture: ScreenContextCapture?
     private var statusMenuItem: NSMenuItem!
     private var lastTranscriptMenuItem: NSMenuItem!
     private var correctionsMenuItem: NSMenuItem!
@@ -325,6 +329,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         editLearner.captureIfNeeded()
         do {
             _ = try audioRecorder.startRecording()
+            // Kicked off before the overlay goes up, so the overlay's own words
+            // are less likely to end up in the OCR.
+            beginScreenContextCapture()
             state = .recording
             overlay.show(mode: .recording)
             maxRecordingTimer?.invalidate()
@@ -347,6 +354,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         guard let fileURL = audioRecorder.currentFileURL else {
             overlay.hide()
+            screenContextCapture = nil
             state = .idle
             return
         }
@@ -361,30 +369,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             AppLog.log("Captured \(context.count) chars of cursor context")
         }
 
-        // Optionally capture the screen and run on-device OCR for heuristic
-        // context (window titles, labels, nearby text). This needs the Screen
-        // Recording permission and is gated by a user toggle. Best-effort:
-        // nil means we skip it and proceed with cursor context only.
-        let captureScreen = Preferences.shared.cleanupEnabled
-            && Preferences.shared.screenContextEnabled
-        if captureScreen {
-            guard ScreenContext.hasPermission else {
-                AppLog.log("Screen context enabled but Screen Recording permission missing — skipping")
-                sendForTranscription(fileURL: fileURL, context: context, screenContext: "")
-                return
-            }
-            ScreenContext.captureAndRecognize { [weak self] screenText in
-                guard let self = self else { return }
-                if let screenText = screenText, !screenText.isEmpty {
-                    AppLog.log("Captured \(screenText.count) chars of screen OCR context")
-                }
-                self.sendForTranscription(
-                    fileURL: fileURL, context: context, screenContext: screenText ?? ""
-                )
-            }
-        } else {
+        // The screen OCR was started back when recording began, so by now it has
+        // almost always finished; `collect` hands it over immediately when it
+        // has, and waits out the remainder when the dictation was too short for
+        // it to land. Best-effort throughout: no capture means we proceed with
+        // cursor context only.
+        guard let capture = screenContextCapture else {
             sendForTranscription(fileURL: fileURL, context: context, screenContext: "")
+            return
         }
+        screenContextCapture = nil
+        capture.collect { [weak self] screenText in
+            guard let self = self else { return }
+            if !screenText.isEmpty {
+                AppLog.log("Captured \(screenText.count) chars of screen OCR context")
+            }
+            self.sendForTranscription(
+                fileURL: fileURL, context: context, screenContext: screenText
+            )
+        }
+    }
+
+    /// Starts the screen capture + OCR for the dictation just beginning.
+    ///
+    /// Screen context costs a screenshot, a downscale and a Vision pass. Run
+    /// when the user *stops* speaking, all of that sits between their last word
+    /// and the pasted text; run when they *start*, it happens while they are
+    /// still talking and is free by the time it is needed. The screen someone
+    /// is dictating into barely changes across the utterance, which is what
+    /// makes the earlier snapshot just as good a reference for the cleanup
+    /// model.
+    ///
+    /// Needs the Screen Recording permission and is gated by a user toggle;
+    /// leaving `screenContextCapture` nil means this dictation carries cursor
+    /// context only.
+    private func beginScreenContextCapture() {
+        screenContextCapture = nil
+        guard Preferences.shared.cleanupEnabled,
+              Preferences.shared.screenContextEnabled else { return }
+        guard ScreenContext.hasPermission else {
+            AppLog.log("Screen context enabled but Screen Recording permission missing — skipping")
+            return
+        }
+        let capture = ScreenContextCapture()
+        screenContextCapture = capture
+        ScreenContext.captureAndRecognize { capture.finish($0) }
     }
 
     private func sendForTranscription(fileURL: URL, context: String, screenContext: String) {
@@ -541,5 +570,40 @@ extension AppDelegate: NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) {
         // Refresh the learned-corrections list each time the menu opens.
         refreshCorrectionsMenu()
+    }
+}
+
+/// One screen-OCR pass, started when a dictation begins and collected when it
+/// ends — the two rarely line up, and either can come first.
+///
+/// Main-queue confined: `ScreenContext.captureAndRecognize` completes there and
+/// both ends of the dictation run there, so the state needs no lock. Delivery
+/// happens exactly once, whichever way round the race falls: a collector that
+/// arrives late is answered on the spot, one that arrives early is answered as
+/// soon as the OCR lands.
+private final class ScreenContextCapture {
+    private var text: String?
+    private var finished = false
+    private var collector: ((String) -> Void)?
+
+    /// Called by the OCR when it finishes. Nil (no permission, capture or OCR
+    /// failure, nothing legible on screen) is simply no context.
+    func finish(_ value: String?) {
+        guard !finished else { return }
+        finished = true
+        text = value
+        guard let collector = collector else { return }
+        self.collector = nil
+        collector(value ?? "")
+    }
+
+    /// Hands over the recognized words, immediately if the OCR has already
+    /// finished, otherwise as soon as it does.
+    func collect(_ completion: @escaping (String) -> Void) {
+        if finished {
+            completion(text ?? "")
+        } else {
+            collector = completion
+        }
     }
 }

@@ -29,6 +29,11 @@ internal sealed class TrayApp : IDisposable
     private readonly System.Windows.Forms.Timer _healthTimer = new();
     private System.Windows.Forms.Timer? _maxRecTimer;
 
+    /// <summary>Screen OCR for the dictation currently being recorded, started
+    /// the moment recording began. See <see cref="StartScreenCapture"/>. Null
+    /// when this dictation is not collecting screen context.</summary>
+    private Task<string>? _screenCapture;
+
     // Captured on the UI thread at construction so async continuations can
     // marshal back to it (TrayApp is not a Control and has no BeginInvoke).
     private readonly SynchronizationContext _ui;
@@ -311,6 +316,9 @@ internal sealed class TrayApp : IDisposable
         {
             _recorder = new AudioRecorder(Preferences.Instance.MicDeviceId);
             _ = _recorder.StartRecording();
+            // Kicked off before the overlay goes up, so the overlay's own words
+            // are less likely to end up in the OCR.
+            StartScreenCapture();
             CurrentState = State.Recording;
             _overlay.Show(DictationOverlay.Mode.Recording);
             _maxRecTimer?.Dispose();
@@ -354,6 +362,7 @@ internal sealed class TrayApp : IDisposable
         if (fileURL == null)
         {
             _overlay.HideOverlay();
+            _screenCapture = null;
             CurrentState = State.Idle;
             return;
         }
@@ -369,20 +378,23 @@ internal sealed class TrayApp : IDisposable
         if (context.Length > 0)
             AppLog.Log($"Captured {context.Length} chars of cursor context");
 
-        // Screen-context OCR — gated identically to the macOS app: only run
-        // when cleanup is on (the words go to the cleanup LLM) AND the user
-        // opted into screen context. Best-effort: CaptureAndRecognizeAsync
-        // returns "" on any failure, so dictation never breaks.
-        var prefs = Preferences.Instance;
+        // Screen-context OCR, started back when recording began, so by now it has
+        // almost always finished: awaiting it collects a result that is usually
+        // already sitting there, and waits out the remainder only when the
+        // dictation was too short for the capture to land. Null means this
+        // dictation is not collecting screen context at all.
         string screenContext = "";
-        if (prefs.CleanupEnabled && prefs.ScreenContextEnabled)
+        var capture = _screenCapture;
+        _screenCapture = null;
+        if (capture is not null)
         {
+            // CaptureAndRecognizeAsync swallows its own failures and returns "",
+            // so this should never throw — but StopAndTranscribe is async void,
+            // where an escaping exception takes the process with it rather than
+            // failing one dictation. Too cheap a guard to leave off.
             try
             {
-                // Off the UI thread: the capture, the downscale and the pixel copy
-                // are all synchronous, and running them here would freeze the
-                // message pump — including the overlay — for the whole capture.
-                screenContext = await Task.Run(ScreenContext.CaptureAndRecognizeAsync);
+                screenContext = await capture;
                 if (!string.IsNullOrEmpty(screenContext))
                     AppLog.Log($"Captured {screenContext.Length} chars of screen OCR context");
             }
@@ -392,6 +404,38 @@ internal sealed class TrayApp : IDisposable
             }
         }
         SendForTranscription(fileURL, context, screenContext);
+    }
+
+    /// <summary>Starts the screen capture + OCR for the dictation just beginning.
+    ///
+    /// Screen context costs a screenshot, a downscale, a pixel copy and an OCR
+    /// pass. Run when the user <i>stops</i> speaking, all of it sits between
+    /// their last word and the pasted text — which is where it used to sit, and
+    /// the dictation waited on every millisecond of it. Run when they
+    /// <i>start</i>, it happens while they are still talking and is finished by
+    /// the time anything needs it. The screen someone is dictating into barely
+    /// changes across one utterance, which is what makes the earlier snapshot
+    /// just as good a reference for the cleanup model.
+    ///
+    /// Gated exactly as before: the words go to the cleanup LLM, so there is no
+    /// point capturing them with cleanup switched off. Leaving
+    /// <c>_screenCapture</c> null means this dictation carries cursor context
+    /// only.</summary>
+    private void StartScreenCapture()
+    {
+        _screenCapture = null;
+        var prefs = Preferences.Instance;
+        if (!prefs.CleanupEnabled || !prefs.ScreenContextEnabled) return;
+
+        // Off the UI thread: the capture, the downscale and the pixel copy are
+        // all synchronous, and running them here would freeze the message pump —
+        // including the overlay that is about to appear.
+        //
+        // The task is deliberately not awaited here. An abandoned one (the user
+        // cancels, or the clip has no audio) needs no observation:
+        // CaptureAndRecognizeAsync catches everything and returns "", so it
+        // cannot fault and leave an unobserved exception behind.
+        _screenCapture = Task.Run(ScreenContext.CaptureAndRecognizeAsync);
     }
 
     private void SendForTranscription(string wavPath, string context, string screenContext)

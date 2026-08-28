@@ -19,11 +19,19 @@ import Vision
 /// *not* return nil), so we preflight with `CGPreflightScreenCaptureAccess`
 /// and soft-fail (return nil) when permission is missing.
 enum ScreenContext {
-    /// Max edge length (pixels) we downscale the capture to before OCR. A full
-    /// Retina screenshot can be ~5K–6K pixels; Vision `.fast` on that is slow,
-    /// and we only need legible words, so we shrink to ~1600px which keeps text
-    /// crisp enough while cutting pixel count ~10x.
-    private static let maxCaptureEdge: CGFloat = 1600
+    /// Max edge length (pixels) we downscale the capture to before OCR.
+    ///
+    /// This was 1600px, chosen to keep a `.fast` pass cheap, and it was the
+    /// single biggest cause of unusable OCR: UI text at that scale is too small
+    /// to read, and the recognizer guessed. Measured on a 3420x2214 capture,
+    /// only 49% of its 4+ letter words were real words, with 21 tokens carrying
+    /// a digit or symbol substituted mid-word ("pa1r", "fr&sh", "invalldArant")
+    /// and 16 run together with their neighbours ("restartfromdlsk").
+    ///
+    /// At 2400px those collapse to 0 and 2 — for the same time or slightly less,
+    /// because a clearer image is less work to recognize, not more. Going beyond
+    /// 2400 (measured to native 3400) buys nothing further.
+    private static let maxCaptureEdge: CGFloat = 2400
 
     /// True if Screen Recording permission has already been granted.
     static var hasPermission: Bool { CGPreflightScreenCaptureAccess() }
@@ -57,19 +65,23 @@ enum ScreenContext {
     /// recognized words joined by spaces. Best-effort: returns nil on any
     /// failure (no permission, capture failed, OCR failed, no text found).
     /// Completion is called on the main queue.
+    ///
+    /// The screenshot and the downscale run on the background queue alongside
+    /// the OCR, not on the caller's thread. This is called the instant
+    /// dictation starts, when the main thread's next job is putting the
+    /// recording overlay on screen, and a full Retina capture is not free.
     static func captureAndRecognize(completion: @escaping (String?) -> Void) {
         guard hasPermission else {
             completion(nil)
             return
         }
         let displayID = CGMainDisplayID()
-        guard let fullImage = CGDisplayCreateImage(displayID) else {
-            completion(nil)
-            return
-        }
-        let scaled = downscale(fullImage, maxEdge: maxCaptureEdge)
         DispatchQueue.global(qos: .userInitiated).async {
-            let words = recognizeText(in: scaled)
+            guard let fullImage = CGDisplayCreateImage(displayID) else {
+                DispatchQueue.main.async { completion(nil) }
+                return
+            }
+            let words = recognizeText(in: downscale(fullImage, maxEdge: maxCaptureEdge))
             DispatchQueue.main.async {
                 completion(words)
             }
@@ -82,7 +94,17 @@ enum ScreenContext {
     /// joined by spaces, or nil if nothing was recognized.
     private static func recognizeText(in image: CGImage) -> String? {
         let request = VNRecognizeTextRequest()
-        request.recognitionLevel = .fast
+        // `.accurate`, not `.fast`. The prompt licenses the model to re-spell a
+        // transcript word to match a name or identifier it finds in SCREEN, so
+        // a garbled capture is not merely unhelpful — it is a source of wrong
+        // corrections. Accuracy is what this input is *for*.
+        //
+        // It costs ~0.45s more than `.fast` (0.70s against 0.26s on a 3420x2214
+        // capture), which used to be unaffordable when OCR ran between the
+        // user's last word and their pasted text. It no longer does: the capture
+        // starts when recording starts and finishes while they are still
+        // speaking, so the cost lands in time that was being spent anyway.
+        request.recognitionLevel = .accurate
         request.recognitionLanguages = ["en-US"]
 
         let handler = VNImageRequestHandler(cgImage: image, options: [:])

@@ -36,10 +36,21 @@ namespace SunoFlow;
 internal static class ScreenContext
 {
     /// Max edge (px) we downscale the capture to before OCR. Matches the macOS
-    /// <c>maxCaptureEdge</c> (1600) — a full HiDPI screenshot is ~3-4K px; OCR on
-    /// that is slow, and we only need legible words, so shrink to 1600px which
-    /// keeps text crisp while cutting pixel count ~10x.
-    private const int MaxCaptureEdge = 1600;
+    /// <c>maxCaptureEdge</c>.
+    ///
+    /// This was 1600, picked to keep the OCR pass cheap when it ran between the
+    /// user's last word and their pasted text. It no longer runs there — the
+    /// capture starts with the recording (see TrayApp.StartScreenCapture) — so
+    /// the reason to keep the image small is gone, and 1600px was costing real
+    /// accuracy: on a 3420x2214 macOS capture, shrinking that far left UI text
+    /// too small to read and only 49% of its 4+ letter words were real words,
+    /// against 76-79% at 2400.
+    ///
+    /// That measurement is Apple's Vision engine, not Windows.Media.Ocr, so
+    /// treat the size of the win here as unverified — but the cause (text
+    /// rendered too small to recognise) is not engine-specific, and the extra
+    /// pixels are free now that nobody is waiting on them.
+    private const int MaxCaptureEdge = 2400;
 
     /// <summary>
     /// Captures the primary display, runs on-device OCR, and returns the
