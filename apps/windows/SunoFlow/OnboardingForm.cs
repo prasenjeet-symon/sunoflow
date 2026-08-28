@@ -108,9 +108,35 @@ internal sealed class OnboardingForm : Form
     {
         base.OnShown(e);
         Application.AddMessageFilter(_wheel);
+
+        // Lay the page out again now that the window actually exists.
+        //
+        // The first pass runs from the constructor, where there is no handle and
+        // no monitor yet, so every height in the page was measured against the
+        // wrong DPI — or, if the host had no usable width at that moment, never
+        // measured at all. Nothing else would fix it afterwards: the only other
+        // trigger is _host.SizeChanged, and a lone Fill-docked host inside a
+        // fixed-size window never changes size again, so the page would stay
+        // exactly as mismeasured as it was built. That is the blank first-run
+        // window: controls present, all of them zero-height.
+        //
+        // Cheap and idempotent, so it costs nothing when the constructor pass
+        // happened to get it right.
+        Relayout();
+
         _healthTimer.Start();
         _ = PollHealth();
         _ = PollModel();
+    }
+
+    protected override void OnDpiChanged(DpiChangedEventArgs e)
+    {
+        base.OnDpiChanged(e);
+        // Dragged to a monitor at a different scale. WinForms rescales child
+        // bounds proportionally, but these heights are not proportional — they
+        // come from TextRenderer measuring wrapped text at a specific font size.
+        // Measuring again is the only way to get them right.
+        Relayout();
     }
 
     protected override void OnFormClosed(FormClosedEventArgs e)

@@ -174,6 +174,15 @@ internal class Stack : Panel, IReflow
     /// <summary>Total height of the laid-out children, including padding.</summary>
     public int ContentHeight { get; private set; }
 
+    /// <summary>Whether a real layout pass has ever completed.
+    ///
+    /// False means ContentHeight is not an answer, it is just the initial zero.
+    /// Reflow has to know the difference: applying that zero as a Height turns a
+    /// stack that merely has not been measured yet into one that is invisible,
+    /// and there is no error anywhere to explain the blank window that follows.
+    /// </summary>
+    private bool _measured;
+
     private bool _laying;
 
     protected override void OnLayout(LayoutEventArgs e)
@@ -184,6 +193,9 @@ internal class Stack : Panel, IReflow
         // nested one rather than paying for a cascade on every resize.
         if (_laying) return;
         int available = ClientSize.Width - Padding.Horizontal;
+        // No width to lay out against — before the handle exists, or mid-resize.
+        // Leave ContentHeight alone and stay unmeasured; a later pass with a real
+        // width is what produces an answer.
         if (available <= 0) return;
         _laying = true;
         try
@@ -202,6 +214,7 @@ internal class Stack : Panel, IReflow
                 y += child.Height + child.Margin.Bottom;
             }
             ContentHeight = y + Padding.Bottom;
+            _measured = true;
         }
         finally { _laying = false; }
     }
@@ -210,7 +223,9 @@ internal class Stack : Panel, IReflow
     {
         if (Width != width) Width = width;
         PerformLayout();
-        if (Height != ContentHeight) Height = ContentHeight;
+        // Only apply a height we actually measured. Collapsing to an unmeasured
+        // ContentHeight is how a page renders as a blank sheet.
+        if (_measured && Height != ContentHeight) Height = ContentHeight;
     }
 
     /// <summary>Adds children in reading order and returns the stack, so a page
