@@ -59,11 +59,34 @@ type cached struct {
 	at  time.Time
 }
 
+// DecisionTTL is how long an entitlement decision is reused before the gateway
+// asks Firestore again.
+//
+// This sits on the critical path of every dictation, between the user's last
+// word and their pasted text, so the value is a latency decision as much as a
+// security one. It used to be 60s, which sounded prudent and was not: measured
+// against real traffic, the median gap between one dictation and the next is
+// ~124s, so 70% of dictations missed the cache and paid a live Firestore read —
+// p50 3437ms on a miss against 1131ms on a hit. That ~2.3s was the single
+// largest cost in the whole pipeline, larger than the Gemini call it wrapped.
+//
+// Widening it costs nothing that was actually being protected. A device that
+// loses entitlement keeps dictating for up to LeaseTTL (72h) anyway on its
+// signed offline lease, so a 60s cache was never the thing bounding revocation
+// — it was two orders of magnitude tighter than the guarantee the product
+// actually makes. Revokes that need to be immediate call Forget.
+const DecisionTTL = 15 * time.Minute
+
 // Resolver answers "who is this and may they use the service?", caching results
 // briefly so a busy device does not cost a Firestore read per dictation.
 type Resolver struct {
 	fs  *firestore.Client
 	ttl time.Duration
+
+	// lookup resolves a key ID against Firestore. Held as a field, rather than
+	// called as a method, purely so the cache can be tested without standing up
+	// a Firestore emulator — production always wires it to (*Resolver).lookup.
+	lookupFn func(ctx context.Context, keyID string) (Resolution, error)
 
 	mu    sync.RWMutex
 	cache map[string]cached
@@ -92,14 +115,16 @@ func New(ctx context.Context, projectID, credentialsFile string) (*Resolver, err
 }
 
 func newWithClient(fs *firestore.Client) *Resolver {
-	return &Resolver{
+	r := &Resolver{
 		fs:       fs,
-		ttl:      60 * time.Second,
+		ttl:      DecisionTTL,
 		cache:    map[string]cached{},
 		lastSeen: map[string]time.Time{},
 		seenGap:  5 * time.Minute,
 		now:      time.Now,
 	}
+	r.lookupFn = r.lookup
+	return r
 }
 
 func (r *Resolver) Close() error { return r.fs.Close() }
@@ -122,7 +147,7 @@ func (r *Resolver) Resolve(ctx context.Context, plaintext string) (Resolution, e
 	}
 	r.mu.RUnlock()
 
-	res, err := r.lookup(ctx, id)
+	res, err := r.lookupFn(ctx, id)
 	if err != nil {
 		return Resolution{}, err
 	}

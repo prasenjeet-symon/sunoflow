@@ -52,7 +52,7 @@ func main() {
 			BaseURL:       cfg.GeminiURL,
 			Timeout:       cfg.GeminiTimeout,
 			ThinkingLevel: cfg.GeminiThinking,
-			Client:        &http.Client{Timeout: cfg.GeminiTimeout + 5*time.Second},
+			Client:        backend.NewHTTPClient(cfg.GeminiTimeout + 5*time.Second),
 		}
 	default:
 		logger.Error("unsupported backend", "backend", cfg.Backend)
