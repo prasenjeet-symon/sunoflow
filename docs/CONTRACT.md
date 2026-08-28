@@ -37,14 +37,28 @@ status dot.
 {
   "status": "ok",
   "model_loaded": true,
-  "model_present": true
+  "model_present": true,
+  "load_error": ""
 }
 ```
 | Field | Type | Meaning |
 |---|---|---|
 | `status` | string | Always `"ok"`. |
-| `model_loaded` | bool | True iff the STT model is resident in memory and ready to transcribe. |
+| `model_loaded` | bool | True iff the STT model is resident in memory **and has been proven to run** — see below. |
 | `model_present` | bool | True iff all model files exist on disk (may be present but not yet loaded). |
+| `load_error` | string | Why the last load attempt failed; empty when it succeeded or the model was never downloaded. |
+
+`model_loaded` means *usable*, not merely *constructed*. Where an engine can
+build a session that then throws on its first inference — a missing or reset
+DirectML device, weights truncated by a full disk — the adapter must verify with
+a real forward pass before reporting loaded. Without that the client shows a
+ready engine that answers every dictation with an empty transcript.
+
+`load_error` is carried here as well as on `/model/status` so the client's
+always-on health poll can tell "not downloaded yet" (`model_present` false,
+`load_error` empty) from "downloaded, but it will not start" (`model_present`
+true, `load_error` set) without a second request. The two need different words
+and different remedies.
 
 The client treats HTTP 200 as "sidecar alive"; it does not inspect the fields for
 the status dot (only for the Model tab).
@@ -309,7 +323,9 @@ Report STT model presence, load state, and download progress.
   "overall_total": 0,
   "error": "",
   "model_dir": "/Users/.../parakeet-tdt-0.6b-v3",
-  "model_id": "mlx-community/parakeet-tdt-0.6b-v3"
+  "model_id": "mlx-community/parakeet-tdt-0.6b-v3",
+  "load_error": "",
+  "runtime": "GPU (DirectML)"
 }
 ```
 | Field | Type | Meaning |
@@ -323,9 +339,26 @@ Report STT model presence, load state, and download progress.
 | `file_total` | int64 | Total bytes for `current_file`. |
 | `overall_done` | int | Count of files completed in this download. |
 | `overall_total` | int | Count of files in the model. |
-| `error` | string | Last download error, empty if none. |
+| `error` | string | Last **download** error, empty if none. |
 | `model_dir` | string | Absolute path to the on-disk model directory. |
 | `model_id` | string | Source HF model id (for display). |
+| `load_error` | string | Last **load** error, empty if none. |
+| `runtime` | string | Compute path inference was verified on, e.g. `GPU (DirectML)` / `CPU`. Empty when unknown. |
+
+`error` and `load_error` are deliberately separate. `error` is about fetching
+the files and its remedy is to download again; `load_error` is about starting
+files that already downloaded fine, where re-fetching 2.5 GB cannot help. A
+client must not offer "Download again" for a `load_error`.
+
+`runtime` exists so the client can stop asserting where transcription happens.
+The Windows adapter falls back from DirectML to CPU when no DX12 GPU is
+available — a large latency difference the user should be told about rather than
+read the opposite of on the dashboard.
+
+Before a download starts, an adapter should refuse one that cannot fit on disk
+(reported through `error`, phase `error`). Filling the disk part-way through
+does not merely waste the transfer: it truncates the external weights file,
+which then loads cleanly and fails on first inference.
 
 `model_id` and `model_dir` are platform-specific (mac shows the mlx-community id;
 Windows shows the onnx export id). The client displays them read-only.

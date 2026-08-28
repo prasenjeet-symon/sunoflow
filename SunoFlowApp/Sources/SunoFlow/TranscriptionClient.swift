@@ -137,7 +137,7 @@ enum TranscriptionClient {
     /// Base URL of the hosted cleanup gateway (transcript polishing service).
     /// The gateway owns the cleanup instruction and LLM backend; the app only
     /// probes its `/ready` for the settings connectivity status.
-    static let gatewayURL = URL(string: "https://cleanup.mirrorli.art")!
+    static let gatewayURL = URL(string: "http://162.19.81.108:40009")!
 
     static func health(completion: @escaping (Bool) -> Void) {
         var request = URLRequest(url: baseURL.appendingPathComponent("health"))

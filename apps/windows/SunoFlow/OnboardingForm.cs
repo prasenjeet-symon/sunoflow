@@ -59,6 +59,11 @@ internal sealed class OnboardingForm : Form
 
     private bool _sidecarOnline;
     private bool _modelLoaded;
+    /// <summary>Why the model would not start, or null. Setup used to have no
+    /// state for this: the download reported nothing wrong, nothing was loaded,
+    /// and the wizard sat on "Starting the download…" indefinitely.</summary>
+    private string? _modelLoadError;
+    private SunoButton? _retryModel;
     private TranscriptionClient.ModelStatus? _modelStatus;
     private bool _downloadRequested;
 
@@ -189,6 +194,7 @@ internal sealed class OnboardingForm : Form
         _stepStatus = null;
         _levelMeter = null;
         _tryBox = null;
+        _retryModel = null;
         ClearAndDispose(_content);
 
         BuildChrome(step);
@@ -489,6 +495,14 @@ internal sealed class OnboardingForm : Form
         _stepNote = new TextBlock("Checking…", Theme.Caption, Theme.Faint)
         { Margin = new Padding(0, 0, 0, 12) };
         _content.Controls.Add(_stepNote);
+
+        // Its own button rather than relabelling Continue. The footer binds its
+        // action once at build time, so the old "Try again" label sat on a
+        // button that still advanced the wizard — the one thing the user was
+        // not asking for at the moment something had just failed.
+        _retryModel = new SunoButton("Try again", ButtonKind.Primary) { Visible = false };
+        _retryModel.Click += (s, e) => RetryModel();
+        _content.Controls.Add(_retryModel);
         _content.Controls.Add(new RuleLine(strong: true));
 
         AddFooter("Continue", () => ShowStep(Step.TryIt),
@@ -595,6 +609,27 @@ internal sealed class OnboardingForm : Form
         Close();
     }
 
+    /// <summary>Shows or hides the retry button, and relayouts when it changed.</summary>
+    private void ShowRetry(bool visible)
+    {
+        if (_retryModel == null || _retryModel.Visible == visible) return;
+        _retryModel.Visible = visible;
+        Relayout();
+    }
+
+    /// <summary>Re-runs the download, which for files already on disk is just a
+    /// re-run of the load — the retry a "won't start" model actually needs.</summary>
+    private void RetryModel()
+    {
+        _downloadRequested = false;
+        _modelLoadError = null;
+        ShowRetry(false);
+        _progressValue?.Set("Starting…", Theme.Body);
+        _stepNote?.SetText("Trying again…");
+        StartModelDownloadOnce();
+        _modelTimer.Start();
+    }
+
     /// <summary>Kick the download off as early as we are allowed to, which is
     /// as soon as there is an account. Idempotent: the sidecar refuses a second
     /// start, and this guards against asking on every page build anyway.</summary>
@@ -675,6 +710,7 @@ internal sealed class OnboardingForm : Form
         {
             _sidecarOnline = health != null;
             _modelLoaded = health?.ModelLoaded ?? false;
+            _modelLoadError = string.IsNullOrWhiteSpace(health?.LoadError) ? null : health!.LoadError;
             if (_step == Step.Setup) RefreshSetup();
             // An account connected on another step should still start the
             // download the moment the engine comes up.
@@ -703,6 +739,7 @@ internal sealed class OnboardingForm : Form
             _progressValue?.Set("Ready", Theme.Success);
             _stepNote?.SetText("Speech recognition is ready on this PC.");
             if (_primary != null) _primary.Enabled = true;
+            ShowRetry(false);
             _modelTimer.Stop();
             return;
         }
@@ -711,11 +748,13 @@ internal sealed class OnboardingForm : Form
         {
             _progressValue?.Set("Waiting", Theme.Warning);
             _stepNote?.SetText("Waiting for the speech engine to start…");
+            ShowRetry(false);
             return;
         }
 
         if (st is { Active: true })
         {
+            ShowRetry(false);
             _progress.SetProgress(st.Downloaded, Math.Max(st.FileTotal, 1));
             _progressValue?.Set($"{st.OverallDone} of {st.OverallTotal}", Theme.Accent);
             _stepNote?.SetText(st.Phase == "loading"
@@ -726,21 +765,33 @@ internal sealed class OnboardingForm : Form
             return;
         }
 
+        // A model that arrived intact and then refused to start. Checked before
+        // the download error, because the download did not fail — and before the
+        // fall-through below, which would otherwise sit on "Starting the
+        // download…" forever over a download that finished long ago.
+        string? loadError = _modelLoadError ?? (st is { LoadFailed: true } ? st.LoadError : null);
+        if (loadError != null)
+        {
+            _progressValue?.Set("Won't start", Theme.Danger);
+            _stepNote?.SetText($"The model downloaded, but the engine could not start it. {loadError} "
+                               + "Try again, or finish setup and sort this out from the dashboard.");
+            ShowRetry(true);
+            _modelTimer.Stop();
+            return;
+        }
+
         if (st != null && (st.Phase == "error" || !string.IsNullOrEmpty(st.Error)))
         {
             _progressValue?.Set("Failed", Theme.Danger);
             _stepNote?.SetText(string.IsNullOrEmpty(st.Error)
                 ? "The download failed. Check your connection and try again."
                 : st.Error);
-            if (_primary != null)
-            {
-                _primary.SetText("Try again");
-                _primary.Enabled = true;
-            }
-            _downloadRequested = false;
+            ShowRetry(true);
+            _modelTimer.Stop();
             return;
         }
 
+        ShowRetry(false);
         _progressValue?.Set("Starting…", Theme.Body);
         _stepNote?.SetText("Starting the download…");
         _modelTimer.Start();

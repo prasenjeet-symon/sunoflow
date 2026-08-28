@@ -33,6 +33,22 @@ class SttAdapter:
     or touches the on-disk model directory directly.
     """
 
+    #: Why the last :meth:`load` failed; empty when it succeeded or was never
+    #: attempted. Without this a model that is on disk but cannot start looks
+    #: to the client exactly like one that was never downloaded, and the only
+    #: trace of the real cause is a log nobody opens. Adapters set it in
+    #: :meth:`load`; the app factory backstops it if they don't.
+    load_error: str = ""
+
+    def runtime_label(self) -> str:
+        """Human name for the compute path inference actually runs on, once
+        loaded — e.g. ``"GPU (DirectML)"`` or ``"CPU"``. Empty when unknown.
+
+        The client states where transcription happens; a silent fall back to a
+        far slower path should change what it says.
+        """
+        return ""
+
     def is_loaded(self) -> bool:
         """True iff the STT model is resident in memory and ready to transcribe."""
         raise NotImplementedError
@@ -45,8 +61,13 @@ class SttAdapter:
         """Load the model into memory. Called at startup and after a download.
 
         Must be idempotent and must set whatever state ``is_loaded`` reads.
-        Soft-fail: on error, leave the model unloaded (the app still serves
-        /health and /model/status; /transcribe returns empty).
+        Must leave the model unloaded on failure, set :attr:`load_error` to the
+        reason, and re-raise — callers decide whether that is fatal (the app
+        still serves /health and /model/status; /transcribe returns empty).
+
+        ``is_loaded`` must mean *usable*, not merely *constructed*: where an
+        engine can build a session that then fails on its first inference,
+        verify with a real forward pass before publishing the model.
         """
         raise NotImplementedError
 
@@ -93,6 +114,13 @@ def create_app(adapter: SttAdapter, corrections_path: str) -> FastAPI:
             # the HF cache is empty / offline), don't crash the whole sidecar —
             # the user can trigger a download from the dashboard and we'll load
             # on demand.
+            #
+            # Recorded, not merely printed. A startup load failure with the
+            # files already on disk is the one case the dashboard used to have
+            # no words for: it saw "present, not loaded" and offered to restart
+            # an engine that was already running.
+            if not adapter.load_error:
+                adapter.load_error = str(exc)
             print(f"Could not load model at startup: {exc}")
         yield
 
@@ -104,6 +132,10 @@ def create_app(adapter: SttAdapter, corrections_path: str) -> FastAPI:
             "status": "ok",
             "model_loaded": adapter.is_loaded(),
             "model_present": adapter.is_present(),
+            # Carried on the liveness probe as well as /model/status so the
+            # client's always-on health poll can tell "not downloaded yet" from
+            # "downloaded, but it will not start" without a second request.
+            "load_error": adapter.load_error,
         }
 
     class NotEntitledResponse(JSONResponse):
@@ -257,6 +289,12 @@ def create_app(adapter: SttAdapter, corrections_path: str) -> FastAPI:
             "error": snap.get("error", ""),
             "model_dir": snap.get("model_dir", ""),
             "model_id": snap.get("model_id", ""),
+            # Distinct from ``error``: that one is about fetching the files,
+            # this one about starting them. By the time a load fails the
+            # download has already succeeded, and telling the user to download
+            # 2.5 GB again would not fix it.
+            "load_error": adapter.load_error,
+            "runtime": adapter.runtime_label(),
         }
 
     @app.post("/model/download")

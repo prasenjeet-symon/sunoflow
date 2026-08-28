@@ -46,6 +46,12 @@ internal sealed class TrayApp : IDisposable
     // clip with an empty transcript.
     private bool _modelLoaded;
 
+    /// <summary>Why the model would not start, or null. "Present but broken" and
+    /// "never downloaded" both leave <see cref="_modelLoaded"/> false, and the
+    /// tray used to tell both of them to download a model — advice that is
+    /// simply wrong for the first, whose 2.5 GB is already on disk.</summary>
+    private string? _modelLoadError;
+
     /// <summary>The running tray app. The dashboard reads it to start the engine
     /// and to ask whether starting it is even possible on this install.</summary>
     internal static TrayApp? Shared { get; private set; }
@@ -99,7 +105,14 @@ internal sealed class TrayApp : IDisposable
             ToggleRecording();
         };
         var prefs = Preferences.Instance;
-        _hotkey.Register(prefs.HotkeyCode, prefs.HotkeyModifiers);
+        // Logged either way. A shortcut another app already owns fails here and
+        // then does nothing for the rest of the session; the dashboard now shows
+        // that, and the log is where it can be traced back to startup.
+        if (!_hotkey.Register(prefs.HotkeyCode, prefs.HotkeyModifiers))
+        {
+            AppLog.Log($"Hotkey {KeyCombo.Display(prefs.HotkeyCode, prefs.HotkeyModifiers)} "
+                       + "is owned by another app — dictation shortcut inactive");
+        }
 
         // In installed mode (frozen sidecar present), spawn it now so the user
         // doesn't have to launch it separately. In dev mode this is a no-op and
@@ -121,8 +134,13 @@ internal sealed class TrayApp : IDisposable
                 e.PropertyName == nameof(Preferences.HotkeyModifiers))
             {
                 var p = Preferences.Instance;
-                _hotkey.Reregister(p.HotkeyCode, p.HotkeyModifiers);
-                AppLog.Log($"Hotkey re-registered: {KeyCombo.Display(p.HotkeyCode, p.HotkeyModifiers)}");
+                var combo = KeyCombo.Display(p.HotkeyCode, p.HotkeyModifiers);
+                // The result matters: RegisterHotKey fails outright when another
+                // app already owns the combination, and the log claiming success
+                // either way was the only place this could have been noticed.
+                AppLog.Log(_hotkey.Reregister(p.HotkeyCode, p.HotkeyModifiers)
+                    ? $"Hotkey re-registered: {combo}"
+                    : $"Hotkey {combo} is owned by another app — dictation shortcut inactive");
                 UpdateHotkeyLabels();
             }
         };
@@ -238,6 +256,7 @@ internal sealed class TrayApp : IDisposable
             // Tracked even mid-dictation: a download that finishes while the
             // user is talking should unblock the next press, not the one after.
             _modelLoaded = health?.ModelLoaded ?? false;
+            _modelLoadError = string.IsNullOrWhiteSpace(health?.LoadError) ? null : health!.LoadError;
             if (CurrentState is State.Recording or State.Processing) return;
             if (health != null)
             {
@@ -303,8 +322,18 @@ internal sealed class TrayApp : IDisposable
         if (!_modelLoaded)
         {
             SystemSounds.Beep.Play();
-            AppLog.Log("Dictation blocked — speech model not downloaded");
-            _lastItem.Text = "Download the speech model to dictate";
+            if (_modelLoadError != null)
+            {
+                // Downloaded, and it will not start. Sending this user to
+                // "download the model" is advice they have already taken.
+                AppLog.Log($"Dictation blocked — speech model failed to load: {_modelLoadError}");
+                _lastItem.Text = "The speech model won't start";
+            }
+            else
+            {
+                AppLog.Log("Dictation blocked — speech model not downloaded");
+                _lastItem.Text = "Download the speech model to dictate";
+            }
             OpenSettings(onModelPage: true);
             return;
         }
@@ -541,8 +570,12 @@ internal sealed class TrayApp : IDisposable
             State.SidecarOffline => "Status: sidecar offline (start the sidecar)",
             State.Idle when AccountManager.Shared.DeviceKey == null
                 => "Status: connect your account to dictate",
+            State.Idle when !_modelLoaded && _modelLoadError != null
+                => "Status: the speech model won't start — open the dashboard",
             State.Idle when !_modelLoaded
                 => "Status: download the speech model to dictate",
+            State.Idle when !_hotkey.IsRegistered
+                => $"Status: {HotkeyLabel} is taken by another app — pick a new shortcut",
             State.Idle => $"Status: idle — press {HotkeyLabel} to dictate",
             State.Recording => $"Status: recording… press {HotkeyLabel} to stop",
             State.Processing => "Status: transcribing…",

@@ -148,6 +148,15 @@ def test_status_snapshot_shape():
     assert snap["model_dir"] == MODEL_DIR
 
 
+def test_fresh_adapter_reports_no_load_error_and_no_runtime():
+    """Nothing has been attempted yet, so neither field may claim otherwise —
+    an empty load_error is what lets the client say "not downloaded" rather
+    than inventing a failure."""
+    a = ParakeetOnnxAdapter()
+    assert a.load_error == ""
+    assert a.runtime_label() == ""
+
+
 def test_run_download_counts_existing_files(monkeypatch, tmp_path):
     """Files already on disk are skipped but still counted in overall_done —
     this is what makes a resumed download report correct progress."""
@@ -157,6 +166,9 @@ def test_run_download_counts_existing_files(monkeypatch, tmp_path):
         (tmp_path / f).write_bytes(b"x")
 
     a = ParakeetOnnxAdapter()
+    # Pin the space preflight: what this test is about is the resume count, and
+    # leaving it live would make the result depend on the host's free disk.
+    monkeypatch.setattr(a, "_disk_shortfall", lambda: "")
     # Stub _download_file to record calls (should only happen for the missing files).
     downloaded = []
     def fake_dl(url, dest):
@@ -180,6 +192,7 @@ def test_run_download_records_error(monkeypatch, tmp_path):
     monkeypatch.setattr("sidecars.windows.adapter.MODEL_DIR", str(tmp_path))
 
     a = ParakeetOnnxAdapter()
+    monkeypatch.setattr(a, "_disk_shortfall", lambda: "")
     def boom(url, dest):
         raise RuntimeError("network down")
     monkeypatch.setattr(a, "_download_file", boom)
@@ -253,6 +266,7 @@ def test_load_failure_after_download_is_not_reported_as_a_download_failure(tmp_p
         (tmp_path / f).write_bytes(b"x")
 
     a = ParakeetOnnxAdapter()
+    monkeypatch.setattr(a, "_disk_shortfall", lambda: "")
     # Every file is already present, so the download loop is a no-op and the
     # only thing left to fail is the load.
     monkeypatch.setattr(
@@ -271,3 +285,198 @@ def test_load_failure_after_download_is_not_reported_as_a_download_failure(tmp_p
     # And every file is still counted as fetched, so the client can offer
     # "start the engine" rather than "download it all again".
     assert snap["overall_done"] == len(MODEL_FILES)
+
+
+# --- load() proves the model can actually run ---------------------------------
+
+def _install_fake_engine(monkeypatch, *, recognize, providers=None):
+    """Inject a fake onnx_asr + onnxruntime so load() runs without the deps.
+
+    ``recognize`` is the callable the fake model exposes — the hook the smoke
+    pass goes through, and therefore the hook for making inference fail.
+    """
+    import sys, types
+    fake_asr = types.ModuleType("onnx_asr")
+    fake_rt = types.ModuleType("onnxruntime")
+
+    class _FakeModel:
+        def recognize(self, path):
+            return recognize(path)
+
+    fake_asr.load_model = lambda model_id, path=None, providers=None: _FakeModel()
+    fake_rt.get_available_providers = lambda: (
+        providers if providers is not None
+        else ["DmlExecutionProvider", "CPUExecutionProvider"]
+    )
+    monkeypatch.setitem(sys.modules, "onnx_asr", fake_asr)
+    monkeypatch.setitem(sys.modules, "onnxruntime", fake_rt)
+
+
+def _present_model_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr("sidecars.windows.adapter.MODEL_DIR", str(tmp_path))
+    for f in MODEL_FILES:
+        (tmp_path / f).write_bytes(b"x")
+
+
+def test_load_runs_a_real_clip_through_the_model(tmp_path, monkeypatch):
+    """Sessions that construct are not sessions that run — so load() must put
+    audio through the model before it calls it loaded."""
+    _present_model_dir(tmp_path, monkeypatch)
+    seen = []
+
+    def recognize(path):
+        # A readable 16 kHz mono WAV of real length, not a placeholder: this is
+        # the whole point of the pass.
+        import wave
+        with wave.open(path, "rb") as w:
+            seen.append((w.getnchannels(), w.getsampwidth(), w.getframerate(),
+                         w.getnframes()))
+        return ""
+
+    _install_fake_engine(monkeypatch, recognize=recognize)
+    a = ParakeetOnnxAdapter()
+    a.load()
+
+    assert len(seen) == 1, "load() must verify with exactly one forward pass"
+    channels, width, rate, frames = seen[0]
+    assert (channels, width, rate) == (1, 2, 16000)
+    assert frames / rate >= 0.5, "clip too short to exercise the encoder"
+    assert a.is_loaded() is True
+    assert a.load_error == ""
+
+
+def test_load_rejects_a_model_that_loads_but_cannot_run(tmp_path, monkeypatch):
+    """The failure this exists for: DirectML gone, weights truncated. The
+    session builds, the first Run throws. Reporting that model as ready made
+    every dictation paste nothing, silently and forever."""
+    _present_model_dir(tmp_path, monkeypatch)
+    _install_fake_engine(
+        monkeypatch,
+        recognize=lambda path: (_ for _ in ()).throw(
+            RuntimeError("D3D12 device removed")),
+    )
+
+    a = ParakeetOnnxAdapter()
+    with pytest.raises(RuntimeError):
+        a.load()
+
+    assert a.is_loaded() is False, "a model that cannot run must not read as loaded"
+    assert "D3D12 device removed" in a.load_error
+    assert a.runtime_label() == ""
+
+
+def test_load_records_why_it_failed_and_strips_urls(tmp_path, monkeypatch):
+    _present_model_dir(tmp_path, monkeypatch)
+    _install_fake_engine(
+        monkeypatch,
+        recognize=lambda path: (_ for _ in ()).throw(
+            Exception("fetch of https://huggingface.co/secret/path failed")),
+    )
+
+    a = ParakeetOnnxAdapter()
+    with pytest.raises(Exception):
+        a.load()
+
+    assert "huggingface.co" not in a.load_error
+    assert "[model URL]" in a.load_error
+
+
+def test_missing_files_are_not_recorded_as_a_load_error(tmp_path, monkeypatch):
+    """"Nothing downloaded yet" is a different state from "it will not start",
+    and the dashboard shows a Download button for one and an error for the
+    other."""
+    monkeypatch.setattr("sidecars.windows.adapter.MODEL_DIR", str(tmp_path / "empty"))
+    a = ParakeetOnnxAdapter()
+    a.load()
+    assert a.load_error == ""
+
+
+def test_load_reports_the_runtime_it_verified_on(tmp_path, monkeypatch):
+    _present_model_dir(tmp_path, monkeypatch)
+    _install_fake_engine(monkeypatch, recognize=lambda path: "")
+    a = ParakeetOnnxAdapter()
+    a.load()
+    assert a.runtime_label() == "GPU (DirectML)"
+
+
+def test_load_reports_cpu_when_directml_is_absent(tmp_path, monkeypatch):
+    """The dashboard states transcription runs on the GPU. On a box without
+    DirectML it silently doesn't, and the user is owed that fact."""
+    _present_model_dir(tmp_path, monkeypatch)
+    _install_fake_engine(monkeypatch, recognize=lambda path: "",
+                         providers=["CPUExecutionProvider"])
+    a = ParakeetOnnxAdapter()
+    a.load()
+    assert a.runtime_label() == "CPU"
+
+
+def test_a_second_load_clears_a_previous_failure(tmp_path, monkeypatch):
+    """Retry has to be able to succeed — a stale load_error would leave the
+    dashboard showing an error over a working model."""
+    _present_model_dir(tmp_path, monkeypatch)
+    _install_fake_engine(
+        monkeypatch,
+        recognize=lambda path: (_ for _ in ()).throw(RuntimeError("out of memory")),
+    )
+    a = ParakeetOnnxAdapter()
+    with pytest.raises(RuntimeError):
+        a.load()
+    assert a.load_error
+
+    _install_fake_engine(monkeypatch, recognize=lambda path: "")
+    a.load()
+    assert a.load_error == ""
+    assert a.is_loaded() is True
+
+
+# --- Disk space preflight -----------------------------------------------------
+
+def test_disk_shortfall_blocks_a_download_that_cannot_fit(monkeypatch, tmp_path):
+    """Running out of disk mid-download truncates the external weights file,
+    which then loads clean and fails on first inference — so refuse up front."""
+    monkeypatch.setattr("sidecars.windows.adapter.MODEL_DIR", str(tmp_path))
+    import collections
+    usage = collections.namedtuple("usage", "total used free")
+    monkeypatch.setattr("sidecars.windows.adapter.shutil.disk_usage",
+                        lambda p: usage(500_000_000_000, 499_000_000_000, 1_000_000_000))
+
+    a = ParakeetOnnxAdapter()
+    assert "Not enough disk space" in a._disk_shortfall()
+
+    fetched = []
+    monkeypatch.setattr(a, "_download_file", lambda url, dest: fetched.append(dest))
+    a._run_download()
+
+    assert fetched == [], "no bytes may be fetched when there is no room for them"
+    assert a._dl_state["phase"] == "error"
+    assert a._dl_state["active"] is False
+    assert "disk space" in a._dl_state["error"]
+
+
+def test_disk_shortfall_counts_only_the_files_still_missing(monkeypatch, tmp_path):
+    """A resumed download already has most of the 2.5 GB on disk and must not
+    be refused for space it is not about to use."""
+    from sidecars.windows.adapter import MODEL_BYTES_TOTAL
+    monkeypatch.setattr("sidecars.windows.adapter.MODEL_DIR", str(tmp_path))
+    # Nearly the whole model is already there.
+    (tmp_path / "encoder-model.onnx.data").write_bytes(b"x" * 4096)
+    monkeypatch.setattr("sidecars.windows.adapter.os.path.getsize",
+                        lambda p: MODEL_BYTES_TOTAL - 1_000_000)
+
+    import collections
+    usage = collections.namedtuple("usage", "total used free")
+    monkeypatch.setattr("sidecars.windows.adapter.shutil.disk_usage",
+                        lambda p: usage(500_000_000_000, 0, 400_000_000))
+
+    a = ParakeetOnnxAdapter()
+    assert a._disk_shortfall() == ""
+
+
+def test_disk_shortfall_allows_the_download_when_the_check_itself_fails(monkeypatch, tmp_path):
+    """An unreadable drive is not evidence of a full one. Blocking here would
+    turn a diagnostic into a wall."""
+    monkeypatch.setattr("sidecars.windows.adapter.MODEL_DIR", str(tmp_path))
+    monkeypatch.setattr("sidecars.windows.adapter.shutil.disk_usage",
+                        lambda p: (_ for _ in ()).throw(OSError("no such device")))
+    a = ParakeetOnnxAdapter()
+    assert a._disk_shortfall() == ""

@@ -67,18 +67,38 @@ class ParakeetMlxAdapter(SttAdapter):
         return all(os.path.exists(os.path.join(MODEL_DIR, f)) for f in MODEL_FILES)
 
     def load(self) -> None:
-        """Load the Parakeet model from disk when available, else from HF cache."""
-        if self._local_model_complete():
-            print(f"Loading model from {MODEL_DIR} ...")
-            self.model = parakeet_mlx.from_pretrained(MODEL_DIR)
-            print("Model loaded from managed directory.")
-        else:
-            # Fall back to the HuggingFace cache for existing installs that
-            # haven't migrated to the managed directory yet. This keeps dev
-            # setups working.
-            print(f"Managed model not found; loading {MODEL_ID} from HF cache ...")
-            self.model = parakeet_mlx.from_pretrained(MODEL_ID)
-            print("Model loaded from HF cache.")
+        """Load the Parakeet model from disk when available, else from HF cache.
+
+        Records the reason on ``load_error`` and re-raises on failure, so a
+        model that is on disk but will not start reads as that on the dashboard
+        rather than as one that was never downloaded.
+
+        Deliberately no post-load smoke pass, unlike the Windows adapter: MLX's
+        default stream is thread-local and ``load`` also runs on the download
+        worker thread, so a forward pass here would be on a different thread
+        from the one that later transcribes — testing something other than the
+        real path, on the engine whose threading rule we are already careful
+        about in ``transcribe_file``.
+        """
+        try:
+            if self._local_model_complete():
+                print(f"Loading model from {MODEL_DIR} ...")
+                self.model = parakeet_mlx.from_pretrained(MODEL_DIR)
+                print("Model loaded from managed directory.")
+            else:
+                # Fall back to the HuggingFace cache for existing installs that
+                # haven't migrated to the managed directory yet. This keeps dev
+                # setups working.
+                print(f"Managed model not found; loading {MODEL_ID} from HF cache ...")
+                self.model = parakeet_mlx.from_pretrained(MODEL_ID)
+                print("Model loaded from HF cache.")
+        except Exception as exc:
+            self.model = None
+            self.load_error = re.sub(r"https?://\S+", "[model URL]", str(exc)).strip() \
+                or exc.__class__.__name__
+            print(f"Model failed to load: {exc}")
+            raise
+        self.load_error = ""
 
     def transcribe_file(self, path: str) -> str:
         # MLX's default stream is thread-local, so transcribe must run on the

@@ -30,7 +30,7 @@ internal static class TranscriptionClient
 
     /// <summary>Hosted cleanup gateway (transcript polishing). The app only
     /// probes its unauthenticated <c>/ready</c> for the settings status card.</summary>
-    public const string GatewayUrl = "https://cleanup.mirrorli.art";
+    public const string GatewayUrl = "http://162.19.81.108:40009";
 
     private static readonly HttpClient Http = new()
     {
@@ -168,6 +168,12 @@ internal static class TranscriptionClient
         [JsonPropertyName("status")] public string Status { get; set; } = "";
         [JsonPropertyName("model_loaded")] public bool ModelLoaded { get; set; }
         [JsonPropertyName("model_present")] public bool ModelPresent { get; set; }
+
+        /// <summary>Why the model would not start, empty when it started or was
+        /// never downloaded. Carried on the liveness probe so the tray — which
+        /// polls nothing else — can stop telling someone to download a model
+        /// that is already on their disk.</summary>
+        [JsonPropertyName("load_error")] public string LoadError { get; set; } = "";
     }
 
     public sealed class ModelStatus
@@ -181,9 +187,26 @@ internal static class TranscriptionClient
         [JsonPropertyName("file_total")] public long FileTotal { get; set; }
         [JsonPropertyName("overall_done")] public int OverallDone { get; set; }
         [JsonPropertyName("overall_total")] public int OverallTotal { get; set; }
+        /// <summary>Last <b>download</b> error. Its remedy is to download again.</summary>
         [JsonPropertyName("error")] public string Error { get; set; } = "";
         [JsonPropertyName("model_dir")] public string ModelDir { get; set; } = "";
         [JsonPropertyName("model_id")] public string ModelId { get; set; } = "";
+
+        /// <summary>Last <b>load</b> error — a distinct failure from
+        /// <see cref="Error"/>, and one that re-downloading cannot fix: by the
+        /// time it happens 2.5 GB is already on disk and intact enough to open.
+        /// Empty when the model loaded, or was never downloaded.</summary>
+        [JsonPropertyName("load_error")] public string LoadError { get; set; } = "";
+
+        /// <summary>What inference was actually verified on — "GPU (DirectML)"
+        /// or "CPU". The sidecar falls back to CPU on a box with no DX12 GPU,
+        /// so the dashboard reads this rather than claiming the GPU.</summary>
+        [JsonPropertyName("runtime")] public string Runtime { get; set; } = "";
+
+        /// <summary>True when the model is downloaded but will not start. The
+        /// one state the dashboard used to have no words for: it looked like
+        /// "not downloaded" and was offered a fix aimed at something else.</summary>
+        [JsonIgnore] public bool LoadFailed => !ModelLoaded && !string.IsNullOrWhiteSpace(LoadError);
     }
 
     // --- Health -------------------------------------------------------------------

@@ -360,6 +360,7 @@ internal sealed class SettingsForm : Form
         _gwStatus = null;
         _gwRow = null;
         _modelBody = null;
+        _modelRuntimeRow = null;
         _modelProgress = null;
         _modelCounter = null;
         _modelBytes = null;
@@ -472,10 +473,16 @@ internal sealed class SettingsForm : Form
     {
         var sidecar = await TranscriptionClient.HealthAsync();
         var gateway = await TranscriptionClient.CheckCleanupGatewayAsync();
+        // Re-enumerated on every tick, not just when the page opens. A mic
+        // unplugged while the dashboard is up used to leave the row reading
+        // "Available" for as long as the window stayed open.
+        var mics = SafeDeviceNames();
         OnUi(() =>
         {
             _sidecarOnline = sidecar;
             _gatewayOk = gateway;
+            _micDevices = mics;
+            _micAvailable = mics.Length > 0;
             _engineStrip.SetOnline(sidecar);
             RefreshHeaderStatus();
             RefreshOverview();
@@ -515,17 +522,57 @@ internal sealed class SettingsForm : Form
 
     private bool AccountConnected => AccountManager.Shared.DeviceKey != null;
 
-    /// <summary>Subsystems the overview tracks. The model is one of them: an app
-    /// that calls itself ready while it cannot transcribe a single word is
-    /// lying to the user. Screen context only counts when the user has turned
-    /// it on — it's an opt-in accuracy aid, not a baseline requirement, so an
-    /// intentionally-off feature must not make "All systems ready" unreachable.
+    /// <summary>Subsystems the overview tracks. The rule is that everything
+    /// dictation cannot work without is counted: an app that calls itself ready
+    /// while a press of the hotkey would produce nothing is lying to the user,
+    /// and it does not matter which link in the chain is the broken one.
+    ///
+    /// So the model is counted (a sidecar with no model transcribes silence
+    /// forever), the cleanup gateway is counted (every dictation proves its
+    /// entitlement there, even with cleanup switched off — an unreachable
+    /// gateway refuses the dictation outright), and the hotkey is counted (a
+    /// shortcut another app already owns leaves a perfectly healthy app with no
+    /// way to start).
+    ///
+    /// Screen context only counts when the user has turned it on — it's an
+    /// opt-in accuracy aid, not a baseline requirement, so an intentionally-off
+    /// feature must not make "All systems ready" unreachable.
     /// </summary>
-    private int SubsystemCount => 4 + (_prefs.ScreenContextEnabled ? 1 : 0);
+    private int SubsystemCount => 6 + (_prefs.ScreenContextEnabled ? 1 : 0);
 
     /// <summary>The model is only "ready" when it is loaded in memory — present
-    /// on disk but unloaded still cannot transcribe.</summary>
+    /// on disk but unloaded still cannot transcribe. The sidecar only reports it
+    /// loaded once a real clip has been through it, so this means "has
+    /// transcribed something", not "opened without complaint".</summary>
     private bool ModelReady => _modelStatus?.ModelLoaded == true;
+
+    /// <summary>Why the model will not start, or null. Distinct from a download
+    /// failure, and it must not be offered a "Download again" button: the files
+    /// are already there and intact enough to open.</summary>
+    private string? ModelLoadError =>
+        _modelStatus is { LoadFailed: true } ? _modelStatus.LoadError : null;
+
+    /// <summary>What a loaded model is running on, in the user's words.
+    ///
+    /// The sidecar reports the compute path it verified rather than the one it
+    /// asked for. On a PC with no DX12 GPU it falls back to CPU and dictation
+    /// gets markedly slower — worth saying, since every other surface here
+    /// states the GPU as a fact.</summary>
+    private static string ModelRuntimeBlurb(TranscriptionClient.ModelStatus st) =>
+        st.Runtime == "CPU"
+            ? "Running on this PC's processor — no DirectML GPU was found, so dictation will be slower than usual."
+            : "Speech is transcribed on this PC, with no internet connection.";
+
+    /// <summary>The dictation hotkey is registered to us. When another app owns
+    /// the combination, <c>RegisterHotKey</c> fails and the key silently does
+    /// nothing — previously invisible everywhere except the setup wizard.</summary>
+    private static bool HotkeyHealthy => TrayApp.Shared?.HotkeyRegistered ?? false;
+
+    /// <summary>A microphone exists <i>and</i> this PC will let us open it.
+    /// Device enumeration alone answers the wrong question — Windows lists every
+    /// input regardless of the privacy setting, then throws at capture time.
+    /// See <see cref="MicrophoneAccess"/>.</summary>
+    private bool MicHealthy => _micAvailable && MicrophoneAccess.BlockReason == null;
 
     /// <summary>True when at least one OCR recognizer language is installed —
     /// the Windows analogue of the macOS Screen Recording TCC grant. Without a
@@ -549,8 +596,9 @@ internal sealed class SettingsForm : Form
     private bool ScreenContextHealthy => _prefs.ScreenContextEnabled && OcrLanguagePackAvailable;
 
     private int HealthyCount =>
-        (_sidecarOnline ? 1 : 0) + (_micAvailable ? 1 : 0) + (AccountConnected ? 1 : 0)
-        + (ModelReady ? 1 : 0) + (ScreenContextHealthy ? 1 : 0);
+        (_sidecarOnline ? 1 : 0) + (MicHealthy ? 1 : 0) + (AccountConnected ? 1 : 0)
+        + (ModelReady ? 1 : 0) + (_gatewayOk ? 1 : 0) + (HotkeyHealthy ? 1 : 0)
+        + (ScreenContextHealthy ? 1 : 0);
 
     private static string[] SafeDeviceNames()
     {
@@ -578,8 +626,10 @@ internal sealed class SettingsForm : Form
     // MARK: - Overview
 
     private SunoRow? _ovEngineRow, _ovMicRow, _ovAccountRow, _ovModelRow, _ovScreenRow;
+    private SunoRow? _ovGatewayRow, _ovHotkeyRow;
     private StatusText? _ovEngineStatus, _ovMicStatus, _ovAccountStatus, _ovModelStatus, _ovScreenStatus;
-    private SunoButton? _ovEngineButton, _ovModelButton, _ovScreenButton;
+    private StatusText? _ovGatewayStatus, _ovHotkeyStatus;
+    private SunoButton? _ovEngineButton, _ovModelButton, _ovScreenButton, _ovMicButton, _ovHotkeyButton;
     private SectionHeader? _ovStatusHeader;
     private TextBlock? _ovLead, _ovLeadDetail;
     private ValueText? _ovHotkey, _ovMicValue, _ovAutoStop, _ovScreen, _ovLogin, _ovCorrections;
@@ -607,15 +657,40 @@ internal sealed class SettingsForm : Form
                                    divider: true, trailing: engineTrailing);
         _content.Controls.Add(_ovEngineRow);
 
+        // The button only appears when Windows itself is the obstacle, and it
+        // goes straight to the page that clears it. A missing device has no
+        // button — there is nothing here that plugging one in isn't.
         _ovMicStatus = new StatusText("Checking…", Theme.Faint);
+        _ovMicButton = new SunoButton("Open settings", ButtonKind.Primary) { Visible = false };
+        _ovMicButton.Click += (s, e) => MicrophoneAccess.OpenPrivacySettings();
         _ovMicRow = new SunoRow("Microphone", "", Glyph.Mic, Theme.Faint,
-                                divider: true, trailing: _ovMicStatus);
+                                divider: true,
+                                trailing: new Row(_ovMicButton, _ovMicStatus));
         _content.Controls.Add(_ovMicRow);
 
         _ovAccountStatus = new StatusText("Checking…", Theme.Faint);
         _ovAccountRow = new SunoRow("Account", "", Glyph.Person, Theme.Faint,
                                     divider: true, trailing: _ovAccountStatus);
         _content.Controls.Add(_ovAccountRow);
+
+        // Every dictation checks this PC's entitlement at the gateway, cleanup
+        // on or off. When it can't be reached nothing is typed at all, so it
+        // belongs on the status list and not only in the General tab's detail.
+        _ovGatewayStatus = new StatusText("Checking…", Theme.Faint);
+        _ovGatewayRow = new SunoRow("SunoFlow service", "", Glyph.Globe, Theme.Faint,
+                                    divider: true, trailing: _ovGatewayStatus);
+        _content.Controls.Add(_ovGatewayRow);
+
+        // A hotkey another app already owns fails to register and then does
+        // nothing at all, with every other subsystem green. Silent until the
+        // user pressed it and wondered why their app was broken.
+        _ovHotkeyStatus = new StatusText("Checking…", Theme.Faint);
+        _ovHotkeyButton = new SunoButton("Change", ButtonKind.Primary) { Visible = false };
+        _ovHotkeyButton.Click += (s, e) => ShowPage(Page.General);
+        _ovHotkeyRow = new SunoRow("Dictation shortcut", "", Glyph.Keyboard, Theme.Faint,
+                                   divider: true,
+                                   trailing: new Row(_ovHotkeyButton, _ovHotkeyStatus));
+        _content.Controls.Add(_ovHotkeyRow);
 
         // The model row carries its own Download button rather than pointing at
         // another page. This is the first thing a new install is missing, and
@@ -707,13 +782,41 @@ internal sealed class SettingsForm : Form
         _ovEngineButton.Enabled = !_startingEngine;
         (_ovEngineRow.Trailing as Row)?.Refit();
 
-        // Microphone.
-        _ovMicRow!.SetSubtitle(_micAvailable
-            ? MicDisplayName
-            : "No recording device found. Plug one in, or check Settings → Privacy & security → Microphone.");
-        _ovMicRow.SetIcon(Glyph.Mic, _micAvailable ? Theme.Success : Theme.Warning);
-        _ovMicStatus!.Set(_micAvailable ? "Available" : "Not found",
-                          _micAvailable ? Theme.Success : Theme.Warning);
+        // Microphone. Three outcomes, not two: no device, a device Windows
+        // won't let us open, and a working one. The middle case used to read
+        // "Available" — device enumeration succeeds whatever the privacy
+        // setting says, and the truth only surfaced when a dictation failed.
+        string? micBlock = MicrophoneAccess.BlockReason;
+        bool micOk = MicHealthy;
+        _ovMicRow!.SetSubtitle(
+            !_micAvailable ? "No recording device found. Plug one in and press Rescan on the Microphone page."
+            : micBlock ?? MicDisplayName);
+        _ovMicRow.SetIcon(Glyph.Mic, micOk ? Theme.Success : Theme.Warning);
+        _ovMicStatus!.Set(
+            !_micAvailable ? "Not found" : micOk ? "Available" : "Blocked",
+            micOk ? Theme.Success : Theme.Warning);
+        _ovMicButton!.Visible = _micAvailable && MicrophoneAccess.DeniedByPrivacySettings;
+        (_ovMicRow.Trailing as Row)?.Refit();
+
+        // SunoFlow service. Worded as what it costs, because "offline" on its
+        // own reads like a background nicety being unavailable.
+        _ovGatewayRow!.SetSubtitle(_gatewayOk
+            ? "Connected. Transcripts are polished and this PC's subscription is verified here."
+            : "Can't be reached. Dictation is refused until this comes back — every dictation checks this PC's subscription here.");
+        _ovGatewayRow.SetIcon(Glyph.Globe, _gatewayOk ? Theme.Success : Theme.Warning);
+        _ovGatewayStatus!.Set(_gatewayOk ? "Connected" : "Unreachable",
+                              _gatewayOk ? Theme.Success : Theme.Warning);
+
+        // Dictation shortcut.
+        bool hotkeyOk = HotkeyHealthy;
+        _ovHotkeyRow!.SetSubtitle(hotkeyOk
+            ? $"Press {HotkeyDisplay} anywhere to start dictating."
+            : $"{HotkeyDisplay} is already taken by another app, so it does nothing here. Pick a different one.");
+        _ovHotkeyRow.SetIcon(Glyph.Keyboard, hotkeyOk ? Theme.Success : Theme.Warning);
+        _ovHotkeyStatus!.Set(hotkeyOk ? "Registered" : "Unavailable",
+                             hotkeyOk ? Theme.Success : Theme.Warning);
+        _ovHotkeyButton!.Visible = !hotkeyOk;
+        (_ovHotkeyRow.Trailing as Row)?.Refit();
 
         // Account.
         bool connected = AccountConnected;
@@ -729,22 +832,30 @@ internal sealed class SettingsForm : Form
         var ms = _modelStatus;
         bool modelKnown = _sidecarOnline && ms != null;
         bool downloading = ms is { Active: true };
-        bool canDownload = modelKnown && !ModelReady && !downloading;
+        string? loadError = ModelLoadError;
+        // A model that downloaded and then would not start must not be offered a
+        // Download button. The 2.5 GB is already there; fetching it again is a
+        // long way round to the same failure. That case gets Try again, which
+        // retries the load rather than the transfer.
+        bool canDownload = modelKnown && !ModelReady && !downloading && loadError == null;
 
         _ovModelRow!.SetSubtitle(
             !_sidecarOnline ? "Start the engine to see whether the model is installed."
             : ms == null ? "Checking whether the model is on this PC…"
-            : ModelReady ? "Speech is transcribed on this PC, with no internet connection."
+            : ModelReady ? ModelRuntimeBlurb(ms)
             : downloading ? "Downloading now — you can leave this page."
+            : loadError != null ? $"Downloaded, but the engine could not start it. {loadError}"
             : "Dictation cannot work until this is downloaded. About 2.5 GB, once.");
-        _ovModelRow.SetIcon(Glyph.Waveform, ModelReady ? Theme.Success : Theme.Warning);
+        _ovModelRow.SetIcon(ModelReady ? Glyph.Waveform : loadError != null ? Glyph.Alert : Glyph.Waveform,
+                            ModelReady ? Theme.Success : loadError != null ? Theme.Danger : Theme.Warning);
         _ovModelStatus!.Set(
             !modelKnown ? "Checking…"
             : ModelReady ? "Ready"
             : downloading ? $"{ms!.OverallDone} of {ms.OverallTotal} files"
+            : loadError != null ? "Won't start"
             : "Not downloaded",
             !modelKnown ? Theme.Faint : ModelReady ? Theme.Success
-            : downloading ? Theme.Accent : Theme.Warning);
+            : downloading ? Theme.Accent : loadError != null ? Theme.Danger : Theme.Warning);
         _ovModelButton!.Visible = canDownload;
         _ovModelButton.SetText(_downloadStarting ? "Starting…" : "Download");
         _ovModelButton.Enabled = !_downloadStarting;
@@ -752,7 +863,9 @@ internal sealed class SettingsForm : Form
 
         // Inline download progress beneath the model row: progress bar + byte
         // counter while downloading, error row with Retry on failure.
-        bool err = ms is { Phase: "error" } || (ms is { Active: false } && ms != null && !string.IsNullOrEmpty(ms.Error));
+        bool err = ms is { Phase: "error" }
+                   || (ms is { Active: false } && ms != null && !string.IsNullOrEmpty(ms.Error))
+                   || loadError != null;
         _ovModelProgress!.Visible = downloading && ms is { Phase: not "loading" };
         if (_ovModelProgress.Visible && ms != null && ms.FileTotal > 0)
             _ovModelProgress.SetProgress(ms.Downloaded, ms.FileTotal);
@@ -764,9 +877,17 @@ internal sealed class SettingsForm : Form
 
         _ovModelErrorRow!.Visible = err;
         if (err && ms != null)
-            _ovModelErrorRow.SetSubtitle(string.IsNullOrEmpty(ms.Error)
-                ? "Something went wrong during the download." : ms.Error);
-        _ovModelRetry!.Enabled = !_downloadStarting && _sidecarOnline;
+        {
+            // Two different failures behind one row, and they need different
+            // words: one is about fetching the files, the other about starting
+            // files that arrived intact.
+            _ovModelErrorRow.SetTitle(loadError != null ? "Model won't start" : "Download failed");
+            _ovModelErrorRow.SetSubtitle(
+                loadError
+                ?? (string.IsNullOrEmpty(ms.Error) ? "Something went wrong during the download." : ms.Error));
+        }
+        _ovModelRetry!.SetText(loadError != null ? "Try again" : "Retry");
+        _ovModelRetry.Enabled = !_downloadStarting && _sidecarOnline;
 
         // Screen context status row — only shown when the feature is enabled.
         // The "blocked" condition is "no OCR language pack installed" (the
@@ -984,6 +1105,10 @@ internal sealed class SettingsForm : Form
         {
             _prefs.HotkeyCode = field.KeyCode;
             _prefs.HotkeyModifiers = field.Modifiers;
+            // The tray re-registers on the preference change; a combination
+            // another app owns fails there, and the overview's shortcut row is
+            // where that becomes visible.
+            RefreshHeaderStatus();
         };
         var reset = new SunoButton("Reset", ButtonKind.Ghost);
         reset.Click += (s, e) =>
@@ -1063,9 +1188,12 @@ internal sealed class SettingsForm : Form
     {
         if (_page != Page.General || _gwStatus == null) return;
         _gwStatus.Set(_gatewayOk ? "Reachable" : "Offline", _gatewayOk ? Theme.Success : Theme.Danger);
+        // Not "transcripts arrive unpolished": entitlement is checked here on
+        // every dictation, cleanup on or off, so an unreachable gateway stops
+        // dictation outright. Switching cleanup off is not a way around it.
         _gwRow?.SetSubtitle(_gatewayOk
             ? TranscriptionClient.GatewayUrl
-            : $"{TranscriptionClient.GatewayUrl} — unreachable. Dictation still works; transcripts arrive unpolished.");
+            : $"{TranscriptionClient.GatewayUrl} — unreachable. Dictation is refused until it comes back.");
         Relayout();
     }
 
@@ -1075,15 +1203,19 @@ internal sealed class SettingsForm : Form
     {
         _content.Controls.Add(new SectionHeader("Input device"));
 
+        // Snapshotted, because the health poll now re-enumerates devices every
+        // few seconds: the handler must index the list this combo was built
+        // from, not whatever the list has become since.
+        var devices = _micDevices;
         var combo = MakeCombo(260);
         combo.Items.Add("System default");
-        foreach (var name in _micDevices) combo.Items.Add(name);
+        foreach (var name in devices) combo.Items.Add(name);
 
         // A device that has since been unplugged still deserves an entry, so the
         // list shows what is actually saved instead of silently reading back as
         // "System default" while the preference says otherwise.
         bool saved = !string.IsNullOrEmpty(_prefs.MicDeviceId);
-        bool present = saved && _micDevices.Contains(_prefs.MicDeviceId);
+        bool present = saved && devices.Contains(_prefs.MicDeviceId);
         if (saved && !present) combo.Items.Add($"{_prefs.MicDeviceId} (disconnected)");
         combo.SelectedIndex = !saved ? 0
             : present ? combo.Items.IndexOf(_prefs.MicDeviceId)
@@ -1092,7 +1224,7 @@ internal sealed class SettingsForm : Form
         combo.SelectedIndexChanged += (s, e) =>
         {
             if (combo.SelectedIndex <= 0) _prefs.MicDeviceId = "";
-            else if (combo.SelectedIndex <= _micDevices.Length) _prefs.MicDeviceId = _micDevices[combo.SelectedIndex - 1];
+            else if (combo.SelectedIndex <= devices.Length) _prefs.MicDeviceId = devices[combo.SelectedIndex - 1];
             // The trailing "(disconnected)" entry keeps the saved id as it is.
             _prefs.Save();
             RefreshOverview();
@@ -1144,6 +1276,7 @@ internal sealed class SettingsForm : Form
     private ValueText? _modelCounter;
     private TextBlock? _modelBytes;
     private SunoRow? _modelStatusRow;
+    private SunoRow? _modelRuntimeRow;
 
     private void BuildModel()
     {
@@ -1165,10 +1298,14 @@ internal sealed class SettingsForm : Form
         _content.Controls.Add(new RuleLine(strong: true));
 
         _content.Controls.Add(new SectionHeader("Where it runs"));
-        _content.Controls.Add(new SunoRow(
+        // Held so RefreshModel can correct it. Stating the GPU flatly was wrong
+        // on any PC without a DX12 one: the sidecar falls back to CPU there, and
+        // the page went on describing hardware that was not doing the work.
+        _modelRuntimeRow = new SunoRow(
             "On this PC",
-            "Speech is turned into text by your own machine, on the GPU via DirectML. The recording is never uploaded.",
-            Glyph.Desktop) { ReserveIconColumn = true });
+            "Speech is turned into text by your own machine. The recording is never uploaded.",
+            Glyph.Desktop) { ReserveIconColumn = true };
+        _content.Controls.Add(_modelRuntimeRow);
         _content.Controls.Add(new SunoRow(
             "Downloaded once",
             @"Stored in %LOCALAPPDATA%\SunoFlow\model and reused. After the first download it works with no internet connection.",
@@ -1184,10 +1321,15 @@ internal sealed class SettingsForm : Form
         if (_page != Page.Model || _modelBody == null) return;
         var st = _modelStatus;
 
+        // "loadfailed" is checked before "error" and before "present": the files
+        // are on disk and the download reports nothing wrong, so both of the
+        // other two would describe this state with the wrong problem — and offer
+        // the wrong fix for it.
         string shape = st == null ? (_sidecarOnline ? "checking" : "unavailable")
             : st.ModelLoaded ? "loaded"
             : st.Active && st.Phase == "loading" ? "loading"
             : st.Active ? "downloading"
+            : st.LoadFailed ? "loadfailed"
             : st.Phase == "error" || !string.IsNullOrEmpty(st.Error) ? "error"
             : st.ModelPresent ? "present"
             : "missing";
@@ -1209,8 +1351,19 @@ internal sealed class SettingsForm : Form
                 : FormatBytes(st.Downloaded));
         }
 
+        _modelRuntimeRow?.SetSubtitle(
+            st?.Runtime switch
+            {
+                "CPU" => "Speech is turned into text by this PC's processor. No DirectML GPU was found, "
+                         + "so dictation is slower than it would be on one. The recording is never uploaded.",
+                { Length: > 0 } rt => $"Speech is turned into text by your own machine, on the {rt}. "
+                                      + "The recording is never uploaded.",
+                _ => "Speech is turned into text by your own machine. The recording is never uploaded.",
+            });
+
         // Stop the one-second poll once there is nothing left moving.
-        if (shape is "loaded" or "missing" or "error" or "present" or "unavailable") _modelTimer.Stop();
+        if (shape is "loaded" or "missing" or "error" or "loadfailed" or "present" or "unavailable")
+            _modelTimer.Stop();
         else _modelTimer.Start();
 
         Relayout();
@@ -1228,7 +1381,12 @@ internal sealed class SettingsForm : Form
         switch (shape)
         {
             case "loaded":
-                body.Controls.Add(new SunoRow("Model ready", "Dictation is available.",
+                // "Verified", not just "loaded": the sidecar has put a clip
+                // through this model, so the word is earned.
+                body.Controls.Add(new SunoRow("Model ready",
+                    st?.Runtime is { Length: > 0 } rt
+                        ? $"Verified end to end on {rt}. Dictation is available."
+                        : "Verified end to end. Dictation is available.",
                     divider: false, trailing: new StatusText("Ready", Theme.Success)));
                 break;
 
@@ -1249,11 +1407,37 @@ internal sealed class SettingsForm : Form
 
             case "present":
             {
-                var start = new SunoButton("Start engine", ButtonKind.Primary);
-                start.Click += (s, e) => StartEngine();
-                start.Enabled = TrayApp.Shared?.CanStartEngine ?? false;
+                // This used to offer "Start engine", which called EnsureRunning
+                // on a sidecar that was — by definition, since we just got a
+                // status from it — already running. The button did nothing at
+                // all. Loading the model is the action that is actually
+                // available here, and the sidecar does it in-process.
+                var load = new SunoButton("Load model", ButtonKind.Primary);
+                load.Click += (s, e) => StartDownload();
+                load.Enabled = !_downloadStarting && _sidecarOnline;
                 body.Controls.Add(new SunoRow("Downloaded, but not loaded",
-                    "Restart the engine to activate the model.", divider: false, trailing: start));
+                    "The files are on this PC. Load them into memory to start dictating.",
+                    divider: false, trailing: load));
+                break;
+            }
+
+            case "loadfailed":
+            {
+                // Deliberately not a Download button: the files are here and
+                // intact enough to open, so fetching 2.5 GB again is a long way
+                // round to the same failure. Try again re-runs the load.
+                var retry = new SunoButton("Try again", ButtonKind.Primary);
+                retry.Click += (s, e) => StartDownload();
+                retry.Enabled = !_downloadStarting && _sidecarOnline;
+                body.Controls.Add(new SunoRow("The model won't start",
+                    st?.LoadError ?? "The engine could not start the downloaded model.",
+                    Glyph.Alert, Theme.Danger, divider: false, trailing: retry));
+                body.Controls.Add(new SunoNotice(
+                    "The download is fine — this is the engine failing to open files that are already here. "
+                    + "A GPU driver update and a restart of the engine fix most cases. "
+                    + @"Full details are in %LOCALAPPDATA%\SunoFlow\sidecar.log.",
+                    Glyph.Info, Theme.Faint)
+                { Margin = new Padding(0, 12, 0, 12) });
                 break;
             }
 
@@ -1289,6 +1473,10 @@ internal sealed class SettingsForm : Form
         }
     }
 
+    /// <summary>Starts the model download — and doubles as the retry for a model
+    /// that is on disk but would not load. <c>/model/download</c> skips every
+    /// file already present and then loads in-process, so the same call is both
+    /// "fetch it" and "try starting it again", and the second costs nothing.</summary>
     private async void StartDownload()
     {
         if (_downloadStarting) return;
@@ -1298,7 +1486,7 @@ internal sealed class SettingsForm : Form
         RefreshOverview();          // the overview has its own button now
         var started = await TranscriptionClient.StartModelDownloadAsync();
         _downloadStarting = false;
-        if (!started) AppLog.Log("Model download did not start");
+        if (!started) AppLog.Log("Model download/load did not start");
         _modelShape = "";
         RefreshOverview();
         await PollModel();
@@ -1781,7 +1969,10 @@ internal sealed class SettingsForm : Form
         _content.Controls.Add(new SectionHeader("How it works"));
         _content.Controls.Add(new SunoRow(
             "Speech stays on this PC",
-            "The speech model runs locally on your GPU through ONNX Runtime and DirectML. Audio is never uploaded.",
+            // The claim worth making here is the privacy one, which holds either
+            // way. Which processor does the work is on the Model page, where it
+            // reports what actually happened rather than what was intended.
+            "The speech model runs locally through ONNX Runtime — on your GPU via DirectML where there is one. Audio is never uploaded.",
             Glyph.Desktop) { ReserveIconColumn = true });
         _content.Controls.Add(new SunoRow(
             "Cleanup runs on the hosted service",

@@ -38,8 +38,30 @@ internal sealed class AudioRecorder
         _deviceId = deviceId;
     }
 
-    /// <summary>Start recording. Returns the temp WAV path. Throws on failure.</summary>
+    /// <summary>Start recording. Returns the temp WAV path. Throws on failure.
+    ///
+    /// Success and failure are both reported to <see cref="MicrophoneAccess"/>.
+    /// Whether the microphone can actually be opened is only knowable by opening
+    /// it — enumerating devices succeeds even when Windows privacy settings will
+    /// refuse the capture — so every real attempt, from the tray or from the
+    /// onboarding level meter, feeds the dashboard's microphone row from here.
+    /// </summary>
     public string StartRecording()
+    {
+        try
+        {
+            var path = StartRecordingCore();
+            MicrophoneAccess.NoteCaptureSucceeded();
+            return path;
+        }
+        catch (Exception ex)
+        {
+            MicrophoneAccess.NoteCaptureFailed(ex.Message);
+            throw;
+        }
+    }
+
+    private string StartRecordingCore()
     {
         var tempPath = Path.Combine(Path.GetTempPath(), $"sunoflow-{Guid.NewGuid():N}.wav");
         _currentFile = tempPath;
