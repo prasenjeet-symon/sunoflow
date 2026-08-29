@@ -94,7 +94,8 @@ bundle (no Python needed) is built once on a Windows box — see
 
    On first run, download the model from the tray app's **Settings → Speech
    Model** page (or call `POST http://127.0.0.1:8765/model/download`). It lands in
-   `%LOCALAPPDATA%\SunoFlow\model` (~2.5 GB).
+   `%LOCALAPPDATA%\SunoFlow\model` (~2.5 GB, or ~0.67 GB where the sidecar
+   picks the int8 build for the hardware).
 
 2. Launch the tray app:
    ```powershell

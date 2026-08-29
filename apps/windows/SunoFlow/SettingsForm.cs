@@ -558,8 +558,17 @@ internal sealed class SettingsForm : Form
     /// asked for. On a PC with no DX12 GPU it falls back to CPU and dictation
     /// gets markedly slower — worth saying, since every other surface here
     /// states the GPU as a fact.</summary>
+    /// <summary>What the model row says once the model is ready.
+    ///
+    /// "On the CPU" is no longer only a fallback to apologise for: a PC without
+    /// a suitable GPU is deliberately given the int8 build, which exists to run
+    /// there. Saying something went wrong would be false. The old wording is
+    /// kept for the case it was written about — a full-precision model that
+    /// wanted DirectML and did not get it.</summary>
     private static string ModelRuntimeBlurb(TranscriptionClient.ModelStatus st) =>
-        st.Runtime == "CPU"
+        st.Runtime == "CPU" && st.Variant == "int8"
+            ? "Running the compact model on this PC's processor — the build picked for this hardware. Speech never leaves the machine."
+            : st.Runtime == "CPU"
             ? "Running on this PC's processor — no DirectML GPU was found, so dictation will be slower than usual."
             : "Speech is transcribed on this PC, with no internet connection.";
 
@@ -834,7 +843,7 @@ internal sealed class SettingsForm : Form
         bool downloading = ms is { Active: true };
         string? loadError = ModelLoadError;
         // A model that downloaded and then would not start must not be offered a
-        // Download button. The 2.5 GB is already there; fetching it again is a
+        // Download button. The model is already there; fetching it again is a
         // long way round to the same failure. That case gets Try again, which
         // retries the load rather than the transfer.
         bool canDownload = modelKnown && !ModelReady && !downloading && loadError == null;
@@ -845,7 +854,7 @@ internal sealed class SettingsForm : Form
             : ModelReady ? ModelRuntimeBlurb(ms)
             : downloading ? "Downloading now — you can leave this page."
             : loadError != null ? $"Downloaded, but the engine could not start it. {loadError}"
-            : "Dictation cannot work until this is downloaded. About 2.5 GB, once.");
+            : $"Dictation cannot work until this is downloaded — {ms!.DownloadSizeText}, once.");
         _ovModelRow.SetIcon(ModelReady ? Glyph.Waveform : loadError != null ? Glyph.Alert : Glyph.Waveform,
                             ModelReady ? Theme.Success : loadError != null ? Theme.Danger : Theme.Warning);
         _ovModelStatus!.Set(
@@ -1290,7 +1299,7 @@ internal sealed class SettingsForm : Form
         _content.Controls.Add(new SectionHeader("On-device model"));
         _content.Controls.Add(new SunoRow(
             "SunoFlow speech model v1",
-            "Roughly 2.5 GB. The download takes a few minutes on a typical connection, and only happens once.",
+            "A one-time download. SunoFlow picks the build that suits this PC, so the size depends on your hardware.",
             Glyph.Waveform) { ReserveIconColumn = true });
 
         _modelBody = new Stack { BackColor = Theme.Paper };
@@ -1424,7 +1433,7 @@ internal sealed class SettingsForm : Form
             case "loadfailed":
             {
                 // Deliberately not a Download button: the files are here and
-                // intact enough to open, so fetching 2.5 GB again is a long way
+                // intact enough to open, so fetching it all again is a long way
                 // round to the same failure. Try again re-runs the load.
                 var retry = new SunoButton("Try again", ButtonKind.Primary);
                 retry.Click += (s, e) => StartDownload();

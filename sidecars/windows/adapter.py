@@ -9,9 +9,11 @@ provider), which serves NVIDIA / AMD / Intel GPUs alike via DirectX 12 — this 
 why we picked ONNX Runtime over NeMo for the Windows track (NeMo would have been
 NVIDIA-only). No PyTorch, NeMo, or FFmpeg is needed.
 
-GPU is mandatory on Windows (no CPU-only support target); the adapter still
-falls back to CPU if DirectML isn't available so the sidecar is at least
-runnable on a dev box without a DX12 GPU — but production is GPU-only.
+The machine's hardware picks the model variant. A box with a DX12 GPU and room
+for the weights gets the fp32 export on DirectML; anything else gets the int8
+export on the CPU, which is what lets the sidecar run at all where there is no
+usable GPU. The probe runs before the download, not at load time, because the
+two variants are different files — see the variant table below.
 
 The download manager pulls the ONNX export of Parakeet TDT 0.6B v3 from
 ``istupakov/parakeet-tdt-0.6b-v3-onnx``. ``onnx-asr`` can download it itself via
@@ -31,6 +33,7 @@ import re
 import shutil
 import tempfile
 import threading
+import time
 import wave
 
 from sidecars.shared.app import SttAdapter, create_app
@@ -58,32 +61,139 @@ MODEL_DIR = os.path.abspath(
     os.environ.get("SUNOFLOW_MODEL_DIR", _DEFAULT_DIR)
 )
 
-# Files that together make up a complete FP32 model snapshot. The encoder graph
-# is split across encoder-model.onnx (graph) + encoder-model.onnx.data (weights,
-# ~2.4 GB external data) — both MUST be present for the session to load.
-# nemo128.onnx is the log-mel preprocessor graph. We pull the FP32 (non-int8)
-# files for accuracy parity with the macOS MLX path; int8 is a later option.
-MODEL_FILES = [
-    "config.json",
-    "encoder-model.onnx",
-    "encoder-model.onnx.data",
-    "decoder_joint-model.onnx",
-    "nemo128.onnx",   # log-mel preprocessor
-    "vocab.txt",
-]
+# --- Model variants ------------------------------------------------------------
+# The repo ships the same model at two precisions, and which one a machine should
+# run is a hardware question rather than a preference. It has to be answered
+# BEFORE the download: the variants are different files, so a wrong answer is
+# paid for in a second multi-gigabyte transfer, not in a reload.
+#
+# fp32 is the accuracy reference and wants a DX12 GPU with room for 2.4 GB of
+# encoder weights. int8 is not merely "fp32 for weaker GPUs" — it is the CPU
+# path. That export is dynamically quantized (DynamicQuantizeLinear +
+# MatMulInteger), ops that exist to reach the CPU's VNNI/AVX integer kernels;
+# DirectML's coverage of them is patchy enough that int8 on the GPU is routinely
+# *slower* than fp32 once the per-run quantize/dequantize overhead is counted.
+# So each variant carries its own execution providers and int8 is never paired
+# with DirectML — see _select_providers.
+#
+# ``files`` are the names in the HF repo and ``bytes`` their published total.
+# onnx-asr picks between them from ``quantization``: it globs
+# ``encoder-model?int8.onnx`` for int8 and matches the literal
+# ``encoder-model.onnx`` for fp32, so the two can share MODEL_DIR without
+# colliding and a box that already has fp32 never has to re-fetch to keep it.
+VARIANT_FP32 = "fp32"
+VARIANT_INT8 = "int8"
+
+VARIANTS = {
+    VARIANT_FP32: {
+        "files": [
+            "config.json",
+            "encoder-model.onnx",
+            # The encoder graph is split: .onnx is the graph, .onnx.data is
+            # ~2.4 GB of external weights. Both MUST be present or the session
+            # fails to load. This is the easiest file to forget.
+            "encoder-model.onnx.data",
+            "decoder_joint-model.onnx",
+            "nemo128.onnx",   # log-mel preprocessor
+            "vocab.txt",
+        ],
+        "bytes": 2_550_000_000,
+        "quantization": None,
+        "label": "full precision",
+    },
+    VARIANT_INT8: {
+        "files": [
+            "config.json",
+            # 652 MB — under the 2 GB protobuf ceiling, so unlike its fp32
+            # counterpart this encoder has NO external .data sibling. Requiring
+            # one here would make every int8 install look permanently incomplete.
+            "encoder-model.int8.onnx",
+            "decoder_joint-model.int8.onnx",
+            "nemo128.onnx",
+            "vocab.txt",
+        ],
+        "bytes": 671_000_000,
+        "quantization": "int8",
+        "label": "int8",
+    },
+}
+
+#: The fp32 manifest under its historical name — the only variant this adapter
+#: shipped before the int8 path existed.
+MODEL_FILES = VARIANTS[VARIANT_FP32]["files"]
+MODEL_BYTES_TOTAL = VARIANTS[VARIANT_FP32]["bytes"]
+
 HF_BASE = f"https://huggingface.co/{HF_REPO}/resolve/main"
 
-# Roughly what MODEL_FILES weigh once unpacked on disk (the encoder weights are
-# ~2.4 GB of it), plus headroom. Checked before the first byte is fetched:
-# discovering a full disk 2.3 GB into a 2.5 GB download wastes the download and
-# leaves a half-written model behind.
-MODEL_BYTES_TOTAL = 2_700_000_000
+# Free space is checked before the first byte is fetched: discovering a full disk
+# 2.3 GB into a 2.5 GB download wastes the transfer and leaves a half-written
+# model behind — and a truncated external weights file loads cleanly, failing
+# only on the first inference, which is the exact failure the preflight exists
+# to prevent.
 DISK_HEADROOM_BYTES = 300_000_000
+
+# Dedicated VRAM below which we will not ask a GPU to hold 2.4 GB of encoder
+# weights plus activations plus whatever the desktop compositor already owns.
+# A judgement call rather than a measured cliff: 4 GB is tight but workable for
+# the few seconds of audio a dictation produces, and under it DirectML starts
+# paging over PCIe — slower than simply running int8 on the CPU.
+MIN_VRAM_BYTES_FP32 = 4 * 1024 ** 3
+
+# Display-adapter class key; each numbered subkey (0000, 0001, ...) is one
+# adapter. Read instead of WMI — see _dedicated_vram_bytes.
+_GPU_CLASS_KEY = (
+    r"SYSTEM\CurrentControlSet\Control\Class"
+    r"\{4d36e968-e325-11ce-bfc1-08002be10318}"
+)
 
 # Length of the clip pushed through the model to prove it can actually run.
 # Comfortably longer than MIN_AUDIO_SECONDS and than the encoder's subsampling
 # window, so the pass exercises the real path rather than an edge case.
 SMOKE_SECONDS = 1.0
+
+
+def _dedicated_vram_bytes():
+    """Largest dedicated VRAM across installed display adapters, or None.
+
+    Read from the driver's own registry entry rather than WMI. The obvious call,
+    ``Win32_VideoController.AdapterRAM``, is a uint32 and therefore saturates at
+    4 GB — precisely the range this decision turns on, so it would answer the
+    one question being asked of it with a wrong number.
+    ``HardwareInformation.qwMemorySize`` is the 64-bit value the driver reports.
+
+    Returns None for "could not tell", which is not the same as zero and which
+    the caller deliberately treats as a reason to be conservative. Taking the
+    max across adapters is a simplification: on a laptop with switchable
+    graphics it reports the discrete GPU, which is the one DirectML will want.
+    """
+    try:
+        import winreg
+    except ImportError:
+        return None  # not Windows — dev box or CI
+    best = None
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, _GPU_CLASS_KEY) as cls:
+            subkeys = winreg.QueryInfoKey(cls)[0]
+            for i in range(subkeys):
+                try:
+                    name = winreg.EnumKey(cls, i)
+                except OSError:
+                    continue
+                if not name.isdigit():
+                    continue  # skip Configuration/Properties siblings
+                try:
+                    with winreg.OpenKey(cls, name) as adapter:
+                        value, _ = winreg.QueryValueEx(
+                            adapter, "HardwareInformation.qwMemorySize"
+                        )
+                except OSError:
+                    continue  # this adapter doesn't publish it; try the next
+                if isinstance(value, int) and value > 0:
+                    best = value if best is None else max(best, value)
+    except OSError as exc:
+        print(f"Could not read GPU memory from the registry: {exc}")
+        return None
+    return best
 
 
 class ParakeetOnnxAdapter(SttAdapter):
@@ -94,6 +204,18 @@ class ParakeetOnnxAdapter(SttAdapter):
         # The compute path the loaded model was actually verified on, so the
         # dashboard can stop asserting "GPU" on a box that quietly fell back.
         self._runtime = ""
+        # Which variant is loaded, and how fast it proved to be. The smoke pass
+        # in load() already runs a clip of known length, so timing it costs
+        # nothing and turns a spec-sheet guess into a measurement of the machine
+        # actually in front of us.
+        self._variant = ""
+        self._rtf = 0.0
+        # The variant this hardware should download, probed once and cached —
+        # see _ensure_choice. Distinct from _variant, which is what is loaded:
+        # a box may have fp32 on disk from an earlier install and still probe
+        # as int8.
+        self._chosen_variant = ""
+        self._chosen_reason = ""
         self._dl_lock = threading.Lock()
         self._dl_state = {
             "active": False,
@@ -103,6 +225,7 @@ class ParakeetOnnxAdapter(SttAdapter):
             "file_total": 0,        # total bytes for the current file
             "overall_done": 0,      # number of files finished
             "overall_total": len(MODEL_FILES),
+            "variant": "",          # locked in when a download starts
             "error": "",
         }
 
@@ -113,8 +236,28 @@ class ParakeetOnnxAdapter(SttAdapter):
         return self.model is not None
 
     def is_present(self) -> bool:
-        """True if the managed model directory has every file we need."""
-        return all(os.path.exists(os.path.join(MODEL_DIR, f)) for f in MODEL_FILES)
+        """True if some complete variant is on disk — either will transcribe."""
+        return self._installed_variant() is not None
+
+    def _variant_present(self, variant: str) -> bool:
+        return all(
+            os.path.exists(os.path.join(MODEL_DIR, f))
+            for f in VARIANTS[variant]["files"]
+        )
+
+    def _installed_variant(self):
+        """The variant that is completely on disk, or None.
+
+        fp32 wins when both are complete. A box holding the 2.5 GB set either
+        downloaded it deliberately or predates this choice existing, and either
+        way starting what is already there beats demanding another 670 MB to say
+        the same words. If that machine cannot in fact run it, the smoke pass in
+        :meth:`load` is what says so — not a guess made here.
+        """
+        for variant in (VARIANT_FP32, VARIANT_INT8):
+            if self._variant_present(variant):
+                return variant
+        return None
 
     def runtime_label(self) -> str:
         return self._runtime
@@ -123,8 +266,9 @@ class ParakeetOnnxAdapter(SttAdapter):
         """Load the Parakeet ONNX model from disk and prove it can run.
 
         Resolves the model offline against ``MODEL_DIR`` so there's no startup
-        network call once the files are present. Selects the DirectML EP when
-        available (production: GPU), otherwise falls back to CPU (dev only).
+        network call once the files are present. The variant already on disk
+        decides both the quantization onnx-asr resolves and the providers it
+        gets: fp32 takes DirectML where it exists, int8 is the CPU path.
 
         The model is only published to ``self.model`` after a real clip has been
         through it. Building the sessions proves the graphs parsed and nothing
@@ -140,7 +284,8 @@ class ParakeetOnnxAdapter(SttAdapter):
         then re-raises — /transcribe returns empty rather than crashing the
         sidecar, and the dashboard has words for what went wrong.
         """
-        if not self.is_present():
+        variant = self._installed_variant()
+        if variant is None:
             # Not an error: nothing has been downloaded yet. Saying so here
             # would put a failure on a dashboard whose real state is "missing".
             print(f"Model files missing in {MODEL_DIR}; cannot load.")
@@ -148,27 +293,33 @@ class ParakeetOnnxAdapter(SttAdapter):
         import onnx_asr
         import onnxruntime as rt
 
-        providers = self._select_providers(rt)
+        spec = VARIANTS[variant]
+        providers = self._select_providers(rt, variant)
         runtime = ("GPU (DirectML)" if providers[0] == "DmlExecutionProvider" else "CPU")
-        print(f"Loading ONNX model from {MODEL_DIR} (providers={providers}) ...")
+        print(f"Loading ONNX model from {MODEL_DIR} "
+              f"(variant={variant}, providers={providers}) ...")
         try:
             model = onnx_asr.load_model(
                 MODEL_ID,
                 path=MODEL_DIR,
+                quantization=spec["quantization"],
                 providers=providers,
             )
             self._verify_runnable(model)
         except Exception as exc:
             self.model = None
             self._runtime = ""
+            self._variant = ""
             self.load_error = re.sub(r"https?://\S+", "[model URL]", str(exc)).strip() \
                 or exc.__class__.__name__
             print(f"Model failed to load: {exc}")
             raise
         self.model = model
         self._runtime = runtime
+        self._variant = variant
         self.load_error = ""
-        print(f"Model loaded and verified on {runtime}.")
+        print(f"Model loaded and verified on {runtime} "
+              f"({spec['label']}, {self._rtf:.1f}x realtime).")
 
     def _verify_runnable(self, model) -> None:
         """Push one short clip through ``model``, raising if it cannot run it.
@@ -177,6 +328,12 @@ class ParakeetOnnxAdapter(SttAdapter):
         degenerate path through the decoder, which would prove less than a real
         utterance does. The transcript is discarded — what is being tested is
         that inference completes at all.
+
+        The pass is timed into ``_rtf`` (seconds of audio per second of wall
+        clock). The clip has to run regardless, so this is a free measurement of
+        the machine actually in front of us — worth more than the VRAM heuristic
+        that chose the variant, since an RTF near or below 1 means dictation
+        comes back slower than it was spoken.
         """
         fd, path = tempfile.mkstemp(suffix=".wav")
         os.close(fd)
@@ -191,7 +348,10 @@ class ParakeetOnnxAdapter(SttAdapter):
                 w.setsampwidth(2)
                 w.setframerate(16000)
                 w.writeframes(samples.tobytes())
+            started = time.monotonic()
             model.recognize(path)
+            elapsed = time.monotonic() - started
+            self._rtf = (SMOKE_SECONDS / elapsed) if elapsed > 0 else 0.0
         finally:
             try:
                 os.unlink(path)
@@ -216,13 +376,78 @@ class ParakeetOnnxAdapter(SttAdapter):
 
     # --- internals -------------------------------------------------------------
 
-    def _select_providers(self, rt_module) -> list:
-        """Pick the DirectML EP when compiled in, else CPU (dev fallback)."""
+    def _select_providers(self, rt_module, variant: str = VARIANT_FP32) -> list:
+        """Execution providers for ``variant``.
+
+        int8 is pinned to the CPU deliberately. That export is built from
+        DynamicQuantizeLinear/MatMulInteger — ops whose reason to exist is the
+        CPU's VNNI/AVX integer kernels. Handing them to DirectML gives away
+        accuracy for no speed and frequently for less. fp32 prefers DirectML and
+        falls back to CPU so the sidecar still runs on a box with no DX12 GPU.
+        """
+        if variant == VARIANT_INT8:
+            return ["CPUExecutionProvider"]
         available = list(rt_module.get_available_providers())
         if "DmlExecutionProvider" in available:
             return ["DmlExecutionProvider", "CPUExecutionProvider"]
         print("DirectML provider not available; falling back to CPU (dev only).")
         return ["CPUExecutionProvider"]
+
+    def _choose_variant(self, rt_module):
+        """Pick the variant this machine should download. Returns (variant, why).
+
+        Errs toward int8 whenever the hardware cannot be read, because the two
+        mistakes are not symmetric: an unnecessary int8 costs a little accuracy
+        on a box that would have coped with fp32, while an unnecessary fp32
+        costs the user a 2.5 GB download that then fails to load or crawls, plus
+        another 670 MB to put right.
+        """
+        if "DmlExecutionProvider" not in list(rt_module.get_available_providers()):
+            return VARIANT_INT8, "no DirectML GPU support on this machine"
+
+        vram = _dedicated_vram_bytes()
+        if vram is None:
+            return VARIANT_INT8, "could not read the GPU's memory size"
+        if vram < MIN_VRAM_BYTES_FP32:
+            return (
+                VARIANT_INT8,
+                f"the GPU has {_gb(vram)} of memory, under the "
+                f"{_gb(MIN_VRAM_BYTES_FP32)} full precision needs",
+            )
+        # Room on the GPU is not room on the disk. Better to notice here, where
+        # the answer is a smaller model, than in the preflight, where it is a
+        # refusal the user cannot act on without freeing 2.5 GB.
+        if self._variant_shortfall(VARIANT_FP32) and not self._variant_shortfall(VARIANT_INT8):
+            return VARIANT_INT8, "not enough disk space for the full precision model"
+        return VARIANT_FP32, f"DirectML GPU with {_gb(vram)} of memory"
+
+    def _ensure_choice(self):
+        """This machine's variant, probed once and cached. Returns (variant, why).
+
+        Cached because ``/model/status`` is polled continuously and the probe
+        reads the registry. The env override is resolved before onnxruntime is
+        imported, so support can pin a variant even on a box where that import
+        is itself the problem.
+        """
+        if self._chosen_variant:
+            return self._chosen_variant, self._chosen_reason
+        forced = os.environ.get("SUNOFLOW_MODEL_VARIANT", "").strip().lower()
+        if forced in VARIANTS:
+            variant, reason = forced, "set by SUNOFLOW_MODEL_VARIANT"
+        else:
+            try:
+                import onnxruntime as rt
+                variant, reason = self._choose_variant(rt)
+            except Exception as exc:
+                # An onnxruntime that will not import is no reason to guess
+                # high: the expensive mistake is committing a machine to 2.5 GB
+                # it cannot use.
+                variant = VARIANT_INT8
+                reason = (f"could not probe the hardware "
+                          f"({exc.__class__.__name__}); chose the safe variant")
+        self._chosen_variant, self._chosen_reason = variant, reason
+        print(f"Model variant for this machine: {variant} — {reason}")
+        return variant, reason
 
     def _download_file(self, url: str, dest: str) -> None:
         """Stream a single file to disk, updating _dl_state progress as bytes arrive."""
@@ -249,7 +474,27 @@ class ParakeetOnnxAdapter(SttAdapter):
         os.replace(tmp, dest)
 
     def _run_download(self) -> None:
-        """Worker thread: fetch every model file, then load the model in-process."""
+        """Worker thread: fetch this machine's variant, then load it in-process.
+
+        The variant is resolved once, here, and held in ``_dl_state`` for the
+        duration. Re-probing per file would let a mid-download answer change and
+        leave MODEL_DIR holding half of each.
+
+        A complete variant already on disk is kept even when the probe would now
+        pick the other one. Those files cost gigabytes, and whether they work is
+        for :meth:`load` to answer with a forward pass — not something to
+        pre-empt by quietly fetching a second model alongside the first. To move
+        an existing install across variants, delete MODEL_DIR or pin
+        ``SUNOFLOW_MODEL_VARIANT``.
+        """
+        installed = self._installed_variant()
+        if installed:
+            variant, reason = installed, "already on disk"
+        else:
+            variant, reason = self._ensure_choice()
+        files = VARIANTS[variant]["files"]
+        print(f"Downloading the {variant} model ({_gb(VARIANTS[variant]['bytes'])}) "
+              f"— {reason}")
         try:
             os.makedirs(MODEL_DIR, exist_ok=True)
             shortfall = self._disk_shortfall()
@@ -265,9 +510,10 @@ class ParakeetOnnxAdapter(SttAdapter):
             with self._dl_lock:
                 self._dl_state.update(
                     active=True, phase="downloading", overall_done=0,
+                    overall_total=len(files), variant=variant,
                     error="", current_file="",
                 )
-            for i, fname in enumerate(MODEL_FILES):
+            for i, fname in enumerate(files):
                 dest = os.path.join(MODEL_DIR, fname)
                 if os.path.exists(dest):
                     # Already have this file (e.g. a resume). Skip but count it.
@@ -309,24 +555,50 @@ class ParakeetOnnxAdapter(SttAdapter):
     def status_snapshot(self) -> dict:
         with self._dl_lock:
             snap = dict(self._dl_state)
+        chosen, reason = self._ensure_choice()
+        installed = self._variant or self._installed_variant()
+        if snap.get("active") and snap.get("variant"):
+            # A download in flight is the authority on what is being fetched.
+            variant = snap["variant"]
+        elif installed:
+            # What is on disk beats what the probe wants. They agree after a
+            # download, but a box carrying an older fp32 install should be
+            # described by the model it will actually load.
+            variant = installed
+            if installed != chosen:
+                reason = (f"already installed; this machine would otherwise "
+                          f"use {chosen} ({reason})")
+        else:
+            variant = chosen
+        snap["variant"] = variant
+        snap["variant_label"] = VARIANTS[variant]["label"]
+        snap["variant_reason"] = reason
+        snap["download_bytes"] = VARIANTS[variant]["bytes"]
+        snap["overall_total"] = len(VARIANTS[variant]["files"])
         snap["model_dir"] = MODEL_DIR
         snap["model_id"] = HF_REPO
         return snap
 
     def _disk_shortfall(self) -> str:
-        """The reason there isn't room for the model, or "" when there is.
+        """The reason there isn't room for this machine's variant, or ""."""
+        variant, _ = self._ensure_choice()
+        return self._variant_shortfall(variant)
+
+    def _variant_shortfall(self, variant: str) -> str:
+        """The reason ``variant`` will not fit on disk, or "" when it will.
 
         Only the files still missing are counted — a resumed download has most
-        of the 2.5 GB on disk already and should not be refused for space it is
+        of its bytes on disk already and should not be refused for space it is
         not about to use.
         """
         try:
+            spec = VARIANTS[variant]
             have = 0
-            for fname in MODEL_FILES:
+            for fname in spec["files"]:
                 path = os.path.join(MODEL_DIR, fname)
                 if os.path.exists(path):
                     have += os.path.getsize(path)
-            needed = max(MODEL_BYTES_TOTAL - have, 0) + DISK_HEADROOM_BYTES
+            needed = max(spec["bytes"] - have, 0) + DISK_HEADROOM_BYTES
             free = shutil.disk_usage(MODEL_DIR).free
             if free >= needed:
                 return ""

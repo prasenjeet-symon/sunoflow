@@ -151,7 +151,40 @@ before proceeding.
 
 ## 4. Download the model (first run)
 
-The Parakeet ONNX model (~2.5 GB, `istupakov/parakeet-tdt-0.6b-v3-onnx`) is **not
+### Which model variant a PC gets
+
+`istupakov/parakeet-tdt-0.6b-v3-onnx` publishes the same model twice, and the
+sidecar picks between them from the hardware — automatically, before the
+download, because the two are different files and a wrong guess costs another
+transfer rather than a reload.
+
+| Variant | On disk | Runs on | Chosen when |
+|---|---|---|---|
+| `fp32` | ~2.55 GB | DirectML (GPU) | A DX12 GPU reporting ≥ 4 GB dedicated VRAM, and room on disk |
+| `int8` | ~0.67 GB | CPU | Everything else — no DirectML, a smaller GPU, unreadable VRAM, or a full disk |
+
+`int8` is **not** "fp32 for weaker GPUs" — it is the CPU path. That export is
+dynamically quantized (`DynamicQuantizeLinear` / `MatMulInteger`), ops that
+exist to reach the CPU's VNNI/AVX integer kernels; DirectML's coverage of them
+is patchy enough that int8 on a GPU is routinely *slower* than fp32 once
+quantize/dequantize overhead is counted. So the adapter never pairs int8 with
+DirectML.
+
+VRAM is read from `HardwareInformation.qwMemorySize` under the display-adapter
+class key, not from WMI: `Win32_VideoController.AdapterRAM` is a uint32 and
+saturates at 4 GB, which is exactly the threshold being tested.
+
+The probe errs toward int8 whenever the hardware cannot be read — an
+unnecessary int8 costs a little accuracy, while an unnecessary fp32 costs the
+user 2.5 GB that then will not run. A complete model already on disk is always
+kept, even if the probe would now pick the other one.
+
+Override with `SUNOFLOW_MODEL_VARIANT=fp32|int8` (support and testing). The
+choice, its reason and its size are reported on `GET /model/status` as
+`variant`, `variant_reason` and `download_bytes`.
+
+The Parakeet ONNX model (fp32 ~2.5 GB / int8 ~0.67 GB,
+`istupakov/parakeet-tdt-0.6b-v3-onnx`) is **not
 bundled**. Download it once, from either:
 
 - the tray app: launch `SunoFlow.exe`, open **Settings → Model → Download**; or
@@ -230,7 +263,7 @@ The frozen sidecar goes to a stable per-user path the tray app knows about:
 ```
 %LOCALAPPDATA%\SunoFlow\
   sidecar\SunoFlowSidecar\        ← copy dist\SunoFlowSidecar\* here
-  model\                          ← downloaded on first run (~2.5 GB)
+  model\                          ← downloaded on first run (~2.5 GB fp32 / ~0.67 GB int8)
   corrections.json                ← seeded from the bundle on first run
   app-debug.log                   ← tray app log
   preferences.json                ← tray app settings
@@ -355,7 +388,7 @@ would demand rights the app never uses and break the sidecar path contract.
 Two things it handles that are easy to miss: it stops `SunoFlowSidecar.exe`
 before copying (the tray app deliberately leaves the sidecar running, so an
 upgrade would otherwise hit a locked exe), and on uninstall it clears the HKCU
-`Run` value however it was set, then *asks* before deleting the ~2.5 GB model
+`Run` value however it was set, then *asks* before deleting the downloaded model
 and your dictionary rather than assuming.
 
 The model is **not** bundled — it stays a first-run download, which keeps the

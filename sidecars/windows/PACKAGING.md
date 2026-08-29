@@ -39,7 +39,9 @@ cd sidecars\windows
 
 **Bundled:** the Python interpreter, all pip deps (onnxruntime-directml, onnx-asr, fastapi, uvicorn, starlette, requests, huggingface_hub, pydantic, python-multipart), the onnxruntime native DLLs (`onnxruntime.dll`, `onnxruntime_providers_shared.dll`, `DirectML.dll`), and a seed `corrections.json`.
 
-**Not bundled:** the Parakeet ONNX model (~2.5 GB). The user downloads it on first run from the tray app's **Settings → Model** tab (or `POST /model/download`). It lands in `%LOCALAPPDATA%\SunoFlow\model`, which is stable across sidecar upgrades so a reinstall doesn't force a re-download. This keeps the installer small and lets users defer the big download.
+**Not bundled:** the Parakeet ONNX model (~2.5 GB full precision, or ~0.67 GB
+for the int8 build a PC without a suitable GPU gets — the sidecar probes the
+hardware and picks, see `docs/BUILD_WINDOWS.md`). The user downloads it on first run from the tray app's **Settings → Model** tab (or `POST /model/download`). It lands in `%LOCALAPPDATA%\SunoFlow\model`, which is stable across sidecar upgrades so a reinstall doesn't force a re-download. This keeps the installer small and lets users defer the big download.
 
 ## Correctness notes
 
@@ -69,7 +71,7 @@ The C# tray app talks to the sidecar over `http://127.0.0.1:8765` and assumes th
 ```
 %LOCALAPPDATA%\SunoFlow\
   sidecar\SunoFlowSidecar\        ← the frozen bundle (this build's output)
-  model\                          ← downloaded on first run (~2.5 GB)
+  model\                          ← downloaded on first run (~2.5 GB fp32 / ~0.67 GB int8)
   corrections.json                ← seeded from the bundle on first run
   app-debug.log                   ← tray app log
   preferences.json                ← tray app settings

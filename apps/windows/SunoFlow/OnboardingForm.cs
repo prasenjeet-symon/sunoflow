@@ -21,7 +21,8 @@ namespace SunoFlow;
 /// Two things it deliberately does NOT do:
 ///
 ///   * It does not wait for the model before letting the user get on with the
-///     rest. The download is ~2.5 GB and can take an hour on a bad connection,
+///     rest. The download is up to ~2.5 GB — less on a PC that gets the int8
+///     build — and can take an hour on a bad connection,
 ///     so it starts the moment an account is connected and streams in the
 ///     background while the microphone and shortcut steps happen. Only the
 ///     final live test needs it, and that step can be left for later.
@@ -286,7 +287,7 @@ internal sealed class OnboardingForm : Form
         _content.Controls.Add(new SunoRow("Confirm your shortcut",
             "The key combination that starts dictation.", Glyph.Keyboard) { ReserveIconColumn = true });
         _content.Controls.Add(new SunoRow("Set up speech recognition",
-            "A one-time download of about 2.5 GB, which runs in the background while you finish the steps above.",
+            "A one-time download, sized to this PC's hardware, which runs in the background while you finish the steps above.",
             Glyph.Download) { ReserveIconColumn = true });
         _content.Controls.Add(new SunoRow("Say something",
             "A quick end-to-end check that it all works on this PC.",
@@ -487,7 +488,7 @@ internal sealed class OnboardingForm : Form
 
         _progressValue = new ValueText("—", Theme.Value, Theme.Body);
         _content.Controls.Add(new SunoRow("One-time download",
-            "About 2.5 GB. It only happens once, and it keeps working afterwards with no internet connection.",
+            "It only happens once, and it keeps working afterwards with no internet connection.",
             Glyph.Download, divider: false, trailing: _progressValue) { ReserveIconColumn = true });
 
         _progress = new SunoProgress { Margin = new Padding(0, 14, 0, 6) };

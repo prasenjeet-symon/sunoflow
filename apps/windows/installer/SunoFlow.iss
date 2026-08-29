@@ -140,7 +140,7 @@ begin
     RegDeleteValue(HKEY_CURRENT_USER,
       'Software\Microsoft\Windows\CurrentVersion\Run', 'SunoFlow');
 
-    // The model is ~2.5 GB and slow to fetch, and the dictionary is the user's
+    // The model is a large download and slow to fetch, and the dictionary is the user's
     // own accumulated corrections. Keeping them by default makes a reinstall
     // cheap; deleting is opt-in.
     DataDir := ExpandConstant('{localappdata}\SunoFlow');
@@ -148,7 +148,7 @@ begin
     begin
       if MsgBox('Also delete the downloaded speech model, your dictionary and settings?'
                 + #13#10#13#10
-                + 'The model is about 2.5 GB and would have to be downloaded again.'
+                + 'The speech model would have to be downloaded again.'
                 + ' Choose No to keep them for a future reinstall.',
                 mbConfirmation, MB_YESNO) = IDYES then
         DelTree(DataDir, True, True, True);

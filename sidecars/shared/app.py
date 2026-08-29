@@ -83,6 +83,9 @@ class SttAdapter:
 
         Return a dict with at least: ``active, phase, current_file, downloaded,
         file_total, overall_done, overall_total, error, model_dir, model_id``.
+        May also return ``variant, variant_label, variant_reason,
+        download_bytes`` where the platform ships more than one build of the
+        model; omitting them reports "no choice to make".
         See docs/CONTRACT.md §model-status for the exact fields the client reads.
         """
         raise NotImplementedError
@@ -295,6 +298,14 @@ def create_app(adapter: SttAdapter, corrections_path: str) -> FastAPI:
             # 2.5 GB again would not fix it.
             "load_error": adapter.load_error,
             "runtime": adapter.runtime_label(),
+            # Which build of the model this machine runs, and why. Windows picks
+            # between a full-precision and an int8 export from the hardware it
+            # finds; macOS has one build and leaves these empty. Empty means
+            # "no choice to report", not "unknown" — clients hide the row.
+            "variant": snap.get("variant", ""),
+            "variant_label": snap.get("variant_label", ""),
+            "variant_reason": snap.get("variant_reason", ""),
+            "download_bytes": snap.get("download_bytes", 0),
         }
 
     @app.post("/model/download")

@@ -194,7 +194,8 @@ internal static class TranscriptionClient
 
         /// <summary>Last <b>load</b> error — a distinct failure from
         /// <see cref="Error"/>, and one that re-downloading cannot fix: by the
-        /// time it happens 2.5 GB is already on disk and intact enough to open.
+        /// time it happens the whole model is already on disk and intact enough
+        /// to open.
         /// Empty when the model loaded, or was never downloaded.</summary>
         [JsonPropertyName("load_error")] public string LoadError { get; set; } = "";
 
@@ -202,6 +203,37 @@ internal static class TranscriptionClient
         /// or "CPU". The sidecar falls back to CPU on a box with no DX12 GPU,
         /// so the dashboard reads this rather than claiming the GPU.</summary>
         [JsonPropertyName("runtime")] public string Runtime { get; set; } = "";
+
+        /// <summary>Which build of the model this PC runs — "fp32" or "int8".
+        /// The sidecar picks it from the hardware it finds; it is not a setting,
+        /// and there is no user choice to offer. Empty on a platform that ships
+        /// only one build.</summary>
+        [JsonPropertyName("variant")] public string Variant { get; set; } = "";
+
+        /// <summary><see cref="Variant"/> in words, for display: "full precision"
+        /// or "int8".</summary>
+        [JsonPropertyName("variant_label")] public string VariantLabel { get; set; } = "";
+
+        /// <summary>Why the sidecar chose that build, in a sentence a user can
+        /// read. Worth showing: somebody told they are on the smaller model is
+        /// owed the reason, and "your GPU has 2 GB" is a better answer than
+        /// silence.</summary>
+        [JsonPropertyName("variant_reason")] public string VariantReason { get; set; } = "";
+
+        /// <summary>What this PC's variant weighs. Full precision is ~2.5 GB and
+        /// int8 about a quarter of that, so no screen may quote a fixed size —
+        /// read it from here via <see cref="DownloadSizeText"/>.</summary>
+        [JsonPropertyName("download_bytes")] public long DownloadBytes { get; set; }
+
+        /// <summary>The download size as a short phrase for prose. Falls back to
+        /// a size-free wording before the sidecar has said which variant this PC
+        /// gets, which is better than naming a number that may be four times
+        /// too big.</summary>
+        [JsonIgnore]
+        public string DownloadSizeText =>
+            DownloadBytes >= 1_000_000_000 ? $"about {DownloadBytes / 1_000_000_000.0:0.0} GB"
+            : DownloadBytes >= 1_000_000 ? $"about {DownloadBytes / 1_000_000.0:0} MB"
+            : "a one-time download";
 
         /// <summary>True when the model is downloaded but will not start. The
         /// one state the dashboard used to have no words for: it looked like

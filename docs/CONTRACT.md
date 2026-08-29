@@ -325,7 +325,11 @@ Report STT model presence, load state, and download progress.
   "model_dir": "/Users/.../parakeet-tdt-0.6b-v3",
   "model_id": "mlx-community/parakeet-tdt-0.6b-v3",
   "load_error": "",
-  "runtime": "GPU (DirectML)"
+  "runtime": "GPU (DirectML)",
+  "variant": "fp32",
+  "variant_label": "full precision",
+  "variant_reason": "DirectML GPU with 8.6 GB of memory",
+  "download_bytes": 2550000000
 }
 ```
 | Field | Type | Meaning |
@@ -344,6 +348,10 @@ Report STT model presence, load state, and download progress.
 | `model_id` | string | Source HF model id (for display). |
 | `load_error` | string | Last **load** error, empty if none. |
 | `runtime` | string | Compute path inference was verified on, e.g. `GPU (DirectML)` / `CPU`. Empty when unknown. |
+| `variant` | string | Which build of the model this machine uses: `fp32` \| `int8`. Empty where the platform ships only one (macOS). |
+| `variant_label` | string | `variant` in words, for display: `full precision` / `int8`. Empty with `variant`. |
+| `variant_reason` | string | Why that variant, in a sentence a user can read. Empty with `variant`. |
+| `download_bytes` | int64 | Size of `variant`'s file set, for sizing the download before it starts. `0` when there is no choice. |
 
 `error` and `load_error` are deliberately separate. `error` is about fetching
 the files and its remedy is to download again; `load_error` is about starting
@@ -362,6 +370,24 @@ which then loads cleanly and fails on first inference.
 
 `model_id` and `model_dir` are platform-specific (mac shows the mlx-community id;
 Windows shows the onnx export id). The client displays them read-only.
+
+`variant` is chosen by the sidecar from the hardware, not by the user, and is
+settled **before** the download because the two builds are different files — a
+wrong answer costs another multi-gigabyte transfer rather than a reload. Windows
+sends a box with a DX12 GPU and enough VRAM the full-precision export on
+DirectML, and everything else the int8 export on the CPU. int8 is not
+"full precision for weaker GPUs": it is the CPU path, because the quantized ops
+it is built from target the CPU's integer kernels and are frequently *slower*
+under DirectML. The probe errs toward int8 whenever the hardware cannot be read.
+
+A client must present `variant` as a fact about the machine, not a setting, and
+should show `variant_reason` beside it — a user told they are on the smaller
+model is owed why. `download_bytes` lets the Model tab name the size before the
+user commits to it. Where a complete model is already on disk, `variant`
+describes *that* one even if the probe would now pick the other, and
+`variant_reason` says so; the sidecar never fetches a second build alongside one
+it already has. `SUNOFLOW_MODEL_VARIANT=fp32|int8` overrides the probe for
+support, and is reported through `variant_reason` like any other outcome.
 
 ---
 
