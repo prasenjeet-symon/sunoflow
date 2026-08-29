@@ -348,9 +348,14 @@ class ParakeetOnnxAdapter(SttAdapter):
                 w.setsampwidth(2)
                 w.setframerate(16000)
                 w.writeframes(samples.tobytes())
-            started = time.monotonic()
+            # perf_counter, not monotonic. On Windows monotonic() is
+            # GetTickCount64() at ~15.6 ms resolution, which is coarse enough to
+            # time this pass as exactly zero and report 0.0x realtime for a model
+            # that ran fine. perf_counter() is QueryPerformanceCounter there and
+            # sub-microsecond everywhere we run.
+            started = time.perf_counter()
             model.recognize(path)
-            elapsed = time.monotonic() - started
+            elapsed = time.perf_counter() - started
             self._rtf = (SMOKE_SECONDS / elapsed) if elapsed > 0 else 0.0
         finally:
             try:

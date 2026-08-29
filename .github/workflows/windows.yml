@@ -98,8 +98,14 @@ jobs:
           python-version: "3.12"
           architecture: "x64"
 
+      # onnx-asr + the CPU onnxruntime wheel are here for one test: the one
+      # asserting our fp32/int8 file manifests still match the globs onnx-asr
+      # resolves them by. Without them it skips, and an onnx-asr upgrade that
+      # renamed a file would land silently — producing a model that downloads
+      # perfectly and then will not load. The CPU wheel is small; this is not
+      # the DirectML runtime the sidecar ships with.
       - name: Install test deps
-        run: python -m pip install --upgrade pip pytest fastapi httpx requests python-multipart
+        run: python -m pip install --upgrade pip pytest fastapi httpx requests python-multipart onnx-asr onnxruntime
 
       - name: Run tests
         run: python -m pytest sidecars/shared/tests sidecars/windows/tests -q
