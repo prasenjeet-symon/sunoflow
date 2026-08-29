@@ -182,14 +182,19 @@ jobs:
           ## First run
 
           1. Open **Settings -> Account** and connect this PC.
-          2. Open **Settings -> Speech Model** and download the model (~2.5 GB,
-             one time). Speech recognition runs entirely on your machine.
+          2. Open **Settings -> Speech Model** and download the model (one
+             time). SunoFlow picks the build that suits your hardware: about
+             2.6 GB where there is a DirectX 12 GPU with 4 GB or more of
+             memory, and about 0.7 GB otherwise. Speech recognition runs
+             entirely on your machine either way.
           3. Press **Alt+Space** anywhere to dictate.
 
           ## Requirements
 
           - Windows 10 (21H2+) or 11, 64-bit
-          - A DirectX 12 GPU (NVIDIA, AMD or Intel)
+          - No graphics card required. A DirectX 12 GPU (NVIDIA, AMD or Intel)
+            with 4 GB or more of memory runs the full-precision model; without
+            one, dictation runs on your processor instead.
           "@
           gh release create "v$v" `
             (Get-ChildItem apps\windows\installer\output\* | ForEach-Object { $_.FullName }) `
