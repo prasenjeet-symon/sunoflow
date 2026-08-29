@@ -83,3 +83,8 @@ functions/.secret.local
 
 # Firebase CLI deploy cache — machine-local, regenerated on every deploy
 .firebase/
+
+# Dictation smoke test droppings — the downloaded model and the run's lease.
+# The WAV fixture it transcribes IS committed (sidecars/testdata/).
+model-cache/
+dictation-smoke-lease.json

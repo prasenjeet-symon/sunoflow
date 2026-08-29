@@ -13,9 +13,10 @@ end users run without a Python install.
 >
 > **Not at a Windows box?** `.github/workflows/windows.yml` runs everything in
 > this guide except the GPU work on a `windows-latest` runner — the tray-app
-> build and publish (§2), the sidecar tests (§9), and the PyInstaller freeze
-> plus a boot-and-`/health` check (§5). Both builds are uploaded as run
-> artifacts, so a Windows machine can test them with no toolchain installed.
+> build and publish (§2), the sidecar tests (§9), the PyInstaller freeze plus a
+> boot-and-`/health` check (§5), and a real dictation through the frozen bundle
+> on the int8 CPU path (§3b). Both builds are uploaded as run artifacts, so a
+> Windows machine can test them with no toolchain installed.
 
 ## Prerequisites (one-time)
 
@@ -148,6 +149,31 @@ number to the CPU number — DirectML should be faster. The macOS MLX baseline f
 a 9 s clip is ~314 ms (RTF 0.035); aim to be in that ballpark. If DirectML is
 *slower* than CPU or binds to CPU, the GPU isn't being used — stop and diagnose
 before proceeding.
+
+### 3b. The CI counterpart: `dictation_smoke.py`
+
+`validate_onnx.py` needs a GPU box. Its CPU-only sibling runs on every push, in
+the `freeze-sidecar` job, and is the only part of CI that transcribes anything:
+
+```powershell
+python sidecars\windows\dictation_smoke.py `
+  --exe sidecars\windows\dist\SunoFlowSidecar\SunoFlowSidecar.exe `
+  --wav sidecars\testdata\dictation-smoke.wav `
+  --model-dir model-cache
+```
+
+It drives the **frozen bundle** the way the tray app does — pins the variant to
+int8, downloads the model over `POST /model/download`, then sends the clip to
+`POST /transcribe` — and asserts the expected words come back. The cleanup
+gateway is stubbed (a dictation is entitlement-checked even with cleanup off, by
+design); the model, the engine, the download manager and the HTTP layer are all
+real. The 671 MB model is cached between runs.
+
+This is possible on a GPU-less runner only because int8 *is* the CPU path, which
+is also its boundary: it says nothing about DirectML, and the runner's shared
+vCPUs make its RTF a smoke signal, not a latency measurement. §3a stays the
+go/no-go gate. Run this locally too — it reproduces a CI failure in one command,
+and works on any Windows box with no GPU.
 
 ## 4. Download the model (first run)
 

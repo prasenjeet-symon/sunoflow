@@ -6,10 +6,16 @@
 # push instead of on the first Windows box we get our hands on.
 #
 # What this DOES prove: the C# compiles and publishes, the sidecar's shared core
-# passes its tests on Windows, and the PyInstaller bundle freezes and boots.
+# passes its tests on Windows, the PyInstaller bundle freezes and boots, and —
+# because the int8 export is the CPU path rather than a lesser GPU one — the
+# frozen bundle downloads a real model and turns real speech into the right
+# words. That last part covers the engine every GPU-less user actually runs.
 # What it does NOT prove: DirectML. GitHub's runners have no DX12 GPU, so the
 # STT engine's provider binding and latency — the Windows track's real go/no-go
-# gate — still needs `sidecars/windows/validate_onnx.py` on real hardware.
+# gate — still needs `sidecars/windows/validate_onnx.py` on real hardware. Nor
+# the microphone, the hotkey or text injection: those live in the tray app and
+# want a desktop session with audio hardware. And the runner's shared vCPUs
+# make its transcription time a smoke signal, never a latency measurement.
 name: Windows
 
 on:
@@ -111,9 +117,9 @@ jobs:
         run: python -m pytest sidecars/shared/tests sidecars/windows/tests -q
 
   # --------------------------------------------------------------------------
-  # The PyInstaller freeze. Reviewed-only until now — this is its first build.
-  # Boots the frozen exe and checks /health, which is as far as we can go
-  # without the 2.5 GB model.
+  # The PyInstaller freeze, and the only job that runs a dictation. It builds
+  # the bundle, proves it boots, then drives it exactly as the tray app does:
+  # model download over HTTP, then a real clip through POST /transcribe.
   # --------------------------------------------------------------------------
   freeze-sidecar:
     name: Sidecar freeze (PyInstaller)
@@ -193,6 +199,30 @@ jobs:
           Write-Host "--- sidecar stdout ---"; Get-Content sidecar-out.log -ErrorAction SilentlyContinue
           Write-Host "--- sidecar stderr ---"; Get-Content sidecar-err.log -ErrorAction SilentlyContinue
           if (-not $ok) { throw "Frozen sidecar never answered /health" }
+
+      # The model files are immutable — they are pinned revisions in an HF repo —
+      # so the key is static and only ever needs bumping when the int8 manifest
+      # in adapter.py VARIANTS changes. A miss costs one 671 MB download; a hit
+      # costs nothing, and either way the sidecar's own download manager is what
+      # decides the files are complete.
+      - name: Cache the int8 speech model
+        uses: actions/cache@v4
+        with:
+          path: model-cache
+          key: sunoflow-parakeet-tdt-0.6b-v3-int8-v1
+
+      # The dictation itself. Everything above this proves the bundle exists and
+      # can import its engine; only this proves the engine produces words. See
+      # the script's docstring for what is real here (the model, the engine, the
+      # download manager, the HTTP layer) and what is stubbed (the gateway).
+      - name: Dictation smoke test (int8 on CPU)
+        shell: pwsh
+        run: |
+          python sidecars\windows\dictation_smoke.py `
+            --exe sidecars\windows\dist\SunoFlowSidecar\SunoFlowSidecar.exe `
+            --wav sidecars\testdata\dictation-smoke.wav `
+            --model-dir model-cache
+          if ($LASTEXITCODE -ne 0) { throw "Dictation smoke test failed" }
 
       - uses: actions/upload-artifact@v4
         with:
