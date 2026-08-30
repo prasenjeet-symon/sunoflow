@@ -330,3 +330,49 @@ func TestLooksLikeEcho_CyrillicContext(t *testing.T) {
 		t.Error("expected echo when a Cyrillic context tail appears in the output")
 	}
 }
+
+// TestLooksLikeEcho_RepeatedPhraseIsNotEcho: dictation is full of stock
+// phrases, and saying one twice is not the model leaking RECENT DICTATION. The
+// old guard flagged every one of these, and each false positive cost a second
+// backend call plus the weaker context-free retry.
+func TestLooksLikeEcho_RepeatedPhraseIsNotEcho(t *testing.T) {
+	cases := []struct{ name, text, cleaned string }{
+		{"sign-off", "let me know if you need anything else", "Let me know if you need anything else."},
+		{"thanks", "thanks so much for your help", "Thanks so much for your help."},
+		{"follow-up", "i'll get back to you on that", "I'll get back to you on that."},
+	}
+	for _, c := range cases {
+		recent := []string{c.cleaned} // the speaker said exactly this a moment ago
+		if TooLong(c.cleaned, c.text, nil) {
+			t.Fatalf("%s: setup — TooLong fired, so this does not isolate the recent check", c.name)
+		}
+		if LooksLikeEcho(c.cleaned, c.text, "", recent, "", nil) {
+			t.Errorf("%s: repeating your own phrase should not read as an echo", c.name)
+		}
+	}
+}
+
+// TestLooksLikeEcho_GenuineRecentEchoStillCaught: the discriminator must not
+// blunt the guard. Where the speaker did NOT say the recent line and it shows up
+// anyway, the model supplied it and that is exactly the leak we watch for.
+func TestLooksLikeEcho_GenuineRecentEchoStillCaught(t *testing.T) {
+	recent := []string{"Let me know if you need anything else."}
+	text := "the deploy finished about ten minutes ago"
+	cleaned := "The deploy finished about ten minutes ago. Let me know if you need anything else."
+	if !LooksLikeEcho(cleaned, text, "", recent, "", nil) {
+		t.Error("expected an echo when a recent line the speaker never said appears in the output")
+	}
+}
+
+// TestSaidByTheSpeaker_NormalizesBothSides: the raw transcript and a previously
+// cleaned RECENT DICTATION entry are punctuated and cased differently, so an
+// un-normalized comparison would never match and the discriminator would be
+// dead code that silently restored the old false positives.
+func TestSaidByTheSpeaker_NormalizesBothSides(t *testing.T) {
+	if !saidByTheSpeaker("lets ship the cleanup gateway today", "Let's ship the cleanup-gateway today!") {
+		t.Error("punctuation, case and hyphenation differences should not defeat the match")
+	}
+	if saidByTheSpeaker("something else entirely", "Let's ship the cleanup-gateway today!") {
+		t.Error("unrelated text must not match")
+	}
+}

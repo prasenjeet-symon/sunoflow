@@ -5,6 +5,7 @@ package cleanup
 
 import (
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -333,6 +334,49 @@ func tail(s string, n int) string {
 	return t
 }
 
+// saidByTheSpeaker reports whether a phrase already appears in the raw
+// transcript. Reference material only counts as an echo when the model supplied
+// it; where the speaker actually said the words, their presence in the output is
+// the correct result rather than a leak.
+//
+// The comparison has to be normalized because the two sides are not written
+// alike. The raw transcript arrives from the speech model, while a RECENT
+// DICTATION entry is a previously *cleaned* line — capitalized and punctuated.
+// A literal Contains would never match, and the discriminator would silently do
+// nothing at all.
+func saidByTheSpeaker(text, phrase string) bool {
+	return strings.Contains(normalizeForCompare(text), normalizeForCompare(phrase))
+}
+
+// normalizeForCompare lowercases and reduces every run of non-alphanumerics to a
+// single space, so "cleanup-gateway" and "cleanup gateway" compare equal and
+// punctuation differences between raw and cleaned text stop mattering.
+//
+// Apostrophes are dropped rather than spaced. Speech models are inconsistent
+// about them — "let's" one time, "lets" the next — and spacing would split the
+// first into "let s", so the two would stop matching on a difference that is
+// purely how the transcriber felt about a contraction.
+func normalizeForCompare(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	pendingSpace := false
+	for _, r := range strings.ToLower(s) {
+		switch {
+		case unicode.IsLetter(r) || unicode.IsDigit(r):
+			if pendingSpace && b.Len() > 0 {
+				b.WriteByte(' ')
+			}
+			b.WriteRune(r)
+			pendingSpace = false
+		case r == '\'' || r == '\u2019' || r == '\u02bc':
+			// intra-word mark: join the halves rather than splitting them
+		default:
+			pendingSpace = true
+		}
+	}
+	return b.String()
+}
+
 // LooksLikeEcho reports whether the output likely includes reference material
 // rather than only the cleaned new transcript.
 func LooksLikeEcho(cleaned, text, context string, recent []string, screen string, dict []Entry) bool {
@@ -347,7 +391,14 @@ func LooksLikeEcho(cleaned, text, context string, recent []string, screen string
 	}
 	for _, r := range recent {
 		r = strings.TrimSpace(r)
-		if len(r) >= 15 && strings.Contains(cleaned, r) {
+		// A recent dictation reappearing is only an echo when the model put it
+		// there. Saying the same stock phrase twice — "Thanks so much for your
+		// help." — is ordinary dictation, and treating it as a leak is
+		// expensive: the caller answers an echo by re-running cleanup with no
+		// context, history or screen, so the user pays a second backend call
+		// and gets back the weaker context-free result on their most everyday
+		// sentences.
+		if len(r) >= 15 && strings.Contains(cleaned, r) && !saidByTheSpeaker(text, r) {
 			return true
 		}
 	}
