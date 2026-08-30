@@ -3,6 +3,7 @@ package cleanup
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // TestBuildPrompt_NoExtras matches the sidecar: no screen/context/recent.
@@ -279,5 +280,53 @@ func TestCleanupRules_Dictionary(t *testing.T) {
 	// dictionary gained the power to substitute, or the prompt contradicts itself.
 	if strings.Contains(CleanupRules, "The FORMATTING and EMOJI cues above are the only things you ever act on.") {
 		t.Error("stale absolute claim: dictionary substitutions are now also acted on")
+	}
+}
+
+// TestCleanupRules_LanguagePreservation guards the LANGUAGE section. The speech
+// model detects the language of each dictation itself and the speaker may
+// switch between them, so the prompt has to pin the output language — and has
+// to close the loophole that translation preserves meaning, which would
+// otherwise slip past the "never change the meaning" rule.
+func TestCleanupRules_LanguagePreservation(t *testing.T) {
+	for _, want := range []string{
+		"SAME language and script as the NEW TRANSCRIPT",
+		"Never translate",
+		"does NOT license it",
+		"pull the transcript toward their own language",
+	} {
+		if !strings.Contains(CleanupRules, want) {
+			t.Errorf("LANGUAGE rule missing %q", want)
+		}
+	}
+}
+
+// TestTail_RuneBoundary: slicing bytes out of multi-byte text must not leave a
+// dangling continuation byte, or the echo check silently stops matching
+// non-English reference material.
+func TestTail_RuneBoundary(t *testing.T) {
+	s := strings.Repeat("я", 40) // 2 bytes per rune
+	got := tail(s, 15)           // odd byte count — lands mid-rune
+	if !utf8.ValidString(got) {
+		t.Errorf("tail returned invalid UTF-8: %q", got)
+	}
+	if !strings.HasSuffix(s, got) {
+		t.Errorf("tail should be a suffix of its input, got %q", got)
+	}
+}
+
+// TestLooksLikeEcho_CyrillicContext: the echo guard must fire on non-English
+// context exactly as it does on English.
+func TestLooksLikeEcho_CyrillicContext(t *testing.T) {
+	text := strings.Repeat("это тестовое сообщение. ", 5)
+	context := strings.Repeat("ф", 20) + "конец-контекста-здесь-!!"
+	cleaned := text + tail(context, 40)
+	// Guard the setup: if TooLong fired, the assertion below would pass for the
+	// wrong reason and prove nothing about the context check.
+	if TooLong(cleaned, text, nil) {
+		t.Fatal("setup: TooLong fired, so this does not isolate the context check")
+	}
+	if !LooksLikeEcho(cleaned, text, context, nil, "", nil) {
+		t.Error("expected echo when a Cyrillic context tail appears in the output")
 	}
 }
