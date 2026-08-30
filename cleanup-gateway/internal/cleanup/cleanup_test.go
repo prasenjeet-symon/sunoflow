@@ -376,3 +376,30 @@ func TestSaidByTheSpeaker_NormalizesBothSides(t *testing.T) {
 		t.Error("unrelated text must not match")
 	}
 }
+
+// TestLooksLikeEcho_RedictatedContextIsNotEcho: correcting a sentence in place
+// means dictating words that are already sitting before the cursor. That is the
+// speaker's own text arriving twice, not the model reciting CONTEXT back.
+func TestLooksLikeEcho_RedictatedContextIsNotEcho(t *testing.T) {
+	context := "I wanted to follow up on the deploy we discussed yesterday afternoon"
+	ctail := tail(context, 40)
+	text := strings.ToLower(ctail) // the speaker says it again, raw from the recognizer
+	cleaned := "The " + ctail + "."
+	if TooLong(cleaned, text, nil) {
+		t.Fatal("setup: TooLong fired, so this does not isolate the context check")
+	}
+	if LooksLikeEcho(cleaned, text, context, nil, "", nil) {
+		t.Error("re-dictating the text before the cursor should not read as an echo")
+	}
+}
+
+// TestLooksLikeEcho_GenuineContextEchoStillCaught: where the speaker did not say
+// it, CONTEXT appearing in the output is the leak the guard exists for.
+func TestLooksLikeEcho_GenuineContextEchoStillCaught(t *testing.T) {
+	context := "I wanted to follow up on the deploy we discussed yesterday afternoon"
+	text := "something completely different was mentioned"
+	cleaned := "Something completely different was mentioned. " + tail(context, 40)
+	if !LooksLikeEcho(cleaned, text, context, nil, "", nil) {
+		t.Error("expected an echo when context the speaker never said appears in the output")
+	}
+}

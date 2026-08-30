@@ -413,7 +413,12 @@ func LooksLikeEcho(cleaned, text, context string, recent []string, screen string
 			return true
 		}
 	}
-	if len(context) >= 20 && strings.Contains(cleaned, tail(context, 40)) {
+	// Same discriminator as RECENT DICTATION above: re-dictating a sentence that
+	// is already sitting before the cursor — correcting it in place, most often
+	// — is the speaker's own text coming back, not the model reciting CONTEXT
+	// at us.
+	if ctxTail := tail(context, 40); len(context) >= 20 &&
+		strings.Contains(cleaned, ctxTail) && !saidByTheSpeaker(text, ctxTail) {
 		return true
 	}
 	// Screen OCR words are short and noisy, so only flag a long verbatim chunk.
