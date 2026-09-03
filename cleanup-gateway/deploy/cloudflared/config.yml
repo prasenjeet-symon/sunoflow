@@ -1,0 +1,25 @@
+# Cloudflare named tunnel for the SunoFlow cleanup gateway.
+#
+# Public endpoint:
+#   https://cleanup.ogcode.xyz  ->  http://localhost:8081 (nginx)  ->  gateway:8080
+#
+# The tunnel (`kavachqr-dev`) was originally provisioned for the KavachQR
+# project and is shared with SunoFlow. It was relocated into the SunoFlow
+# tree after KavachQR was decommissioned. The tunnel NAME is historical —
+# renaming a live tunnel is possible but not worth the downtime here.
+#
+# Credentials secret (`kavachqr-dev.json`) lives next to this file and is
+# gitignored — never commit it. Account cert (`~/.cloudflared/cert.pem`,
+# needed only for `tunnel create` / `route dns`) is also outside version
+# control.
+#
+# DNS route (one-time, already provisioned):
+#   cloudflared tunnel route dns kavachqr-dev cleanup.ogcode.xyz
+
+tunnel: 2a9975bd-e8a6-4fe5-b394-e42401b02d0c
+credentials-file: /Users/prasenjeet/Downloads/work/sunoapp/cleanup-gateway/deploy/cloudflared/kavachqr-dev.json
+
+ingress:
+  - hostname: cleanup.ogcode.xyz
+    service: http://localhost:8081
+  - service: http_status:404

@@ -24,24 +24,27 @@ Only nginx publishes a host port, and only on loopback — nothing here is
 internet-facing directly. The gateway needs no inbound access and no local
 model runtime; outbound HTTPS to Gemini is its only external dependency.
 
-### Point it at the Cloudflare tunnel
+### Public endpoint
 
-The existing `kavachqr-dev` named tunnel (zone `mirrorli.art`) already has an
-ingress for this service:
+Production runs on the VPS behind `https://cleanup.ogcode.xyz` — a DNS-only
+(grey-cloud) A record pointing straight at the box, no CDN in the path. TLS
+terminates at the provider's shared Caddy edge with a Let's Encrypt certificate
+for the domain; requests then pass through the host's nginx into the gateway:
 
 ```
-https://cleanup.mirrorli.art  ->  http://localhost:8081  (nginx)  ->  gateway:8080
+https://cleanup.ogcode.xyz  ->  Caddy (provider edge, TLS)  ->  nginx (host)  ->  gateway:8080
 ```
-
-That ingress and DNS route are already configured, so once `docker compose up
--d` is running, the public URL works immediately:
 
 ```sh
-curl https://cleanup.mirrorli.art/health      # → {"status":"ok"}
-curl https://cleanup.mirrorli.art/ready       # → {"backend":"gemini","backend_ok":true,...}
+curl https://cleanup.ogcode.xyz/health      # → {"status":"ok"}
+curl https://cleanup.ogcode.xyz/ready       # → {"backend":"gemini","backend_ok":true,...}
 ```
 
-TLS is terminated by Cloudflare; nginx inside the compose stack is HTTP-only.
+The numeric port `https://cleanup.ogcode.xyz` reaches the same nginx in
+cleartext — server-side debugging only, never sent client-side since
+2026-08-31: it exposes bearer keys and transcripts in the clear. The Cloudflare
+tunnel that used to front the domain was decommissioned on 2026-08-29; see
+`deploy/cloudflared/README.md`.
 
 ### First run
 
@@ -83,7 +86,7 @@ No client release needed.
 ## Issue a key (manual, v1)
 
 ```sh
-curl -X POST https://cleanup.mirrorli.art/admin/keys \
+curl -X POST https://cleanup.ogcode.xyz/admin/keys \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"label":"Prasenjeet MBP"}'
@@ -94,25 +97,25 @@ Hand the `key` to the user out-of-band. It is shown **once**; only the SHA-256
 hash is stored. List keys (metadata only):
 
 ```sh
-curl -H "Authorization: Bearer $ADMIN_TOKEN" https://cleanup.mirrorli.art/admin/keys
+curl -H "Authorization: Bearer $ADMIN_TOKEN" https://cleanup.ogcode.xyz/admin/keys
 ```
 
 Revoke:
 
 ```sh
 curl -X DELETE -H "Authorization: Bearer $ADMIN_TOKEN" \
-  https://cleanup.mirrorli.art/admin/keys/<id>
+  https://cleanup.ogcode.xyz/admin/keys/<id>
 ```
 
 ## Verify
 
 ```sh
 # Liveness
-curl https://cleanup.mirrorli.art/health
+curl https://cleanup.ogcode.xyz/health
 # Readiness (probes Gemini)
-curl https://cleanup.mirrorli.art/ready
+curl https://cleanup.ogcode.xyz/ready
 # Cleanup
-curl -X POST https://cleanup.mirrorli.art/cleanup \
+curl -X POST https://cleanup.ogcode.xyz/cleanup \
   -H "Authorization: Bearer <user-key>" \
   -H "Content-Type: application/json" \
   -d '{"text":"um so I think we should um ship this on friday"}'

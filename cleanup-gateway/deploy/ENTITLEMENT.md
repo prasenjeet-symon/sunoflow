@@ -27,7 +27,7 @@ it does not belong in the repo, and anyone holding it can read every account.
 
 ## 2. Put it on the server
 
-Everything from here runs **on the server** that hosts `cleanup.mirrorli.art`,
+Everything from here runs **on the server** that hosts the cleanup gateway,
 not on your Mac. The only thing you do locally is build the binary, and only if
 you deploy the systemd way.
 
@@ -88,7 +88,7 @@ cross-compilation question entirely.
 answering, so you do not need shell access to tell:
 
 ```bash
-curl -s -X POST https://cleanup.mirrorli.art/cleanup \
+curl -s -X POST https://cleanup.ogcode.xyz/cleanup \
   -H "Authorization: Bearer sf_not_a_real_key" \
   -H "Content-Type: application/json" \
   -d '{"text":"probe"}'
@@ -137,9 +137,9 @@ points the user at Settings → Account.
 Speech-to-text runs on the user's own machine, so the `/cleanup` call is the
 only thing standing between an expired account and a working product. That made
 the sidecar's "soft-fail to raw text when the gateway is unreachable" rule — the
-right behaviour for an outage — into the cheapest bypass there was: point
-`cleanup.mirrorli.art` at localhost in `/etc/hosts` and dictation is free
-forever, silently.
+right behaviour for an outage — into the cheapest bypass there was:
+blackhole `https://cleanup.ogcode.xyz` at the firewall and dictation is free forever,
+silently.
 
 Every entitled response now carries a signed **lease**, valid 72 hours, which
 the sidecar stores. When it cannot reach the gateway it keeps working only while

@@ -2,8 +2,8 @@
 
 Cleanup soft-fails to the raw transcript whenever the gateway cannot be
 reached, because an outage on our side must never cost a user their words.
-Unbounded, that was the cheapest bypass in the product: point
-``cleanup.mirrorli.art`` at localhost and dictation is free forever, because
+Unbounded, that was the cheapest bypass in the product: blackhole
+``cleanup.ogcode.xyz`` at the firewall and dictation is free forever, because
 speech-to-text is local and nothing else breaks.
 
 A lease bounds it. Every entitled response carries a signed token good for

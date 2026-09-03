@@ -290,9 +290,9 @@ Security**:
 The cleanup/LLM step that fixes disfluencies, punctuation, and names runs on a
 **remote hosted gateway**, not locally — end users do **not** install or run
 Ollama. The sidecar POSTs `{text, context, recent, screen}` to
-`https://cleanup.mirrorli.art/cleanup` (Bearer-authed) and soft-fails to raw
+`https://cleanup.ogcode.xyz/cleanup` (Bearer-authed) and soft-fails to raw
 text on any error (network/auth/timeout/non-200) — dictation never breaks
-because cleanup is down. The Swift app probes `https://cleanup.mirrorli.art/ready`
+because cleanup is down. The Swift app probes `https://cleanup.ogcode.xyz/ready`
 for its connectivity status card in Settings.
 
 Override the gateway for dev (e.g. point at a local `docker-compose` stack):

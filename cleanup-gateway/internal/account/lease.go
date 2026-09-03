@@ -4,8 +4,8 @@ package account
 //
 // The sidecar soft-fails to raw text whenever it cannot reach the gateway,
 // because an outage on our side must never cost a user their words. Without a
-// bound on that, blocking `cleanup.mirrorli.art` in /etc/hosts was unlimited
-// free dictation: speech-to-text is local, so nothing else broke.
+// bound on that, blackholing the gateway's IP was unlimited free dictation:
+// speech-to-text is local, so nothing else broke.
 //
 // A lease is what bounds it. Every successful entitlement check hands the
 // sidecar a short-lived signed token; when the gateway is unreachable the
