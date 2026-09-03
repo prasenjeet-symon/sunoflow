@@ -9,6 +9,13 @@
     <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
     <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
     <UseWindowsForms>true</UseWindowsForms>
+    <!-- Lets the project compile on macOS/Linux, where the Windows targeting
+         packs are not installed by default but do restore from NuGet. It only
+         affects who can run `dotnet build`; the output is identical on Windows.
+         Worth having: the whole tray app can be type-checked from the same
+         machine the Mac app is developed on, which is where its bugs are
+         written. Running it still requires Windows. -->
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <!-- Pin to x64: the target is modern Windows GPUs (all 64-bit). Pinning the

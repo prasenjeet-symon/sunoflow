@@ -341,8 +341,12 @@ must never break dictation.
 
 ## 8. Build & validation (cannot run on macOS)
 
-The Windows tray app cannot be compiled on macOS (no `net8.0-windows` SDK).
-This plan is **reviewed-only** until the first Windows `dotnet build`. The
+~~The Windows tray app cannot be compiled on macOS (no `net8.0-windows` SDK).~~
+**Superseded 2026-09-03:** setting `EnableWindowsTargeting` in the `.csproj`
+restores the Windows targeting packs from NuGet, and the tray app now compiles
+on macOS — see `apps/windows/README.md`. It still cannot be *run* there, so the
+smoke tests below remain the gate; only "does it compile" moved off the
+Windows box. The
 validation sequence, to run on a Windows box:
 
 1. **Build:** `cd apps\windows\SunoFlow && dotnet build -c Release`

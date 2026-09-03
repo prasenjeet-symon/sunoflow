@@ -18,10 +18,10 @@ engine differs (ONNX/DirectML instead of MLX).
 │  • NotifyIcon tray + state machine│        │  Cleanup → cleanup-gateway     │
 │  • Global hotkey (RegisterHotKey) │        └────────────────────────────────┘
 │  • NAudio mic → 16k mono WAV       │                  │
-│  • SendInput Ctrl+V text insert    │                  │ HTTPS
+│  • SendInput Ctrl+V text insert    │                  │ HTTP
 │  • WM_GETTEXT focused-field context│                  ▼
 │  • Screen-context OCR (WinRT)      │        ┌────────────────────────────────┐
-└──────────────────────────────────┘        │  cleanup.mirrorli.art (Go)     │
+└──────────────────────────────────┘        │  cleanup-gateway (Go)          │
                                             │  Bearer-key transcript polish   │
                                             └────────────────────────────────┘
 ```
@@ -69,6 +69,12 @@ cd apps\windows\SunoFlow
 dotnet build -c Release -p:Platform=x64
 # → bin\x64\Release\net8.0-windows10.0.19041.0\SunoFlow.exe
 ```
+
+**This project compiles on macOS and Linux too.** `EnableWindowsTargeting` in
+the `.csproj` lets the Windows targeting packs restore from NuGet, so
+`dotnet build` type-checks the whole tray app from the same machine the Mac app
+is developed on — which is where its bugs get written. Running it still needs
+Windows. Do not assume a change is safe because it looks right: build it.
 
 `-p:Platform=x64` is what puts the build under `bin\x64\`; without it MSBuild
 falls back to `AnyCPU` and the output lands in `bin\Release\` instead. The
@@ -221,9 +227,10 @@ node tools\make-icons.js
 
 **Compiles and packages; not yet validated on a Windows GPU box.**
 
-Neither half can be built on the macOS box this repo is developed on, so both
-are built in CI instead — `.github/workflows/windows.yml` runs on a
-`windows-latest` runner and is the authority on whether this tree builds:
+The tray app compiles on the macOS box this repo is developed on (see Build);
+the sidecar half does not, and neither half can be *run* there. CI is still the
+authority on the whole tree — `.github/workflows/windows.yml` runs on a
+`windows-latest` runner:
 
 - the tray app compiles clean (no warnings) and publishes a self-contained
   `SunoFlow.exe`;
