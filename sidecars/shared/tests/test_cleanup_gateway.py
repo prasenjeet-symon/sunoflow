@@ -202,6 +202,31 @@ def test_no_dictionary_field_when_nothing_is_relevant(gateway):
     assert "dictionary" not in gateway.last_request()
 
 
+# --- the chosen tone on the wire ----------------------------------------------
+
+def test_the_tone_is_sent_when_one_is_chosen(gateway):
+    """An ID, and only an ID. The sidecar never sends the instruction behind a
+    voice — the gateway owns that, so there is nothing here to drift."""
+    cleanup.clean_with_gateway("hello world", key=KEY, tone="formal")
+    assert gateway.last_request()["tone"] == "formal"
+
+
+def test_no_tone_field_on_the_default(gateway):
+    """The promise to everyone who never touches the key: their request is the
+    one this sidecar has always sent, field for field."""
+    for tone in ("", "   ", None):
+        cleanup.clean_with_gateway("hello world", key=KEY, tone=tone)
+        assert "tone" not in gateway.last_request()
+
+
+def test_an_unknown_tone_is_passed_through_rather_than_guessed_at(gateway):
+    """Validation lives in one place, and it is not here. A sidecar that also
+    kept a list would be a second copy to forget to update — which is how the
+    entitlement check went missing from Windows."""
+    cleanup.clean_with_gateway("hello world", key=KEY, tone="poetic")
+    assert gateway.last_request()["tone"] == "poetic"
+
+
 # --- the connection is kept, not rebuilt per dictation ------------------------
 
 def test_dictations_share_one_connection(gateway, monkeypatch):

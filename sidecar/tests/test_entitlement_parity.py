@@ -267,6 +267,20 @@ def test_the_macos_sidecar_omits_an_empty_dictionary(gateway):
     assert "dictionary" not in gateway.last_request()
 
 
+# --- and the same for the chosen tone -----------------------------------------
+
+def test_the_macos_sidecar_sends_the_tone(gateway):
+    mac.clean_with_gateway("hello world", key=KEY, tone="formal")
+    assert gateway.last_request()["tone"] == "formal"
+
+
+def test_the_macos_sidecar_omits_an_empty_tone(gateway):
+    """Whatever else the two copies do, a user who never picks a voice must get
+    the identical request from either platform — the one sent before tones."""
+    mac.clean_with_gateway("hello world", key=KEY, tone="")
+    assert "tone" not in gateway.last_request()
+
+
 # --- the connection is kept, not rebuilt per dictation ------------------------
 
 def test_dictations_share_one_connection(gateway, monkeypatch):

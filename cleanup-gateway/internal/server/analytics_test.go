@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"github.com/sunoflow/cleanup-gateway/internal/cleanup"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -72,9 +73,10 @@ func serverWithAnalytics(t *testing.T, fb *fakeBackend) (gw *httptest.Server, ke
 }
 
 // The one that matters. Analytics sits inside the handler that holds the
-// transcript, the cleaned text, the screen OCR, the cursor context and the
-// user's dictionary — every one of which is the sort of thing that ends up in
-// an events pipeline by accident and is then very hard to get back out.
+// transcript, the cleaned text, the screen OCR, the cursor context, the user's
+// dictionary and the focused window's title — every one of which is the sort of
+// thing that ends up in an events pipeline by accident and is then very hard to
+// get back out.
 func TestAnalyticsNeverCarriesDictationContent(t *testing.T) {
 	const (
 		secretTranscript = "ZZTRANSCRIPTZZ my bank password is hunter2"
@@ -82,15 +84,23 @@ func TestAnalyticsNeverCarriesDictationContent(t *testing.T) {
 		secretScreen     = "ZZSCREENZZ words visible on the user screen"
 		secretTerm       = "ZZDICTIONARYZZ"
 		secretCleaned    = "ZZCLEANEDZZ tidied up"
+		// The window title names the document, the thread or the ticket; the
+		// host of an unrecognised site names where the user works. Both are
+		// sent for the prompt and neither may be counted.
+		secretTitle = "ZZTITLEZZ Q3 layoffs plan.docx"
+		secretHost  = "ZZHOSTZZ.some-employer-internal.example"
 	)
 
 	fb := &fakeBackend{resp: secretCleaned}
 	gw, key, bodies, flush := serverWithAnalytics(t, fb)
 
 	body, _ := json.Marshal(map[string]any{
-		"text":    secretTranscript,
-		"context": secretContext,
-		"screen":  secretScreen,
+		"text":       secretTranscript,
+		"context":    secretContext,
+		"screen":     secretScreen,
+		"app":        "com.google.chrome",
+		"app_site":   secretHost,
+		"app_detail": secretTitle,
 		"dictionary": []map[string]string{
 			{"from": secretTerm, "to": secretTerm + "-expanded", "kind": "correction"},
 		},
@@ -112,7 +122,7 @@ func TestAnalyticsNeverCarriesDictationContent(t *testing.T) {
 
 	for _, secret := range []string{
 		secretTranscript, secretContext, secretScreen, secretTerm, secretCleaned,
-		"hunter2", "ZZ",
+		secretTitle, secretHost, "hunter2", "ZZ",
 	} {
 		if strings.Contains(posted, secret) {
 			t.Errorf("dictation content reached analytics: %q appears in the payload", secret)
@@ -218,5 +228,55 @@ func TestParseClient(t *testing.T) {
 	gotOS, _ := parseClient(long)
 	if len(gotOS) > 64 {
 		t.Errorf("parseClient did not bound a %d-char header; got %d chars", len(long), len(gotOS))
+	}
+}
+
+// The other half of the app-context bargain: the title and the private host are
+// withheld, but the dimensions we actually wanted have to arrive, or the feature
+// is all cost and no answer.
+func TestAnalyticsRecordsWhereTheUserDictated(t *testing.T) {
+	for _, tc := range []struct {
+		name, id, site, detail string
+		wantCategory, wantApp  string
+	}{
+		{"native app", "com.tinyspeck.slackmacgap", "", "#general", "chat", "Slack"},
+		{"web app beats the browser", "com.google.chrome", "mail.google.com",
+			"Inbox - Gmail", "email", "Gmail"},
+		{"windows falls back to the tab title", "chrome.exe", "",
+			"Inbox (12) - Gmail - Google Chrome", "email", "Gmail"},
+		{"unrecognised site is counted, not named", "com.google.chrome",
+			"wiki.acme-internal.example", "Runbook", "browser", cleanup.UnknownSite},
+		{"unrecognised app is counted as other", "com.acme.internal.crm", "",
+			"Ticket 88", "other", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fb := &fakeBackend{resp: "Cleaned."}
+			gw, key, bodies, flush := serverWithAnalytics(t, fb)
+
+			body, _ := json.Marshal(map[string]any{
+				"text": "um so anyway", "app": tc.id,
+				"app_site": tc.site, "app_detail": tc.detail,
+			})
+			req, _ := http.NewRequest(http.MethodPost, gw.URL+"/cleanup", bytes.NewReader(body))
+			req.Header.Set("Authorization", "Bearer "+key)
+			req.Header.Set(clientHeader, "macos/1.1.2")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("cleanup: %v", err)
+			}
+			resp.Body.Close()
+
+			flush()
+			posted := strings.Join(bodies(), "\n")
+			if posted == "" {
+				t.Fatal("no analytics batch was posted, so this proves nothing")
+			}
+			if !strings.Contains(posted, `"app_category":"`+tc.wantCategory+`"`) {
+				t.Errorf("want app_category %q in:\n%s", tc.wantCategory, posted)
+			}
+			if !strings.Contains(posted, `"app":"`+tc.wantApp+`"`) {
+				t.Errorf("want app %q in:\n%s", tc.wantApp, posted)
+			}
+		})
 	}
 }

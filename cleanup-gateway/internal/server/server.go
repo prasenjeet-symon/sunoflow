@@ -74,11 +74,27 @@ var now = func() time.Time { return time.Now() }
 // transcript, and the gateway keeps them for the length of the request — they
 // are never persisted and never logged.
 type cleanupRequest struct {
-	Text       string          `json:"text"`
-	Context    string          `json:"context"`
-	Recent     []string        `json:"recent"`
-	Screen     string          `json:"screen"`
+	Text    string   `json:"text"`
+	Context string   `json:"context"`
+	Recent  []string `json:"recent"`
+	Screen  string   `json:"screen"`
+	// App is what the client's own OS reported about where the words are
+	// going: the frontmost process id, the host when that process is a
+	// browser, and the focused window's title. It costs the device nothing to
+	// read and, unlike anything inferred from a screenshot, it is observed
+	// rather than guessed. The gateway owns every meaning attached to it —
+	// see cleanup.App.
+	App        string          `json:"app"`
+	AppSite    string          `json:"app_site"`
+	AppDetail  string          `json:"app_detail"`
 	Dictionary []cleanup.Entry `json:"dictionary"`
+	// Tone is the ID of the voice the user picked in the app — "formal", not
+	// the wording that produces formal output. The gateway owns every
+	// instruction the model sees, so an ID it does not serve is not an error:
+	// it normalizes to the faithful tone, which is also what an older client
+	// that never sends the field gets. Either way the user's own wording is
+	// what survives.
+	Tone string `json:"tone"`
 }
 
 // cleanupResponse is the single response shape.
@@ -178,9 +194,15 @@ func (s *Server) handleCleanup(w http.ResponseWriter, r *http.Request) {
 		recent = []string{}
 	}
 	dict := cleanup.NormalizeDict(req.Dictionary)
+	tone := cleanup.NormalizeTone(req.Tone)
+	app := cleanup.App{
+		ID:     strings.TrimSpace(req.App),
+		Site:   strings.TrimSpace(req.AppSite),
+		Detail: strings.TrimSpace(req.AppDetail),
+	}
 
 	started := time.Now()
-	cleaned := s.runCleanup(r.Context(), text, context, recent, screen, dict)
+	cleaned := s.runCleanup(r.Context(), text, context, recent, screen, app, dict, tone)
 	writeJSON(w, http.StatusOK, cleanupResponse{Cleaned: cleaned, Lease: leaseFor(r)})
 
 	// One dictation, counted. Lengths and flags only — the transcript, the
@@ -188,6 +210,12 @@ func (s *Server) handleCleanup(w http.ResponseWriter, r *http.Request) {
 	// here and none of them leave this function.
 	clientOS, clientVersion := parseClient(r.Header.Get(clientHeader))
 	id, _ := caller.From(r.Context())
+	// Where the user dictates, as a dimension. `app_category` is a closed set,
+	// and `app` is only ever a name this gateway already knows — an id we do
+	// not recognise is somebody's internal or personal tool, and counting it by
+	// name would put that in a third-party dashboard. The window title is never
+	// reported: it is the one part of this that carries content.
+	_, appCat, appName := app.Resolve()
 	s.Analytics.Capture(analytics.Event{
 		Name:       "dictation",
 		DistinctID: id.MeterKey(),
@@ -199,7 +227,10 @@ func (s *Server) handleCleanup(w http.ResponseWriter, r *http.Request) {
 			"cleaned_chars":    len(cleaned),
 			"had_screen":       screen != "",
 			"had_context":      context != "",
+			"app_category":     string(appCat),
+			"app":              appName,
 			"dictionary_terms": len(dict),
+			"tone":             tone.String(),
 			"latency_ms":       time.Since(started).Milliseconds(),
 		},
 		PersonProperties: map[string]any{
@@ -213,25 +244,27 @@ func (s *Server) handleCleanup(w http.ResponseWriter, r *http.Request) {
 // 1. context-aware pass; if non-echo → return.
 // 2. on echo, retry context-free; if length ok → return.
 // 3. otherwise return raw text. Any backend error → raw text.
-func (s *Server) runCleanup(ctx context.Context, text, context string, recent []string, screen string, dict []cleanup.Entry) string {
+func (s *Server) runCleanup(ctx context.Context, text, context string, recent []string, screen string, app cleanup.App, dict []cleanup.Entry, tone cleanup.Tone) string {
 	// First pass: context-aware cleanup (better name/term correction).
-	cleaned, err := s.Backend.Cleanup(ctx, cleanup.BuildPrompt(text, context, recent, screen, dict))
+	cleaned, err := s.Backend.Cleanup(ctx, cleanup.BuildPrompt(text, context, recent, screen, app, dict, tone))
 	cleaned = strings.TrimSpace(cleaned)
-	if err == nil && cleaned != "" && !cleanup.LooksLikeEcho(cleaned, text, context, recent, screen, dict) {
+	if err == nil && cleaned != "" && !cleanup.LooksLikeEcho(cleaned, text, context, recent, screen, app, dict, tone) {
 		return cleaned
 	}
 
 	// The backend echoed reference material (or errored). Retry with NO context,
 	// history, or screen — it can't repeat what it was never given. The
-	// dictionary stays: it is short, structured, and the thing the user
-	// explicitly asked us to apply, so dropping it would silently turn the
-	// feature off on exactly the dictations that needed a second attempt. The
-	// bulky, noisy sources are the ones that get echoed, and those are gone.
+	// dictionary and the tone stay: both are short, structured, and the thing
+	// the user explicitly asked us to apply, so dropping either would silently
+	// turn the feature off on exactly the dictations that needed a second
+	// attempt — and a retry that quietly reverted to the faithful voice would
+	// read to the user as the tone key having missed the press. The bulky,
+	// noisy sources are the ones that get echoed, and those are gone.
 	if context != "" || len(recent) > 0 || screen != "" {
 		s.Logger.Info("cleanup echoed reference material; retrying context-free")
-		cleaned, err = s.Backend.Cleanup(ctx, cleanup.BuildPrompt(text, "", nil, "", dict))
+		cleaned, err = s.Backend.Cleanup(ctx, cleanup.BuildPrompt(text, "", nil, "", app, dict, tone))
 		cleaned = strings.TrimSpace(cleaned)
-		if err == nil && cleaned != "" && !cleanup.TooLong(cleaned, text, dict) {
+		if err == nil && cleaned != "" && !cleanup.TooLong(cleaned, text, dict, tone) {
 			return cleaned
 		}
 	}

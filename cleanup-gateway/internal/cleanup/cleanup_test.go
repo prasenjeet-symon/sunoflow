@@ -8,7 +8,7 @@ import (
 
 // TestBuildPrompt_NoExtras matches the sidecar: no screen/context/recent.
 func TestBuildPrompt_NoExtras(t *testing.T) {
-	got := BuildPrompt("hello world", "", nil, "", nil)
+	got := BuildPrompt("hello world", "", nil, "", App{}, nil, ToneFaithful)
 	// Must end with the new-transcript block exactly like server.py.
 	wantTail := strings.Join([]string{
 		"[NEW TRANSCRIPT — output ONLY the cleaned version of this]",
@@ -30,13 +30,13 @@ func TestBuildPrompt_NoExtras(t *testing.T) {
 
 // TestBuildPrompt_AllSections matches the sidecar ordering: screen, context, recent, new.
 func TestBuildPrompt_AllSections(t *testing.T) {
-	got := BuildPrompt("the text", "the context", []string{"recent one", "recent two"}, "screen words", nil)
+	got := BuildPrompt("the text", "the context", []string{"recent one", "recent two"}, "screen words", App{}, nil, ToneFaithful)
 	parts := strings.Split(got, "\n")
 	// Find section header indices.
 	screenIdx, contextIdx, recentIdx, newIdx := -1, -1, -1, -1
 	for i, p := range parts {
 		switch p {
-		case "[SCREEN — words visible on screen near the input field; reference only, do NOT repeat or edit]":
+		case "[SCREEN — words visible anywhere on the user's screen; reference only, do NOT repeat or edit]":
 			screenIdx = i
 		case "[CONTEXT — already written before the cursor; reference only, do NOT repeat or edit]":
 			contextIdx = i
@@ -59,7 +59,7 @@ func TestBuildPrompt_AllSections(t *testing.T) {
 func TestLooksLikeEcho_LengthGrowth(t *testing.T) {
 	text := "short text here"
 	long := strings.Repeat("x", len(text)*2+100)
-	if !LooksLikeEcho(long, text, "", nil, "", nil) {
+	if !LooksLikeEcho(long, text, "", nil, "", App{}, nil, ToneFaithful) {
 		t.Error("expected echo for overly long output")
 	}
 }
@@ -68,7 +68,7 @@ func TestLooksLikeEcho_LengthGrowth(t *testing.T) {
 func TestLooksLikeEcho_RecentVerbatim(t *testing.T) {
 	recent := []string{"this is a long recent dictation entry"}
 	cleaned := "some output this is a long recent dictation entry more output"
-	if !LooksLikeEcho(cleaned, "some output more output", "", recent, "", nil) {
+	if !LooksLikeEcho(cleaned, "some output more output", "", recent, "", App{}, nil, ToneFaithful) {
 		t.Error("expected echo when recent entry appears verbatim")
 	}
 }
@@ -77,7 +77,7 @@ func TestLooksLikeEcho_RecentVerbatim(t *testing.T) {
 func TestLooksLikeEcho_ContextTail(t *testing.T) {
 	context := strings.Repeat("a", 30) + "tail-of-context-here-!!"
 	cleaned := "cleaned text " + context[len(context)-40:]
-	if !LooksLikeEcho(cleaned, "cleaned text", context, nil, "", nil) {
+	if !LooksLikeEcho(cleaned, "cleaned text", context, nil, "", App{}, nil, ToneFaithful) {
 		t.Error("expected echo when context tail appears in output")
 	}
 }
@@ -86,7 +86,7 @@ func TestLooksLikeEcho_ContextTail(t *testing.T) {
 func TestLooksLikeEcho_ScreenTail(t *testing.T) {
 	screen := strings.Repeat("b", 40) + "screen-tail-content-here-!!"
 	cleaned := "x " + screen[len(screen)-40:]
-	if !LooksLikeEcho(cleaned, "x", "", nil, screen, nil) {
+	if !LooksLikeEcho(cleaned, "x", "", nil, screen, App{}, nil, ToneFaithful) {
 		t.Error("expected echo when screen tail appears in output")
 	}
 }
@@ -95,7 +95,7 @@ func TestLooksLikeEcho_ScreenTail(t *testing.T) {
 func TestLooksLikeEcho_CleanOutput(t *testing.T) {
 	text := "um so I think we should ship this on friday"
 	cleaned := "So I think we should ship this on Friday."
-	if LooksLikeEcho(cleaned, text, "", nil, "", nil) {
+	if LooksLikeEcho(cleaned, text, "", nil, "", App{}, nil, ToneFaithful) {
 		t.Error("did not expect echo for a normal cleanup")
 	}
 }
@@ -103,11 +103,11 @@ func TestLooksLikeEcho_CleanOutput(t *testing.T) {
 // TestTooLong matches the retry length guard.
 func TestTooLong(t *testing.T) {
 	text := "ten chars"
-	if TooLong("short", text, nil) {
+	if TooLong("short", text, nil, ToneFaithful) {
 		t.Error("short output should not be too long")
 	}
 	long := strings.Repeat("x", len(text)*2+100)
-	if !TooLong(long, text, nil) {
+	if !TooLong(long, text, nil, ToneFaithful) {
 		t.Error("long output should be too long")
 	}
 }
@@ -142,6 +142,30 @@ func TestCleanupRules_FormattingCueAmbiguityGuard(t *testing.T) {
 	}
 }
 
+// TestCleanupRules_FillerAndEmojiOrdinaryUse guards the two "closed list, but
+// the words are ordinary words too" guards: "like" must be dropped only when it
+// is filler, and an emoji name must be applied only when the speaker is naming
+// an emoji rather than using the word for what it normally means.
+func TestCleanupRules_FillerAndEmojiOrdinaryUse(t *testing.T) {
+	if !strings.Contains(CleanupRules, "only genuine filler") {
+		t.Error("filler ordinary-use guard missing (like)")
+	}
+	if !strings.Contains(CleanupRules, "my heart goes out to them") {
+		t.Error("emoji ordinary-use example missing (heart)")
+	}
+	if !strings.Contains(CleanupRules, "clearly naming an emoji") {
+		t.Error("emoji ordinary-use guard missing")
+	}
+}
+
+// TestCleanupRules_WrapSpan guards the bold/italic rule: the prompt must say
+// where the wrap ends, so the model does not have to guess.
+func TestCleanupRules_WrapSpan(t *testing.T) {
+	if !strings.Contains(CleanupRules, "to the phrase's end") {
+		t.Error("bold/italic span rule missing")
+	}
+}
+
 // --- dictionary ---------------------------------------------------------------
 
 // Deliberately NOT cavach/Kavach: that pair is CleanupRules' own worked example,
@@ -154,7 +178,7 @@ var dictBoth = []Entry{
 // TestBuildPrompt_DictionarySplitsByKind checks each entry lands under the right
 // heading — the two kinds license different behaviour, so mixing them is a bug.
 func TestBuildPrompt_DictionarySplitsByKind(t *testing.T) {
-	got := BuildPrompt("the text", "", nil, "", dictBoth)
+	got := BuildPrompt("the text", "", nil, "", App{}, dictBoth, ToneFaithful)
 	spellIdx := strings.Index(got, spellingsHeader)
 	shortIdx := strings.Index(got, shorthandHeader)
 	spellEntryIdx := strings.Index(got, `"sunno flow" -> "SunoFlow"`)
@@ -175,7 +199,7 @@ func TestBuildPrompt_DictionarySplitsByKind(t *testing.T) {
 // TestBuildPrompt_DictionaryOmitsEmptyHalf keeps the model from being shown a
 // heading with nothing under it, which invites it to invent entries.
 func TestBuildPrompt_DictionaryOmitsEmptyHalf(t *testing.T) {
-	got := BuildPrompt("t", "", nil, "", []Entry{{From: "sunno flow", To: "SunoFlow", Kind: KindCorrection}})
+	got := BuildPrompt("t", "", nil, "", App{}, []Entry{{From: "sunno flow", To: "SunoFlow", Kind: KindCorrection}}, ToneFaithful)
 	if strings.Contains(got, shorthandHeader) {
 		t.Error("shorthand heading rendered with no shorthand entries")
 	}
@@ -228,13 +252,13 @@ func TestNormalizeDict(t *testing.T) {
 func TestTooLong_ExpansionAllowance(t *testing.T) {
 	text := "my linkedin"
 	cleaned := "My LinkedIn: https://www.linkedin.com/in/a-real-looking-handle"
-	if !TooLong(cleaned, text, nil) {
+	if !TooLong(cleaned, text, nil, ToneFaithful) {
 		t.Fatal("precondition: without the dictionary this output IS over the limit")
 	}
-	if TooLong(cleaned, text, dictBoth) {
+	if TooLong(cleaned, text, dictBoth, ToneFaithful) {
 		t.Error("expansion value must be budgeted into the length allowance")
 	}
-	if LooksLikeEcho(cleaned, text, "", nil, "", dictBoth) {
+	if LooksLikeEcho(cleaned, text, "", nil, "", App{}, dictBoth, ToneFaithful) {
 		t.Error("a legitimate expansion must not read as an echo")
 	}
 }
@@ -243,7 +267,7 @@ func TestTooLong_ExpansionAllowance(t *testing.T) {
 // back at us, which the length guard alone would now wave through.
 func TestLooksLikeEcho_DictionaryListing(t *testing.T) {
 	cleaned := "Some text\n" + spellingsHeader + "\n- \"sunno flow\" -> \"SunoFlow\""
-	if !LooksLikeEcho(cleaned, "some text", "", nil, "", dictBoth) {
+	if !LooksLikeEcho(cleaned, "some text", "", nil, "", App{}, dictBoth, ToneFaithful) {
 		t.Error("expected echo when the dictionary listing is repeated")
 	}
 }
@@ -252,10 +276,10 @@ func TestLooksLikeEcho_DictionaryListing(t *testing.T) {
 // where the last-40-chars check used to slice out of range.
 func TestLooksLikeEcho_ShortContextNoPanic(t *testing.T) {
 	context := strings.Repeat("a", 25) // >= 20, < 40
-	if LooksLikeEcho("a normal cleaned sentence.", "a normal cleaned sentence", context, nil, "", nil) {
+	if LooksLikeEcho("a normal cleaned sentence.", "a normal cleaned sentence", context, nil, "", App{}, nil, ToneFaithful) {
 		t.Error("did not expect an echo here")
 	}
-	if !LooksLikeEcho("x "+context, "x", context, nil, "", nil) {
+	if !LooksLikeEcho("x "+context, "x", context, nil, "", App{}, nil, ToneFaithful) {
 		t.Error("expected echo when the whole short context is repeated")
 	}
 }
@@ -323,10 +347,10 @@ func TestLooksLikeEcho_CyrillicContext(t *testing.T) {
 	cleaned := text + tail(context, 40)
 	// Guard the setup: if TooLong fired, the assertion below would pass for the
 	// wrong reason and prove nothing about the context check.
-	if TooLong(cleaned, text, nil) {
+	if TooLong(cleaned, text, nil, ToneFaithful) {
 		t.Fatal("setup: TooLong fired, so this does not isolate the context check")
 	}
-	if !LooksLikeEcho(cleaned, text, context, nil, "", nil) {
+	if !LooksLikeEcho(cleaned, text, context, nil, "", App{}, nil, ToneFaithful) {
 		t.Error("expected echo when a Cyrillic context tail appears in the output")
 	}
 }
@@ -343,10 +367,10 @@ func TestLooksLikeEcho_RepeatedPhraseIsNotEcho(t *testing.T) {
 	}
 	for _, c := range cases {
 		recent := []string{c.cleaned} // the speaker said exactly this a moment ago
-		if TooLong(c.cleaned, c.text, nil) {
+		if TooLong(c.cleaned, c.text, nil, ToneFaithful) {
 			t.Fatalf("%s: setup — TooLong fired, so this does not isolate the recent check", c.name)
 		}
-		if LooksLikeEcho(c.cleaned, c.text, "", recent, "", nil) {
+		if LooksLikeEcho(c.cleaned, c.text, "", recent, "", App{}, nil, ToneFaithful) {
 			t.Errorf("%s: repeating your own phrase should not read as an echo", c.name)
 		}
 	}
@@ -359,7 +383,7 @@ func TestLooksLikeEcho_GenuineRecentEchoStillCaught(t *testing.T) {
 	recent := []string{"Let me know if you need anything else."}
 	text := "the deploy finished about ten minutes ago"
 	cleaned := "The deploy finished about ten minutes ago. Let me know if you need anything else."
-	if !LooksLikeEcho(cleaned, text, "", recent, "", nil) {
+	if !LooksLikeEcho(cleaned, text, "", recent, "", App{}, nil, ToneFaithful) {
 		t.Error("expected an echo when a recent line the speaker never said appears in the output")
 	}
 }
@@ -385,10 +409,10 @@ func TestLooksLikeEcho_RedictatedContextIsNotEcho(t *testing.T) {
 	ctail := tail(context, 40)
 	text := strings.ToLower(ctail) // the speaker says it again, raw from the recognizer
 	cleaned := "The " + ctail + "."
-	if TooLong(cleaned, text, nil) {
+	if TooLong(cleaned, text, nil, ToneFaithful) {
 		t.Fatal("setup: TooLong fired, so this does not isolate the context check")
 	}
-	if LooksLikeEcho(cleaned, text, context, nil, "", nil) {
+	if LooksLikeEcho(cleaned, text, context, nil, "", App{}, nil, ToneFaithful) {
 		t.Error("re-dictating the text before the cursor should not read as an echo")
 	}
 }
@@ -399,7 +423,7 @@ func TestLooksLikeEcho_GenuineContextEchoStillCaught(t *testing.T) {
 	context := "I wanted to follow up on the deploy we discussed yesterday afternoon"
 	text := "something completely different was mentioned"
 	cleaned := "Something completely different was mentioned. " + tail(context, 40)
-	if !LooksLikeEcho(cleaned, text, context, nil, "", nil) {
+	if !LooksLikeEcho(cleaned, text, context, nil, "", App{}, nil, ToneFaithful) {
 		t.Error("expected an echo when context the speaker never said appears in the output")
 	}
 }

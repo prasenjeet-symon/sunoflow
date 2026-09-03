@@ -31,7 +31,7 @@ MODEL_ID = "mlx-community/parakeet-tdt-0.6b-v3"
 # its connectivity status; the sidecar no longer surfaces /config or /models.
 # Override with SUNOFLOW_CLEANUP_URL / SUNOFLOW_CLEANUP_KEY for dev (e.g.
 # point at a local docker-compose stack).
-CLEANUP_URL = os.environ.get("SUNOFLOW_CLEANUP_URL", "http://162.19.81.108:40009/cleanup")
+CLEANUP_URL = os.environ.get("SUNOFLOW_CLEANUP_URL", "https://cleanup.ogcode.xyz/cleanup")
 ENTITLEMENT_URL = CLEANUP_URL.rsplit("/", 1)[0] + "/entitlement"
 # No default. A key used to ship here, identical in every install, which meant
 # anyone who downloaded SunoFlow could use the gateway for free and it could not
@@ -677,6 +677,10 @@ def clean_with_gateway(
     screen: str = "",
     key: str = "",
     dictionary: list = None,
+    tone: str = "",
+    app: str = "",
+    app_site: str = "",
+    app_detail: str = "",
 ) -> str:
     """Clean a transcript via the hosted cleanup gateway.
 
@@ -692,6 +696,13 @@ def clean_with_gateway(
     model can fix the user's spellings and expand their shorthand, and the
     gateway neither stores nor logs them.
 
+    ``tone`` is the ID of the writing voice the user picked — "formal", never the
+    wording that produces formal output. The gateway owns the closed set and the
+    instruction behind each entry, so nothing here validates the value: an ID it
+    does not serve normalizes to the faithful default on its side. Keeping the
+    list in one place is deliberate — three clients each carrying their own copy
+    is how the entitlement check went missing from Windows.
+
     Raises NotEntitled when the gateway refuses the device, or when it cannot be
     reached and no valid lease covers the gap. Every other failure soft-fails to
     the raw transcript, because a bad LLM response should never cost the user
@@ -706,11 +717,26 @@ def clean_with_gateway(
     recent = recent or []
     context = (context or "").strip()
     screen = (screen or "").strip()
+    tone = (tone or "").strip()
     payload = {"text": text, "context": context, "recent": recent, "screen": screen}
+    # What the OS said about where the dictation was going: the frontmost
+    # process's identifier, the host when that process is a browser, and the
+    # focused window's title. The IDs travel raw — the gateway owns which app
+    # they name, which category it is, and which of them may be counted — for
+    # the same reason the tone list lives there.
+    for _field, _value in (("app", app), ("app_site", app_site), ("app_detail", app_detail)):
+        _value = (_value or "").strip()
+        if _value:
+            payload[_field] = _value
     # Omitted rather than sent empty, so a request carries the user's terms only
     # when there were any to carry.
     if dictionary:
         payload["dictionary"] = dictionary
+    # Same reasoning, and it matters more here: with no tone chosen the request
+    # must be exactly the one this sidecar sent before tones existed, so the
+    # default path cannot have changed behaviour.
+    if tone:
+        payload["tone"] = tone
 
     try:
         resp = _session.post(
@@ -757,18 +783,28 @@ async def transcribe(
     cleanup: bool = Query(True),
     context: str = Form(""),
     screen: str = Form(""),
+    tone: str = Form(""),
+    app_id: str = Form("", alias="app"),
+    app_site: str = Form(""),
+    app_detail: str = Form(""),
     device_key: str = Header("", alias="X-SunoFlow-Device-Key"),
 ):
     key = device_key.removeprefix("Bearer ").strip()
     try:
-        return await _transcribe_inner(file, cleanup, context, screen, key)
+        return await _transcribe_inner(
+            file, cleanup, context, screen, tone, key,
+            app_id, app_site, app_detail,
+        )
     except NotEntitled as exc:
         # Deliberately NOT a soft failure: an expired account stops working.
         print(f"Refusing dictation — {exc}")
         return NotEntitledResponse(str(exc), getattr(exc, "code", "not_entitled"))
 
 
-async def _transcribe_inner(file, cleanup, context, screen, key):
+async def _transcribe_inner(
+    file, cleanup, context, screen, tone, key,
+    app_id="", app_site="", app_detail="",
+):
     fd, tmp_path = tempfile.mkstemp(suffix=".wav")
     try:
         with os.fdopen(fd, "wb") as tmp:
@@ -810,11 +846,15 @@ async def _transcribe_inner(file, cleanup, context, screen, key):
         relevant = relevant_corrections(raw_text)
         cleaned_text = await run_in_threadpool(
             clean_with_gateway, raw_text, context, list(recent_transcripts), screen,
-            key, relevant,
+            key, relevant, tone, app_id, app_site, app_detail,
         )
     else:
         # Cleanup off still has to prove entitlement, or switching it off would
         # be a free-dictation switch.
+        # A tone chosen while cleanup is off does nothing, and cannot: the
+        # voice is applied by the model, and this path makes no model call.
+        # The apps are expected to gate the tone picker on cleanup being on
+        # rather than leaving the key looking broken.
         await run_in_threadpool(check_entitlement, key)
         cleaned_text = raw_text
 

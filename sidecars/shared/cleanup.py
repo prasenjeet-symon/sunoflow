@@ -33,7 +33,7 @@ from requests.adapters import HTTPAdapter, Retry
 
 from sidecars.shared import lease
 
-CLEANUP_URL = os.environ.get("SUNOFLOW_CLEANUP_URL", "http://162.19.81.108:40009/cleanup")
+CLEANUP_URL = os.environ.get("SUNOFLOW_CLEANUP_URL", "https://cleanup.ogcode.xyz/cleanup")
 ENTITLEMENT_URL = CLEANUP_URL.rsplit("/", 1)[0] + "/entitlement"
 
 # One pooled connection to the gateway, kept warm across dictations.
@@ -253,6 +253,10 @@ def clean_with_gateway(
     screen: str = "",
     key: str = "",
     dictionary: list = None,
+    tone: str = "",
+    app: str = "",
+    app_site: str = "",
+    app_detail: str = "",
 ) -> str:
     """Clean a transcript via the hosted cleanup gateway.
 
@@ -261,6 +265,20 @@ def clean_with_gateway(
     leaves the machine; these few entries ride along with the request so the
     model can fix the user's spellings and expand their shorthand, and the
     gateway neither stores nor logs them.
+
+    ``app``, ``app_site`` and ``app_detail`` are what the OS said about where the
+    dictation was going: the frontmost process's identifier, the host when that
+    process is a browser, and the focused window's title. Like ``tone``, the IDs
+    travel raw and the gateway owns every meaning attached to them — which app
+    they name, which category it belongs to, and which of them is safe to count.
+    Keeping that table in one place is the same call made for the tone list.
+
+    ``tone`` is the ID of the writing voice the user picked — "formal", never the
+    wording that produces formal output. The gateway owns the closed set and the
+    instruction behind each entry, so nothing here validates the value: an ID it
+    does not serve normalizes to the faithful default on its side. Keeping the
+    list in one place is deliberate — three clients each carrying their own copy
+    is how the entitlement check went missing from Windows.
 
     Raises NotEntitled when the gateway refuses the device, or when it cannot be
     reached and no valid lease covers the gap. Every other failure soft-fails to
@@ -275,11 +293,24 @@ def clean_with_gateway(
     recent = recent or []
     context = (context or "").strip()
     screen = (screen or "").strip()
+    tone = (tone or "").strip()
     payload = {"text": text, "context": context, "recent": recent, "screen": screen}
+    # Same reasoning as the dictionary below: a field is carried only when there
+    # is something in it, so an older gateway and a client with nothing to say
+    # both see the request they saw before.
+    for field, value in (("app", app), ("app_site", app_site), ("app_detail", app_detail)):
+        value = (value or "").strip()
+        if value:
+            payload[field] = value
     # Omitted rather than sent empty, so a gateway request carries the user's
     # terms only when there were any to carry.
     if dictionary:
         payload["dictionary"] = dictionary
+    # Same reasoning, and it matters more here: with no tone chosen the request
+    # must be exactly the one this sidecar sent before tones existed, so the
+    # default path cannot have changed behaviour.
+    if tone:
+        payload["tone"] = tone
 
     try:
         resp = _session.post(

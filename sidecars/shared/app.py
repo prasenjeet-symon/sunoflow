@@ -156,6 +156,10 @@ def create_app(adapter: SttAdapter, corrections_path: str) -> FastAPI:
         cleanup: bool = Query(True),
         context: str = Form(""),
         screen: str = Form(""),
+        tone: str = Form(""),
+        app_id: str = Form("", alias="app"),
+        app_site: str = Form(""),
+        app_detail: str = Form(""),
         device_key: str = Header("", alias="X-SunoFlow-Device-Key"),
     ):
         """Transcribe a clip, and refuse if this device may not dictate.
@@ -167,14 +171,20 @@ def create_app(adapter: SttAdapter, corrections_path: str) -> FastAPI:
         """
         key = device_key.removeprefix("Bearer ").strip()
         try:
-            return await _transcribe_inner(file, cleanup, context, screen, key)
+            return await _transcribe_inner(
+                file, cleanup, context, screen, tone, key,
+                app_id, app_site, app_detail,
+            )
         except NotEntitled as exc:
             # Deliberately NOT a soft failure: an expired or unconnected account
             # stops working rather than quietly dropping to a free tier.
             print(f"Refusing dictation — {exc}")
             return NotEntitledResponse(str(exc), getattr(exc, "code", "not_entitled"))
 
-    async def _transcribe_inner(file, cleanup, context, screen, key):
+    async def _transcribe_inner(
+        file, cleanup, context, screen, tone, key,
+        app_id="", app_site="", app_detail="",
+    ):
         fd, tmp_path = tempfile.mkstemp(suffix=".wav")
         try:
             with os.fdopen(fd, "wb") as tmp:
@@ -212,11 +222,15 @@ def create_app(adapter: SttAdapter, corrections_path: str) -> FastAPI:
             relevant = corrections.relevant_for(raw_text)
             cleaned_text = await run_in_threadpool(
                 clean_with_gateway, raw_text, context, list(recent_transcripts), screen,
-                key, relevant,
+                key, relevant, tone, app_id, app_site, app_detail,
             )
         else:
             # Cleanup off still has to prove entitlement, or switching it off
             # would be a free-dictation switch: it skips the only server call.
+            # A tone chosen while cleanup is off does nothing, and cannot: the
+            # voice is applied by the model, and this path makes no model call.
+            # The apps are expected to gate the tone picker on cleanup being on
+            # rather than leaving the key looking broken.
             await run_in_threadpool(check_entitlement, key)
             cleaned_text = raw_text
 

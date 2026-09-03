@@ -58,12 +58,15 @@ def client(tmp_path, monkeypatch):
     return TestClient(create_app(FakeAdapter(), str(tmp_path / "corrections.json")))
 
 
-def _post(client, *, cleanup=True, key=KEY):
+def _post(client, *, cleanup=True, key=KEY, tone=None):
     headers = {"X-SunoFlow-Device-Key": f"Bearer {key}"} if key is not None else {}
+    data = {"context": "", "screen": ""}
+    if tone is not None:
+        data["tone"] = tone
     return client.post(
         f"/transcribe?cleanup={'true' if cleanup else 'false'}",
         files={"file": ("audio.wav", _wav_bytes(), "audio/wav")},
-        data={"context": "", "screen": ""},
+        data=data,
         headers=headers,
     )
 
@@ -73,7 +76,8 @@ def _post(client, *, cleanup=True, key=KEY):
 def test_the_device_key_is_forwarded_to_the_cleanup_call(client, monkeypatch):
     seen = {}
 
-    def fake_clean(text, context="", recent=None, screen="", key="", dictionary=None):
+    def fake_clean(text, context="", recent=None, screen="", key="",
+                   dictionary=None, tone="", app="", app_site="", app_detail=""):
         seen["key"] = key
         return "Hello world."
 
@@ -87,8 +91,9 @@ def test_the_device_key_is_forwarded_to_the_cleanup_call(client, monkeypatch):
 def test_the_bearer_prefix_is_stripped(client, monkeypatch):
     seen = {}
     monkeypatch.setattr(app_module, "clean_with_gateway",
-                        lambda text, context="", recent=None, screen="", key="", dictionary=None:
-                        seen.setdefault("key", key) or "x")
+                        lambda text, context="", recent=None, screen="", key="",
+                        dictionary=None, tone="", app="", app_site="",
+                        app_detail="": seen.setdefault("key", key) or "x")
     _post(client)
     assert not seen["key"].startswith("Bearer")
 
@@ -178,3 +183,80 @@ def test_a_refusal_and_an_outage_carry_different_codes(client, monkeypatch):
 
 def test_an_unconnected_device_says_so(client):
     assert _post(client, key=None).json()["error"] == "not_connected"
+
+
+# --- the chosen tone reaches the gateway call ---------------------------------
+
+def _capture_tone(monkeypatch):
+    """Stand in for the gateway call and record the tone it was handed."""
+    seen = {}
+
+    def fake(text, context="", recent=None, screen="", key="", dictionary=None,
+             tone="", app="", app_site="", app_detail=""):
+        seen["tone"] = tone
+        return text
+
+    monkeypatch.setattr(app_module, "clean_with_gateway", fake)
+    return seen
+
+
+def test_the_tone_form_field_reaches_the_gateway_call(client, monkeypatch):
+    """The field is easy to add to the endpoint and forget to forward, and the
+    failure is silent: every dictation would come back in the default voice with
+    nothing in the logs to say why."""
+    seen = _capture_tone(monkeypatch)
+    assert _post(client, tone="formal").status_code == 200
+    assert seen["tone"] == "formal"
+
+
+def test_no_tone_field_means_the_default_voice(client, monkeypatch):
+    """Covers the apps shipped before tones existed, which post no such field."""
+    seen = _capture_tone(monkeypatch)
+    assert _post(client).status_code == 200
+    assert seen["tone"] == ""
+
+
+# --- where the user is dictating reaches the gateway call ---------------------
+
+def test_the_app_form_fields_reach_the_gateway_call(client, monkeypatch):
+    """Exactly the failure the tone test guards against, one field family over:
+    the endpoint accepts them, forgets to forward them, and every dictation is
+    cleaned without knowing where it is going — with nothing in the logs."""
+    seen = {}
+
+    def fake(text, context="", recent=None, screen="", key="", dictionary=None,
+             tone="", app="", app_site="", app_detail=""):
+        seen.update(app=app, app_site=app_site, app_detail=app_detail)
+        return text
+
+    monkeypatch.setattr(app_module, "clean_with_gateway", fake)
+    resp = client.post(
+        "/transcribe",
+        files={"file": ("audio.wav", _wav_bytes(), "audio/wav")},
+        data={
+            "app": "com.google.chrome",
+            "app_site": "mail.google.com",
+            "app_detail": "Inbox (12) - Gmail",
+        },
+        headers={"X-SunoFlow-Device-Key": f"Bearer {KEY}"},
+    )
+
+    assert resp.status_code == 200
+    assert seen["app"] == "com.google.chrome"
+    assert seen["app_site"] == "mail.google.com"
+    assert seen["app_detail"] == "Inbox (12) - Gmail"
+
+
+def test_no_app_fields_is_the_request_it_always_was(client, monkeypatch):
+    """A client too old to send them, or a dictation where nothing could be read,
+    must still clean normally."""
+    seen = {}
+
+    def fake(text, context="", recent=None, screen="", key="", dictionary=None,
+             tone="", app="", app_site="", app_detail=""):
+        seen.update(app=app, app_site=app_site, app_detail=app_detail)
+        return text
+
+    monkeypatch.setattr(app_module, "clean_with_gateway", fake)
+    assert _post(client).status_code == 200
+    assert seen == {"app": "", "app_site": "", "app_detail": ""}
