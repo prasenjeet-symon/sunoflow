@@ -49,11 +49,17 @@ DerivedData/
 # ── Release output (release.sh) ────────────────────────
 *.dmg
 SunoFlow.app.zip
+# release.sh assembles the intermediate bundle at the repo root, not in SunoFlowApp/
+/SunoFlow.app/
 
 # ── .NET (Windows tray app) ────────────────────────────
 apps/windows/SunoFlow/bin/
 apps/windows/SunoFlow/obj/
 apps/windows/SunoFlow/.vs/
+# publish/ — output of `dotnet publish` (BUILD_WINDOWS.md §2 self-contained build)
+apps/windows/SunoFlow/publish/
+# windows.yml publishes from the repo root (-o publish\SunoFlow, no working-directory)
+/publish/
 
 # Windows installer staging + output (built by .github/workflows/release.yml)
 apps/windows/installer/stage/
@@ -75,6 +81,7 @@ apps/windows/installer/output/
 # ── Local project memory (not for distribution) ─────────
 .ogcode/
 MEMORY.md
+ogcode.json
 # Firebase Functions dependencies
 functions/node_modules/
 
@@ -84,7 +91,16 @@ functions/.secret.local
 # Firebase CLI deploy cache — machine-local, regenerated on every deploy
 .firebase/
 
+# Cloudflare tunnel credentials — secret, never commit
+cleanup-gateway/deploy/cloudflared/*.json
+
 # Dictation smoke test droppings — the downloaded model and the run's lease.
 # The WAV fixture it transcribes IS committed (sidecars/testdata/).
 model-cache/
 dictation-smoke-lease.json
+
+# Firebase Functions — email templates are compiled by npm run build (source
+# of truth is functions/emails/*.jsx); .env holds function params (RESEND_FROM)
+functions/emails/*.js
+functions/.env
+functions/.env.*

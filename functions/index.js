@@ -224,3 +224,8 @@ export const revokeDevice = onCall(async (request) => {
 // and nowhere else, so there is exactly one place to audit.
 export { createSubscription, cancelSubscription, resumeSubscription, syncSubscription, razorpayWebhook }
   from "./billing.js";
+
+/* ----------------------------------------------------------- trial email */
+// Hourly sweep that sends "trial ends tomorrow" / "trial has ended" mail.
+// Reads plan state, never writes it — see notify.js.
+export { trialNotices } from "./notify.js";

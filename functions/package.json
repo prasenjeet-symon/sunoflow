@@ -1,15 +1,29 @@
 {
   "name": "sunoflow-functions",
-  "description": "Device pairing for SunoFlow",
+  "description": "Device pairing, billing and trial email for SunoFlow",
   "main": "index.js",
   "type": "module",
   "engines": {
     "node": "20"
   },
+  "scripts": {
+    "build": "esbuild emails/*.jsx --outdir=emails --format=esm --jsx=automatic --target=node20",
+    "postinstall": "npm run build",
+    "preview": "node scripts/preview.mjs"
+  },
   "dependencies": {
+    "@react-email/components": "^1.0.12",
+    "@react-email/render": "^2.1.0",
+    "esbuild": "^0.28.2",
     "firebase-admin": "^12.6.0",
     "firebase-functions": "^6.1.0",
-    "razorpay": "^2.9.8"
+    "razorpay": "^2.9.8",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
   },
-  "private": true
+  "private": true,
+  "allowScripts": {
+    "esbuild@0.28.2": true,
+    "protobufjs@7.6.5": true
+  }
 }
