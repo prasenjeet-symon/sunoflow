@@ -192,9 +192,19 @@ final class AudioRecorder {
         audioFile = nil
         isRecording = false
 
-        // Restore the user's previous default input device.
+        // Restore the user's previous default input device — unless it was the
+        // Bluetooth headset we steered away from. Handing that slot back
+        // re-negotiates HFP, and the headset's *output* drops to 16 kHz mono for
+        // every app on the machine until something moves the default input
+        // again. Protecting output only for the duration of the recording and
+        // then re-arming the downgrade is worse than not restoring at all; the
+        // guard keeps the built-in mic selected from here.
         if let saved = savedDefaultInputID {
-            AudioDevices.setDefaultInputDevice(saved)
+            if AudioDevices.isBluetooth(saved) {
+                AppLog.log("stopRecording: not restoring \(AudioDevices.name(of: saved) ?? "the Bluetooth mic") as the default input — that would drop its output to call quality")
+            } else {
+                AudioDevices.setDefaultInputDevice(saved)
+            }
             savedDefaultInputID = nil
         }
 

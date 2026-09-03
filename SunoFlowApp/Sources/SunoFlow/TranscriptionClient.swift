@@ -137,7 +137,7 @@ enum TranscriptionClient {
     /// Base URL of the hosted cleanup gateway (transcript polishing service).
     /// The gateway owns the cleanup instruction and LLM backend; the app only
     /// probes its `/ready` for the settings connectivity status.
-    static let gatewayURL = URL(string: "http://162.19.81.108:40009")!
+    static let gatewayURL = URL(string: "https://cleanup.ogcode.xyz")!
 
     static func health(completion: @escaping (Bool) -> Void) {
         var request = URLRequest(url: baseURL.appendingPathComponent("health"))
@@ -152,7 +152,9 @@ enum TranscriptionClient {
         fileURL: URL,
         context: String = "",
         screenContext: String = "",
+        app: ForegroundApp.Snapshot = ForegroundApp.Snapshot(),
         cleanup: Bool = true,
+        tone: String = "",
         completion: @escaping (Result<TranscriptionResult, Error>) -> Void
     ) {
         guard var components = URLComponents(url: baseURL.appendingPathComponent("transcribe"), resolvingAgainstBaseURL: false) else {
@@ -195,6 +197,24 @@ enum TranscriptionClient {
         body.append("--\(boundary)\r\n".data(using: .utf8)!)
         body.append("Content-Disposition: form-data; name=\"screen\"\r\n\r\n".data(using: .utf8)!)
         body.append(screenContext.data(using: .utf8) ?? Data())
+        body.append("\r\n".data(using: .utf8)!)
+        // Where the dictation is going, read from the OS rather than from the
+        // screen. `app` and `app_site` are identifiers the gateway maps to a
+        // name and a category; `app_detail` is the window title, which is
+        // reference material for the prompt and is never counted.
+        for (name, value) in [("app", app.id), ("app_site", app.site), ("app_detail", app.detail)] {
+            body.append("--\(boundary)\r\n".data(using: .utf8)!)
+            body.append("Content-Disposition: form-data; name=\"\(name)\"\r\n\r\n".data(using: .utf8)!)
+            body.append(value.data(using: .utf8) ?? Data())
+            body.append("\r\n".data(using: .utf8)!)
+        }
+        // The tone ID, empty for the default voice. Sent on every request like
+        // the fields above rather than omitted when empty: the sidecar is what
+        // decides whether the gateway hears about a tone at all, so the default
+        // dictation reaches the gateway as the request it always was.
+        body.append("--\(boundary)\r\n".data(using: .utf8)!)
+        body.append("Content-Disposition: form-data; name=\"tone\"\r\n\r\n".data(using: .utf8)!)
+        body.append(tone.data(using: .utf8) ?? Data())
         body.append("\r\n".data(using: .utf8)!)
         body.append("--\(boundary)--\r\n".data(using: .utf8)!)
         request.httpBody = body

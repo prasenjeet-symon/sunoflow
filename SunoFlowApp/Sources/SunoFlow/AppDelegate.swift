@@ -22,7 +22,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private var statusItem: NSStatusItem!
-    private let hotkeyManager = HotkeyManager()
+    private let hotkeyManager = HotkeyManager(id: 1)
+    /// Second Carbon hotkey: cycles the tone. `HotkeyManager` instances need
+    /// distinct ids so their events can be told apart in the shared handler.
+    private let toneHotkeyManager = HotkeyManager(id: 2)
     private let audioRecorder = AudioRecorder()
     private let overlay = DictationOverlay()
     private let transcriptCard = TranscriptCard()
@@ -39,10 +42,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// moment recording began. See `beginScreenContextCapture`. Nil when this
     /// dictation is not collecting screen context.
     private var screenContextCapture: ScreenContextCapture?
+
+    /// The frontmost-app reading started when recording began. See
+    /// `ForegroundApp.Capture` for why it starts there and never waits.
+    private var appContextCapture: ForegroundApp.Capture?
     private var statusMenuItem: NSMenuItem!
     private var lastTranscriptMenuItem: NSMenuItem!
     private var correctionsMenuItem: NSMenuItem!
     private let correctionsMenu = NSMenu()
+    private var toneMenuItem: NSMenuItem!
+    private let toneMenu = NSMenu()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
@@ -59,6 +68,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let trusted = TextInjector.promptForAccessibilityPermissionIfNeeded()
         AppLog.log("Accessibility trusted at launch: \(trusted)")
+
+        // Earbuds that macOS has parked in the input slot play everything back
+        // at call quality until something moves it. Watch for that and steer
+        // capture to the built-in mic.
+        BluetoothAudioGuard.shared.start()
 
         audioRecorder.onLevel = { [weak self] level in
             self?.overlay.updateLevel(level)
@@ -77,6 +91,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let prefs = Preferences.shared
             self?.hotkeyManager.reregister(keyCode: prefs.hotkeyKeyCode, modifiers: prefs.hotkeyModifiers)
             AppLog.log("Hotkey re-registered: \(KeyCombo.display(keyCode: prefs.hotkeyKeyCode, modifiers: prefs.hotkeyModifiers))")
+        }
+
+        toneHotkeyManager.onHotkey = { [weak self] in self?.cycleTone() }
+        syncToneHotkey()
+        NotificationCenter.default.addObserver(
+            forName: .sunoToneHotkeyChanged, object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.syncToneHotkey()
         }
 
         // A second launch of the app asks us to surface the Settings window.
@@ -104,6 +126,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         healthCheckTimer?.invalidate()
         hotkeyManager.unregister()
+        toneHotkeyManager.unregister()
         if audioRecorder.isRecording {
             audioRecorder.stopRecording()
         }
@@ -140,6 +163,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(toggleItem)
 
         menu.addItem(NSMenuItem.separator())
+        // The current voice always has somewhere to be read. A colour on the
+        // pill says a tone changed; it cannot say which one is in force now,
+        // and the pill is only on screen for a moment.
+        toneMenuItem = NSMenuItem(title: "Tone", action: nil, keyEquivalent: "")
+        toneMenuItem.submenu = toneMenu
+        menu.addItem(toneMenuItem)
+
+        menu.addItem(NSMenuItem.separator())
         correctionsMenuItem = NSMenuItem(title: "Learned Corrections", action: nil, keyEquivalent: "")
         correctionsMenuItem.submenu = correctionsMenu
         menu.addItem(correctionsMenuItem)
@@ -159,7 +190,70 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.delegate = self
         statusItem.menu = menu
         rebuildCorrectionsMenu([])
+        refreshToneMenu()
         updateStatusText()
+    }
+
+    // MARK: - Tone
+
+    /// Register or re-register the tone hotkey to match the setting. Unlike the
+    /// old Fn event tap, a Carbon hotkey registers first try — there is no
+    /// permission to wait for, so this only needs to run when the setting or
+    /// the combination changes.
+    private func syncToneHotkey() {
+        let prefs = Preferences.shared
+        guard prefs.toneHotkeyEnabled else {
+            toneHotkeyManager.unregister()
+            return
+        }
+        toneHotkeyManager.reregister(
+            keyCode: prefs.toneHotkeyKeyCode,
+            modifiers: prefs.toneHotkeyModifiers
+        )
+        AppLog.log("Tone hotkey \(toneHotkeyManager.isRegistered ? "registered" : "FAILED to register"): \(KeyCombo.display(keyCode: prefs.toneHotkeyKeyCode, modifiers: prefs.toneHotkeyModifiers))")
+    }
+
+    /// Advance to the next voice and show it. The tone hotkey calls exactly
+    /// this; the menu is the same action by another route, so the two can never
+    /// disagree about what "next" means.
+    @objc func cycleTone() {
+        announce(Preferences.shared.cycleTone())
+    }
+
+    @objc private func selectToneItem(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String else { return }
+        let tone = Tone.from(raw)
+        Preferences.shared.tone = tone
+        announce(tone)
+    }
+
+    private func announce(_ tone: Tone) {
+        overlay.announceTone(tone)
+        refreshToneMenu()
+        AppLog.log("Tone set to \(tone.label)")
+    }
+
+    private func refreshToneMenu() {
+        let current = Preferences.shared.tone
+        toneMenuItem?.title = "Tone: \(current.label)"
+
+        toneMenu.removeAllItems()
+        // A voice is applied by the cleanup model, so with cleanup off there is
+        // no pass to apply it in. Saying so beats a menu that looks live and
+        // changes nothing about the pasted text.
+        if !Preferences.shared.cleanupEnabled {
+            let off = NSMenuItem(title: "Cleanup is off — tone has no effect", action: nil, keyEquivalent: "")
+            off.isEnabled = false
+            toneMenu.addItem(off)
+            toneMenu.addItem(NSMenuItem.separator())
+        }
+        for tone in Tone.allCases {
+            let item = NSMenuItem(title: tone.label, action: #selector(selectToneItem(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = tone.rawValue
+            item.state = tone == current ? .on : .off
+            toneMenu.addItem(item)
+        }
     }
 
     // MARK: - Learned corrections menu
@@ -332,6 +426,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Kicked off before the overlay goes up, so the overlay's own words
             // are less likely to end up in the OCR.
             beginScreenContextCapture()
+            beginForegroundAppCapture()
             state = .recording
             overlay.show(mode: .recording)
             maxRecordingTimer?.invalidate()
@@ -355,6 +450,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let fileURL = audioRecorder.currentFileURL else {
             overlay.hide()
             screenContextCapture = nil
+            appContextCapture = nil
             state = .idle
             return
         }
@@ -369,13 +465,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             AppLog.log("Captured \(context.count) chars of cursor context")
         }
 
+        // Whatever the reading started at record time has produced. It is not
+        // waited on: see ForegroundApp.Capture.
+        let app = appContextCapture?.result() ?? ForegroundApp.Snapshot()
+        appContextCapture = nil
+        if !app.isEmpty {
+            AppLog.log("Dictating into \(app.id.isEmpty ? "?" : app.id)"
+                + (app.site.isEmpty ? "" : " (\(app.site))"))
+        }
+
         // The screen OCR was started back when recording began, so by now it has
         // almost always finished; `collect` hands it over immediately when it
         // has, and waits out the remainder when the dictation was too short for
         // it to land. Best-effort throughout: no capture means we proceed with
         // cursor context only.
         guard let capture = screenContextCapture else {
-            sendForTranscription(fileURL: fileURL, context: context, screenContext: "")
+            sendForTranscription(fileURL: fileURL, context: context, screenContext: "", app: app)
             return
         }
         screenContextCapture = nil
@@ -385,7 +490,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 AppLog.log("Captured \(screenText.count) chars of screen OCR context")
             }
             self.sendForTranscription(
-                fileURL: fileURL, context: context, screenContext: screenText
+                fileURL: fileURL, context: context, screenContext: screenText, app: app
             )
         }
     }
@@ -403,6 +508,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Needs the Screen Recording permission and is gated by a user toggle;
     /// leaving `screenContextCapture` nil means this dictation carries cursor
     /// context only.
+    /// Starts the frontmost-app reading for the dictation just beginning.
+    ///
+    /// Gated on cleanup alone. Unlike the screen capture this needs no Screen
+    /// Recording permission and takes no pixels — the identity comes from
+    /// NSWorkspace and the title from Accessibility, which the app already holds
+    /// for pasting — so there is no second toggle to hide it behind. With
+    /// cleanup off there is no request for it to travel on.
+    private func beginForegroundAppCapture() {
+        appContextCapture = Preferences.shared.cleanupEnabled ? ForegroundApp.beginCapture() : nil
+    }
+
     private func beginScreenContextCapture() {
         screenContextCapture = nil
         guard Preferences.shared.cleanupEnabled,
@@ -416,12 +532,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ScreenContext.captureAndRecognize { capture.finish($0) }
     }
 
-    private func sendForTranscription(fileURL: URL, context: String, screenContext: String) {
+    private func sendForTranscription(
+        fileURL: URL, context: String, screenContext: String, app: ForegroundApp.Snapshot
+    ) {
+        // Read once, here, rather than anywhere downstream: the tone key can
+        // fire while this dictation is in flight, and the voice that applies is
+        // the one that was chosen when the user stopped speaking.
         TranscriptionClient.transcribe(
             fileURL: fileURL,
             context: context,
             screenContext: screenContext,
-            cleanup: Preferences.shared.cleanupEnabled
+            app: app,
+            cleanup: Preferences.shared.cleanupEnabled,
+            tone: Preferences.shared.tone.rawValue
         ) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self = self else { return }
@@ -570,6 +693,10 @@ extension AppDelegate: NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) {
         // Refresh the learned-corrections list each time the menu opens.
         refreshCorrectionsMenu()
+        // The tone can change from the key while the menu is shut, and the
+        // cleanup toggle can change from Settings, so both are re-read here
+        // rather than only when something in this file moved them.
+        refreshToneMenu()
     }
 }
 

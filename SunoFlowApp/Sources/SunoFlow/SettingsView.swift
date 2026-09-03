@@ -9,6 +9,10 @@ import SwiftUI
 final class HotkeyRecorderNSView: NSView {
     var keyCode: UInt32 = DefaultHotkey.keyCode
     var modifiers: UInt32 = DefaultHotkey.modifiers
+    /// The other hotkey's (code, modifiers), or nil when it is disabled. A combo
+    /// that would collide with it is refused — two managers cannot share one
+    /// Carbon registration.
+    var conflict: (UInt32, UInt32)?
     var onCapture: ((UInt32, UInt32) -> Void)?
 
     /// The brand accent, matched to `Theme.accent` on the SwiftUI side.
@@ -78,6 +82,12 @@ final class HotkeyRecorderNSView: NSView {
             NSSound.beep()
             return
         }
+        // Refuse the other hotkey's combination: both are Carbon registrations,
+        // and a shared combo would silently take over one of them.
+        if let (otherCode, otherMods) = conflict, otherCode == code, otherMods == mods {
+            NSSound.beep()
+            return
+        }
         keyCode = code
         modifiers = mods
         onCapture?(code, mods)
@@ -124,11 +134,15 @@ final class HotkeyRecorderNSView: NSView {
 struct HotkeyRecorder: NSViewRepresentable {
     @Binding var keyCode: UInt32
     @Binding var modifiers: UInt32
+    /// The other hotkey's (code, modifiers), or nil when it is disabled.
+    /// Recording that exact combo is refused with a beep.
+    var conflict: (UInt32, UInt32)?
 
     func makeNSView(context: Context) -> HotkeyRecorderNSView {
         let view = HotkeyRecorderNSView()
         view.keyCode = keyCode
         view.modifiers = modifiers
+        view.conflict = conflict
         view.onCapture = { code, mods in
             keyCode = code
             modifiers = mods
@@ -137,6 +151,7 @@ struct HotkeyRecorder: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: HotkeyRecorderNSView, context: Context) {
+        nsView.conflict = conflict
         guard !nsView.isRecording else { return }
         nsView.keyCode = keyCode
         nsView.modifiers = modifiers
@@ -557,12 +572,26 @@ struct SettingsView: View {
         Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1"
     }
 
-    /// Total subsystems tracked in the overview status list.
-    private let subsystemCount = 4
+    /// Total subsystems tracked in the overview status list. Screen context
+    /// only counts when the user has turned it on — it's an opt-in accuracy
+    /// aid, not a baseline requirement, so an intentionally-off feature must
+    /// not make "All systems ready" unreachable.
+    private var subsystemCount: Int { 4 + (prefs.screenContextEnabled ? 1 : 0) }
 
     /// Number of subsystems that are healthy (for the overview header).
     private var healthyCount: Int {
-        [sidecarOnline, micPermission, accessibilityPermission, polishOnline].filter { $0 }.count
+        var count = [sidecarOnline, micPermission, accessibilityPermission, polishOnline].filter { $0 }.count
+        if prefs.screenContextEnabled {
+            count += screenRecordingPermission ? 1 : 0
+        }
+        return count
+    }
+
+    /// True when on-screen OCR is actually contributing context. Only
+    /// meaningful while the feature is enabled; when it's off there's nothing
+    /// to check.
+    private var screenContextHealthy: Bool {
+        prefs.screenContextEnabled && screenRecordingPermission
     }
 
     private var allReady: Bool { healthyCount == subsystemCount }
@@ -810,8 +839,23 @@ struct SettingsView: View {
                 hint: polishOnline
                     ? "Dictation is tidied up before it's typed out."
                     : "Dictation still works, but arrives unpolished until this reconnects.",
-                divider: false
+                divider: prefs.screenContextEnabled
             )
+            if prefs.screenContextEnabled {
+                statusRow(
+                    title: "Screen context",
+                    systemImage: "rectangle.on.rectangle",
+                    ok: screenContextHealthy,
+                    okText: "Reading",
+                    failText: "Blocked",
+                    hint: screenContextHealthy
+                        ? "On-screen words are read with OCR so names and terminology match what you're looking at."
+                        : "Grant Screen Recording access in System Settings so SunoFlow can read the screen for context.",
+                    action: ScreenContext.openSystemSettings,
+                    actionLabel: "Open System Settings",
+                    divider: false
+                )
+            }
             Rule(strong: true)
         }
     }
@@ -1155,6 +1199,7 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 0) {
             startupGroup
             hotkeyGroup
+            toneGroup
             recordingGroup
             unfocusedGroup
             screenContextGroup
@@ -1200,8 +1245,14 @@ struct SettingsView: View {
                 HStack(spacing: 12) {
                     Button("Reset") { prefs.resetHotkeyToDefault() }
                         .buttonStyle(.sunoGhost)
-                    HotkeyRecorder(keyCode: $prefs.hotkeyKeyCode, modifiers: $prefs.hotkeyModifiers)
-                        .frame(width: 150, height: 30)
+                    HotkeyRecorder(
+                        keyCode: $prefs.hotkeyKeyCode,
+                        modifiers: $prefs.hotkeyModifiers,
+                        conflict: prefs.toneHotkeyEnabled
+                            ? (prefs.toneHotkeyKeyCode, prefs.toneHotkeyModifiers)
+                            : nil
+                    )
+                    .frame(width: 150, height: 30)
                 }
             }
             Rule(strong: true)
@@ -1226,6 +1277,69 @@ struct SettingsView: View {
                     Stepper("", value: $prefs.maxRecordingSeconds, in: 10...600, step: 5)
                         .labelsHidden()
                 }
+            }
+            Rule(strong: true)
+        }
+    }
+
+    /// The voice, and the key that cycles it.
+    ///
+    /// The picker is here as well as in the menu bar because the key alone
+    /// cannot teach anyone what the voices *are* — it shows a name for a
+    /// second, and only the one it landed on.
+    private var toneGroup: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SectionLabel(text: "Tone")
+            Rule(strong: true)
+            settingRow(
+                "Writing tone",
+                prefs.tone.blurb
+            ) {
+                Picker("", selection: $prefs.tone) {
+                    ForEach(Tone.allCases) { tone in
+                        Text(tone.label).tag(tone)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 170)
+            }
+            settingRow(
+                "Cycle with a hotkey",
+                "Press a shortcut to move to the next tone. The tone stays where you leave it.",
+                divider: prefs.toneHotkeyEnabled || !prefs.cleanupEnabled
+            ) {
+                brandToggle($prefs.toneHotkeyEnabled)
+                    .onChange(of: prefs.toneHotkeyEnabled) { newValue in
+                        // The tone default (⌥⇧Space) may already be taken by a
+                        // customised dictation shortcut. Move the newcomer out of
+                        // the collision instead of letting two Carbon hotkeys
+                        // fight over one combination.
+                        if newValue,
+                           prefs.toneHotkeyKeyCode == prefs.hotkeyKeyCode,
+                           prefs.toneHotkeyModifiers == prefs.hotkeyModifiers {
+                            prefs.toneHotkeyKeyCode = DefaultToneHotkey.fallbackKeyCode
+                            prefs.toneHotkeyModifiers = DefaultToneHotkey.fallbackModifiers
+                        }
+                    }
+            }
+            if prefs.toneHotkeyEnabled {
+                VStack(spacing: 12) {
+                    HStack(spacing: 12) {
+                        Button("Reset") { prefs.resetToneHotkeyToDefault() }
+                            .buttonStyle(.sunoGhost)
+                        HotkeyRecorder(
+                            keyCode: $prefs.toneHotkeyKeyCode,
+                            modifiers: $prefs.toneHotkeyModifiers,
+                            conflict: (prefs.hotkeyKeyCode, prefs.hotkeyModifiers)
+                        )
+                        .frame(width: 150, height: 30)
+                    }
+                }
+                .padding(.vertical, Theme.Space.row)
+            }
+            if !prefs.cleanupEnabled {
+                SunoNotice(text: "Tone is applied by the cleanup pass, which is currently off — dictations will paste exactly as spoken.")
+                    .padding(.vertical, Theme.Space.row)
             }
             Rule(strong: true)
         }
@@ -1284,7 +1398,7 @@ struct SettingsView: View {
             settingRow(
                 "Microphone",
                 "Which input SunoFlow records from.",
-                divider: micIsBluetooth
+                divider: true
             ) {
                 Picker("", selection: $prefs.micDeviceUID) {
                     Text("System Default").tag("")
@@ -1303,9 +1417,17 @@ struct SettingsView: View {
                 .onChange(of: prefs.micDeviceUID) { _ in refreshMicWarning() }
             }
 
+            settingRow(
+                "Protect Bluetooth audio quality",
+                "macOS hands earbuds the microphone slot as soon as they connect, which flips them to call mode and drops playback to 16 kHz mono in every app — music included. Keeps capture on the built-in mic instead, and steps aside when a call is already using the headset mic.",
+                divider: micIsBluetooth
+            ) {
+                brandToggle($prefs.protectBluetoothAudio)
+            }
+
             if micIsBluetooth {
                 VStack(alignment: .leading, spacing: 12) {
-                    SunoNotice(text: "Recording from a Bluetooth microphone forces your earbuds into low-quality call mode, degrading audio in every app while you dictate.")
+                    SunoNotice(text: "Your earbuds hold the microphone slot, so macOS is playing all audio through them at call quality — not just while you dictate. Switching the input back to the built-in mic restores full-quality playback immediately.")
                     if AudioDevices.builtInInputUID() != nil {
                         Button("Switch to the built-in microphone") {
                             if let builtIn = AudioDevices.builtInInputUID() {
@@ -1337,7 +1459,7 @@ struct SettingsView: View {
             Rule(strong: true)
             SunoRow(
                 title: "The built-in microphone is usually best",
-                subtitle: "It stays in high-quality mode while you dictate, and it is what the speech model hears most often.",
+                subtitle: "It leaves your earbuds free to play at full quality, and it is what the speech model hears most often.",
                 systemImage: "checkmark.circle"
             )
             SunoRow(

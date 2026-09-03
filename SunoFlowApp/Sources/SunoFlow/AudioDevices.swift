@@ -78,6 +78,40 @@ enum AudioDevices {
         inputDevices().first { transportType($0.id) == kAudioDeviceTransportTypeBuiltIn }?.uid
     }
 
+    /// `AudioDeviceID` of the built-in microphone, if this Mac has one.
+    static func builtInInputDeviceID() -> AudioDeviceID? {
+        inputDevices().first { transportType($0.id) == kAudioDeviceTransportTypeBuiltIn }?.id
+    }
+
+    /// Human-readable name of a device, for logging.
+    static func name(of id: AudioDeviceID) -> String? {
+        stringProperty(id, kAudioObjectPropertyName)
+    }
+
+    /// True if the device is connected over Bluetooth.
+    static func isBluetooth(_ id: AudioDeviceID) -> Bool {
+        let transport = transportType(id)
+        return transport == kAudioDeviceTransportTypeBluetooth
+            || transport == kAudioDeviceTransportTypeBluetoothLE
+    }
+
+    /// True while any process on the machine has this device's streams running.
+    /// Used to tell "macOS just auto-selected the headset mic" (idle) apart from
+    /// "the user is on a call" (running), so the guard never steals a live mic.
+    static func isRunningSomewhere(_ id: AudioDeviceID) -> Bool {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceIsRunningSomewhere,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var running: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        guard AudioObjectGetPropertyData(id, &address, 0, nil, &size, &running) == noErr else {
+            return false
+        }
+        return running != 0
+    }
+
     /// The system default input device id, or nil.
     static func defaultInputDeviceID() -> AudioDeviceID? {
         var address = AudioObjectPropertyAddress(

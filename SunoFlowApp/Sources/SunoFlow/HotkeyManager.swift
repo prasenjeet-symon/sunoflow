@@ -6,12 +6,20 @@ import Cocoa
 /// (press once to start, press again to stop) rather than hold-to-talk.
 final class HotkeyManager {
     private static let signature: OSType = 0x53464c57 // 'SFLW'
-    private static let hotKeyID: UInt32 = 1
+
+    /// Distinguishes this manager's hotkey from any other SunoFlow hotkey
+    /// sharing the same event handler signature. Each manager needs its own —
+    /// two registered with the same id could not tell their events apart.
+    private let hotKeyID: UInt32
 
     private var hotKeyRef: EventHotKeyRef?
     private var eventHandler: EventHandlerRef?
 
     var onHotkey: (() -> Void)?
+
+    init(id: UInt32) {
+        hotKeyID = id
+    }
 
     /// True when the last `register` actually took the shortcut. A failure is
     /// silent to the user — the key simply does nothing — so setup asks this
@@ -46,10 +54,15 @@ final class HotkeyManager {
                     &hotKeyID
                 )
                 NSLog("[SunoFlow] hotkey event fired, GetEventParameter status=\(status), id=\(hotKeyID.id)")
-                if hotKeyID.id == HotkeyManager.hotKeyID {
-                    let manager = Unmanaged<HotkeyManager>.fromOpaque(userData).takeUnretainedValue()
-                    manager.onHotkey?()
+                // Cannot reference self here (C function pointer); userData is
+                // the manager, and the id is read back off it.
+                let manager = Unmanaged<HotkeyManager>.fromOpaque(userData).takeUnretainedValue()
+                if hotKeyID.id != manager.hotKeyID {
+                    // Not ours — say so, or the event stops here and a second
+                    // SunoFlow hotkey (the tone cycle) never sees its own press.
+                    return OSStatus(eventNotHandledErr)
                 }
+                manager.onHotkey?()
                 return noErr
             },
             1,
@@ -58,7 +71,7 @@ final class HotkeyManager {
             &eventHandler
         )
 
-        let id = EventHotKeyID(signature: HotkeyManager.signature, id: HotkeyManager.hotKeyID)
+        let id = EventHotKeyID(signature: HotkeyManager.signature, id: hotKeyID)
         let registerStatus = RegisterEventHotKey(keyCode, modifiers, id, GetApplicationEventTarget(), 0, &hotKeyRef)
         NSLog("[SunoFlow] RegisterEventHotKey status=\(registerStatus)")
         isRegistered = registerStatus == noErr && hotKeyRef != nil
@@ -93,6 +106,19 @@ enum DefaultHotkey {
     // kVK_Space = 0x31 (49)
     static let keyCode: UInt32 = 49
     static let modifiers: UInt32 = UInt32(optionKey)
+}
+
+/// Built-in tone-cycle shortcut: ⌥⇧Space — next to the dictation hotkey, and
+/// clear of it (Shift separates the two). Only used when the user turns the
+/// tone hotkey on; it defaults to off, so nobody hits this by surprise.
+enum DefaultToneHotkey {
+    static let keyCode: UInt32 = 49
+    static let modifiers: UInt32 = UInt32(optionKey | shiftKey)
+
+    /// Fallback when the default is already taken by a customised dictation
+    /// shortcut: ⌘⇧Space.
+    static let fallbackKeyCode: UInt32 = 49
+    static let fallbackModifiers: UInt32 = UInt32(cmdKey | shiftKey)
 }
 
 /// Formatting + conversion helpers for turning a (keyCode, Carbon modifier mask)

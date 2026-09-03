@@ -310,8 +310,14 @@ struct OnboardingView: View {
             SunoRow(title: "Dictation shortcut",
                     subtitle: "Click the field and press the combination you want.",
                     systemImage: "keyboard") {
-                HotkeyRecorder(keyCode: $prefs.hotkeyKeyCode, modifiers: $prefs.hotkeyModifiers)
-                    .frame(width: 160, height: 32)
+                HotkeyRecorder(
+                    keyCode: $prefs.hotkeyKeyCode,
+                    modifiers: $prefs.hotkeyModifiers,
+                    conflict: prefs.toneHotkeyEnabled
+                        ? (prefs.toneHotkeyKeyCode, prefs.toneHotkeyModifiers)
+                        : nil
+                )
+                .frame(width: 160, height: 32)
             }
             SunoRow(title: "Try it now",
                     subtitle: "Press your shortcut. Nothing will be recorded — this only proves macOS is passing the key to SunoFlow.",

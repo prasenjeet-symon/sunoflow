@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body { margin:0; padding:28px 24px 36px; font-family:-apple-system,"SF Pro Text",Helvetica,Arial,sans-serif;
+         background:#f4f2ee; color:#3a3a38; }
+  h2 { font-size:12px; font-weight:600; letter-spacing:.08em; text-transform:uppercase;
+       color:#8a867e; margin:0 0 16px; }
+  .row { display:flex; gap:34px; align-items:flex-start; margin-bottom:34px; flex-wrap:wrap; }
+  .demo { display:flex; flex-direction:column; align-items:center; }
+  .pill { background:#fbfaf8; border:1px solid #e4e1da; border-radius:999px;
+          box-shadow:0 10px 22px rgba(60,55,45,.14); display:flex; align-items:center;
+          justify-content:center; }
+  .pill.default { width:132px; height:42px; }
+  .pill.tall { width:132px; height:54px; }
+  .bars { display:flex; align-items:center; gap:4px; height:20px; }
+  .bars i { display:block; width:3px; border-radius:2px; }
+  .caption { margin-top:4px; font-size:9px; font-weight:600; letter-spacing:.02em; }
+  .chip { margin-top:7px; font-size:9px; font-weight:700; padding:2px 9px; border-radius:999px;
+          background:#fbfaf8; border:1px solid #e4e1da; box-shadow:0 3px 8px rgba(60,55,45,.12); }
+  .side { display:flex; align-items:center; gap:8px; width:132px; justify-content:center; }
+  .side .name { font-size:9px; font-weight:700; white-space:nowrap; }
+  .note { margin-top:12px; font-size:11px; line-height:1.5; color:#6d6960; max-width:290px; }
+  .tag { font-size:10px; font-weight:700; padding:2px 8px; border-radius:999px; margin-left:10px; }
+  .reco { color:#4f49b5; border:1px solid #c7c3ee; background:#f1f0fc; }
+  .no { color:#9a3b28; border:1px solid #ecc9c0; background:#fbeeea; }
+</style>
+</head>
+<body>
+
+<div class="row">
+  <div class="demo">
+    <h2>Today — colour only</h2>
+    <div class="pill default"><div class="bars">
+      <i style="height:7px;background:#4f49b5"></i><i style="height:11px;background:#4f49b5"></i>
+      <i style="height:17px;background:#4f49b5"></i><i style="height:20px;background:#4f49b5"></i>
+      <i style="height:16px;background:#4f49b5"></i><i style="height:10px;background:#4f49b5"></i>
+    </div></div>
+    <div class="note">Mid-dictation, after the 1.1s name flash is gone, "professional" and "formal" are close hues — only the flash told you which.</div>
+  </div>
+  <div class="demo">
+    <h2>Option 1 — caption <span class="tag reco">recommended</span></h2>
+    <div class="pill tall"><div>
+      <div class="bars" style="margin-top:8px">
+        <i style="height:6px;background:#2A6FB0"></i><i style="height:10px;background:#2A6FB0"></i>
+        <i style="height:16px;background:#2A6FB0"></i><i style="height:19px;background:#2A6FB0"></i>
+        <i style="height:14px;background:#2A6FB0"></i><i style="height:9px;background:#2A6FB0"></i>
+      </div>
+      <div class="caption" style="color:#2A6FB0;text-align:center">Professional</div>
+    </div></div>
+    <div class="note">One object, tone name always visible, only when tone ≠ faithful. Faithful pill is pixel-identical to today's.</div>
+  </div>
+</div>
+
+<div class="row">
+  <div class="demo">
+    <h2>Option 2 — chip below</h2>
+    <div class="pill default"><div class="bars">
+      <i style="height:7px;background:#2A6FB0"></i><i style="height:11px;background:#2A6FB0"></i>
+      <i style="height:17px;background:#2A6FB0"></i><i style="height:20px;background:#2A6FB0"></i>
+      <i style="height:16px;background:#2A6FB0"></i><i style="height:10px;background:#2A6FB0"></i>
+    </div></div>
+    <div class="chip" style="color:#2A6FB0">Professional</div>
+    <div class="note">A second floating object; the radiate rings expand downward through exactly this space, and the chip fights the pill's shadow.</div>
+  </div>
+  <div class="demo">
+    <h2>Option 3 — inline name</h2>
+    <div class="pill default"><div class="side">
+      <span class="name" style="color:#2A6FB0">Professional</span>
+      <div class="bars" style="height:16px">
+        <i style="height:6px;background:#2A6FB0"></i><i style="height:9px;background:#2A6FB0"></i>
+        <i style="height:13px;background:#2A6FB0"></i><i style="height:11px;background:#2A6FB0"></i>
+      </div>
+    </div></div>
+    <div class="note">Same 42pt pill, but the live waveform shrinks by a third — mic feedback becomes less alive, and there's less room for bars.</div>
+  </div>
+</div>
+
+</body>
+</html>
