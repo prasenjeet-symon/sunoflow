@@ -73,7 +73,10 @@ internal sealed class AudioRecorder
         var format = new WaveFormat(16000, 16, 1);
         _waveIn = new WaveInEvent
         {
-            DeviceNumber = ResolveDeviceIndex(_deviceId),
+            // The guard only ever redirects the *system default* case, and only
+            // when that default is a Bluetooth headset whose output would drop
+            // to call quality for every app the moment we opened its mic.
+            DeviceNumber = BluetoothAudioGuard.PreferNonBluetooth(ResolveDeviceIndex(_deviceId)),
             WaveFormat = format,
             BufferMilliseconds = 100,
         };

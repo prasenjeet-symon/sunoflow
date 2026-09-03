@@ -19,6 +19,14 @@ internal sealed class Preferences : INotifyPropertyChanged
     private const int DefaultHotkeyCode = 0x20; // VK_SPACE
     private const int DefaultHotkeyMods = ModAlt;
 
+    // Tone cycle: Alt+Shift+Space, the Windows analogue of the Mac's ⌥⇧Space.
+    private const int DefaultToneHotkeyCode = 0x20; // VK_SPACE
+    private const int DefaultToneHotkeyMods = ModAlt | ModShift;
+    // Used when the default collides with a customised dictation shortcut:
+    // Ctrl+Shift+Space, matching the Mac's ⌘⇧Space fallback.
+    public const int FallbackToneHotkeyCode = 0x20;
+    public const int FallbackToneHotkeyMods = ModControl | ModShift;
+
     // Win32 modifier flags for RegisterHotKey.
     public const int ModNone = 0x0000;
     public const int ModAlt = 0x0001;
@@ -30,6 +38,39 @@ internal sealed class Preferences : INotifyPropertyChanged
     public int MaxRecordingSeconds { get; set; } = 60;
     public bool CleanupEnabled { get; set; } = true;
     public bool ScreenContextEnabled { get; set; } = false;
+
+    /// <summary>When a dictation finishes and no text field has focus, offer the
+    /// transcript instead of pasting it into nothing. On by default — the
+    /// alternative is losing what the user just said.</summary>
+    public bool OfferCopyWhenUnfocused { get; set; } = true;
+
+    /// <summary>Steer capture away from a Bluetooth headset's call-quality mode.
+    /// On by default, and only ever acts when the selected input really is a
+    /// Bluetooth device.</summary>
+    public bool ProtectBluetoothAudio { get; set; } = true;
+
+    /// <summary>The writing voice, stored as the gateway's raw id rather than an
+    /// index: an index would silently mean a different voice the moment the list
+    /// gains or loses an entry. Serialized as a string so the JSON stays
+    /// readable and matches what goes over the wire.</summary>
+    public string ToneId { get; set; } = "";
+
+    /// <summary>The chosen voice. Not serialized — <see cref="ToneId"/> is.</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public Tone Tone
+    {
+        get => Tone.From(ToneId);
+        set { ToneId = value.Id; Save(); OnPropertyChanged(nameof(Tone)); }
+    }
+
+    /// <summary>Advance to the next voice and hand back what it landed on, so the
+    /// caller can announce it. One place for the cycle, whether it was driven
+    /// from the key or from the tray menu.</summary>
+    public Tone CycleTone()
+    {
+        Tone = Tone.Next();
+        return Tone;
+    }
 
     /// <summary>False until first-run setup has been completed (or explicitly
     /// skipped). Stored rather than inferred from "is everything configured",
@@ -52,6 +93,30 @@ internal sealed class Preferences : INotifyPropertyChanged
         set { _hotkeyModifiers = value; Save(); OnPropertyChanged(nameof(HotkeyModifiers)); }
     }
 
+    // The tone-cycle hotkey. Off by default: the dictation hotkey already does
+    // something with every press, and a second system-wide shortcut should be
+    // something the user opts into. Raises PropertyChanged for the same reason
+    // as the pair above — TrayApp re-registers on the change.
+    private bool _toneHotkeyEnabled;
+    private int _toneHotkeyCode = DefaultToneHotkeyCode;
+    private int _toneHotkeyModifiers = DefaultToneHotkeyMods;
+
+    public bool ToneHotkeyEnabled
+    {
+        get => _toneHotkeyEnabled;
+        set { _toneHotkeyEnabled = value; Save(); OnPropertyChanged(nameof(ToneHotkeyEnabled)); }
+    }
+    public int ToneHotkeyCode
+    {
+        get => _toneHotkeyCode;
+        set { _toneHotkeyCode = value; Save(); OnPropertyChanged(nameof(ToneHotkeyCode)); }
+    }
+    public int ToneHotkeyModifiers
+    {
+        get => _toneHotkeyModifiers;
+        set { _toneHotkeyModifiers = value; Save(); OnPropertyChanged(nameof(ToneHotkeyModifiers)); }
+    }
+
     public event PropertyChangedEventHandler? PropertyChanged;
 
     private void OnPropertyChanged(string name) =>
@@ -63,6 +128,13 @@ internal sealed class Preferences : INotifyPropertyChanged
         HotkeyCode = DefaultHotkeyCode;
         HotkeyModifiers = DefaultHotkeyMods;
         // The setters already save + raise PropertyChanged for both fields.
+    }
+
+    /// <summary>Restore the built-in Alt+Shift+Space tone shortcut.</summary>
+    public void ResetToneHotkeyToDefault()
+    {
+        ToneHotkeyCode = DefaultToneHotkeyCode;
+        ToneHotkeyModifiers = DefaultToneHotkeyMods;
     }
 
     /// <summary>Set while <see cref="Load"/> is populating a fresh instance. The

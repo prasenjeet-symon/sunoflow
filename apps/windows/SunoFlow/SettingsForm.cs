@@ -1155,6 +1155,13 @@ internal sealed class SettingsForm : Form
         {
             _prefs.CleanupEnabled = cleanup.Checked;
             _prefs.Save();
+            // Tone lives in the cleanup pass, so switching cleanup off has to
+            // say so where the tone is chosen, not only in the tray menu.
+            if (_toneCleanupNotice != null)
+            {
+                _toneCleanupNotice.Visible = !cleanup.Checked;
+                Relayout();
+            }
             RefreshOverview();
         };
         _content.Controls.Add(new SunoRow(
@@ -1166,6 +1173,91 @@ internal sealed class SettingsForm : Form
         _gwRow = new SunoRow("Cleanup service", TranscriptionClient.GatewayUrl,
                              divider: false, trailing: _gwStatus);
         _content.Controls.Add(_gwRow);
+        _content.Controls.Add(new RuleLine(strong: true));
+
+        // Tone. The picker is the teaching surface: the hotkey cycles, but a
+        // cycle cannot teach anyone what the voices *are* — it shows a name for
+        // a second, and only the one it landed on.
+        _content.Controls.Add(new SectionHeader("Tone"));
+        var toneCombo = MakeCombo(180);
+        foreach (var t in Tone.All) toneCombo.Items.Add(t.Label);
+        toneCombo.SelectedIndex = IndexOfTone(_prefs.Tone);
+        var toneRow = new SunoRow("Writing tone", _prefs.Tone.Blurb,
+                                  trailing: toneCombo);
+        toneCombo.SelectedIndexChanged += (s, e) =>
+        {
+            int i = toneCombo.SelectedIndex;
+            if (i < 0 || i >= Tone.All.Count) return;
+            _prefs.Tone = Tone.All[i];
+            // The blurb is the explanation of the voice that is now in force, so
+            // it has to follow the picker.
+            toneRow.SetSubtitle(_prefs.Tone.Blurb);
+            Relayout();
+        };
+        _content.Controls.Add(toneRow);
+
+        var toneHotkeyField = new HotkeyField(_prefs.ToneHotkeyCode, _prefs.ToneHotkeyModifiers);
+        var toneReset = new SunoButton("Reset", ButtonKind.Ghost);
+        var toneHotkeyRow = new SunoRow(
+            "Shortcut", null, divider: false,
+            trailing: new Row(toneReset, toneHotkeyField))
+        { Visible = _prefs.ToneHotkeyEnabled };
+        var toneCleanupNotice = new SunoNotice(
+            "Tone is applied by the cleanup pass, which is currently off — dictations will paste exactly as spoken.",
+            Glyph.Info, Theme.Faint)
+        { Margin = new Padding(0, 14, 0, 14), Visible = !_prefs.CleanupEnabled };
+        _toneCleanupNotice = toneCleanupNotice;
+
+        toneHotkeyField.Captured += (s, e) =>
+        {
+            _prefs.ToneHotkeyCode = toneHotkeyField.KeyCode;
+            _prefs.ToneHotkeyModifiers = toneHotkeyField.Modifiers;
+        };
+        toneReset.Click += (s, e) =>
+        {
+            _prefs.ResetToneHotkeyToDefault();
+            toneHotkeyField.Set(_prefs.ToneHotkeyCode, _prefs.ToneHotkeyModifiers);
+        };
+
+        var toneHotkeyToggle = new SunoToggle(_prefs.ToneHotkeyEnabled);
+        toneHotkeyToggle.Toggled += (s, e) =>
+        {
+            // The tone default (Alt+Shift+Space) may already be taken by a
+            // customised dictation shortcut. Move the newcomer out of the
+            // collision instead of letting two RegisterHotKey calls fight over
+            // one combination — the second simply fails and the key does nothing.
+            if (toneHotkeyToggle.Checked &&
+                _prefs.ToneHotkeyCode == _prefs.HotkeyCode &&
+                _prefs.ToneHotkeyModifiers == _prefs.HotkeyModifiers)
+            {
+                _prefs.ToneHotkeyCode = Preferences.FallbackToneHotkeyCode;
+                _prefs.ToneHotkeyModifiers = Preferences.FallbackToneHotkeyMods;
+                toneHotkeyField.Set(_prefs.ToneHotkeyCode, _prefs.ToneHotkeyModifiers);
+            }
+            _prefs.ToneHotkeyEnabled = toneHotkeyToggle.Checked;
+            toneHotkeyRow.Visible = toneHotkeyToggle.Checked;
+            Relayout();
+        };
+        _content.Controls.Add(new SunoRow(
+            "Cycle with a hotkey",
+            "Press a shortcut to move to the next tone. The tone stays where you leave it.",
+            trailing: toneHotkeyToggle));
+        _content.Controls.Add(toneHotkeyRow);
+        _content.Controls.Add(toneCleanupNotice);
+        _content.Controls.Add(new RuleLine(strong: true));
+
+        // Nowhere to paste.
+        _content.Controls.Add(new SectionHeader("Nowhere to paste"));
+        var offer = new SunoToggle(_prefs.OfferCopyWhenUnfocused);
+        offer.Toggled += (s, e) =>
+        {
+            _prefs.OfferCopyWhenUnfocused = offer.Checked;
+            _prefs.Save();
+        };
+        _content.Controls.Add(new SunoRow(
+            "Offer the text instead",
+            "When a dictation finishes and no text field is focused, SunoFlow shows what you said at the bottom of the screen with a button to copy it — rather than typing into nothing and losing it.",
+            divider: false, trailing: offer));
         _content.Controls.Add(new RuleLine(strong: true));
 
         // Screen context.
@@ -1241,7 +1333,23 @@ internal sealed class SettingsForm : Form
 
         _content.Controls.Add(new SunoRow(
             "Microphone", "Which input SunoFlow records from.",
-            divider: false, trailing: combo));
+            trailing: combo));
+
+        // Protect Bluetooth audio quality. Worded for what Windows actually
+        // permits: there is no public API to change the system's default audio
+        // device, so this redirects SunoFlow's own capture and leaves the
+        // machine's settings alone. The Mac, which *can* move the default input,
+        // says something stronger in the same place.
+        var btGuard = new SunoToggle(_prefs.ProtectBluetoothAudio);
+        btGuard.Toggled += (s, e) =>
+        {
+            _prefs.ProtectBluetoothAudio = btGuard.Checked;
+            _prefs.Save();
+        };
+        _content.Controls.Add(new SunoRow(
+            "Protect Bluetooth audio quality",
+            "When the default microphone is a Bluetooth headset, dictate from another input instead. Recording from a headset puts the whole link into call mode, which muffles its sound in every app until the recording ends. Your Windows sound settings are not changed, and an input you pick above is always respected.",
+            divider: false, trailing: btGuard));
         _content.Controls.Add(new RuleLine(strong: true));
 
         _content.Controls.Add(new SectionHeader("Devices out of date?"));
@@ -1514,6 +1622,7 @@ internal sealed class SettingsForm : Form
     private Stack? _dictList;
     private SunoField? _search;
     private SunoField? _newFrom, _newTo;
+    private SunoNotice? _toneCleanupNotice;
     private ComboBox? _newKind;
     private TextBlock? _newKindBlurb;
     private Stack? _addBlock;
@@ -1603,6 +1712,16 @@ internal sealed class SettingsForm : Form
         _newKind == null || _newKind.SelectedIndex <= 0
             ? null
             : TranscriptionClient.CorrectionKinds.All[_newKind.SelectedIndex - 1];
+
+    /// <summary>Position of a voice in the cycle, for the picker. Falls back to
+    /// the default rather than -1, so a stored id this build does not know shows
+    /// as "As spoken" instead of an empty box.</summary>
+    private static int IndexOfTone(Tone tone)
+    {
+        for (int i = 0; i < Tone.All.Count; i++)
+            if (ReferenceEquals(Tone.All[i], tone)) return i;
+        return 0;
+    }
 
     private static ComboBox MakeCombo(int width) => new()
     {

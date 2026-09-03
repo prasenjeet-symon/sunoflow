@@ -30,7 +30,7 @@ internal static class TranscriptionClient
 
     /// <summary>Hosted cleanup gateway (transcript polishing). The app only
     /// probes its unauthenticated <c>/ready</c> for the settings status card.</summary>
-    public const string GatewayUrl = "http://162.19.81.108:40009";
+    public const string GatewayUrl = "https://cleanup.ogcode.xyz";
 
     private static readonly HttpClient Http = new()
     {
@@ -278,7 +278,8 @@ internal static class TranscriptionClient
     /// outside its DPAPI-protected store.
     /// </summary>
     public static async Task<TranscribeOutcome> TranscribeAsync(
-        string wavPath, string context, string screenContext, bool cleanup)
+        string wavPath, string context, string screenContext,
+        ForegroundApp.Snapshot app, string tone, bool cleanup)
     {
         try
         {
@@ -289,6 +290,19 @@ internal static class TranscriptionClient
             form.Add(fileContent, "file", "audio.wav");
             form.Add(new StringContent(context, Encoding.UTF8), "context");
             form.Add(new StringContent(screenContext, Encoding.UTF8), "screen");
+            // Where the dictation is going, read from the OS rather than from the
+            // screen. "app" and "app_site" are identifiers the gateway maps to a
+            // name and a category; "app_detail" is the window title, which is
+            // reference material for the prompt and is never counted.
+            form.Add(new StringContent(app.Id, Encoding.UTF8), "app");
+            form.Add(new StringContent(app.Site, Encoding.UTF8), "app_site");
+            form.Add(new StringContent(app.Detail, Encoding.UTF8), "app_detail");
+            // The tone ID, empty for the default voice. Sent on every request
+            // like the fields above rather than omitted when empty: the sidecar
+            // is what decides whether the gateway hears about a tone at all, so
+            // the default dictation reaches the gateway as the request it
+            // always was.
+            form.Add(new StringContent(tone, Encoding.UTF8), "tone");
 
             var url = $"{BaseUrl}/transcribe?cleanup={(cleanup ? "true" : "false")}";
             using var request = new HttpRequestMessage(HttpMethod.Post, url) { Content = form };

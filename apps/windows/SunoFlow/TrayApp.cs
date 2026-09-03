@@ -22,9 +22,18 @@ internal sealed class TrayApp : IDisposable
 
     private readonly NotifyIcon _tray = new();
     private readonly HotkeyManager _hotkey = new();
+
+    /// <summary>Second system-wide hotkey: cycles the writing voice. Separate
+    /// manager because each owns its own registration and message sink.</summary>
+    private readonly HotkeyManager _toneHotkey = new();
+    private readonly ToolStripMenuItem _toneItem = new("Tone");
     private AudioRecorder _recorder = new(Preferences.Instance.MicDeviceId);
     private readonly DictationOverlay _overlay = new();
     private readonly EditLearner _editLearner = new();
+
+    /// <summary>Offers the transcript when a dictation had nowhere to go. Built
+    /// lazily on first use — most dictations never need it.</summary>
+    private TranscriptCard? _card;
     private readonly SidecarSupervisor _sidecar = new();
     private readonly System.Windows.Forms.Timer _healthTimer = new();
     private System.Windows.Forms.Timer? _maxRecTimer;
@@ -33,6 +42,11 @@ internal sealed class TrayApp : IDisposable
     /// the moment recording began. See <see cref="StartScreenCapture"/>. Null
     /// when this dictation is not collecting screen context.</summary>
     private Task<string>? _screenCapture;
+
+    /// <summary>The foreground application as it was when recording began. Read
+    /// there rather than at stop so it is the app the user was actually dictating
+    /// into, matching the macOS client. See <see cref="ForegroundApp"/>.</summary>
+    private ForegroundApp.Snapshot _appContext = ForegroundApp.Snapshot.Empty;
 
     // Captured on the UI thread at construction so async continuations can
     // marshal back to it (TrayApp is not a Control and has no BeginInvoke).
@@ -114,6 +128,9 @@ internal sealed class TrayApp : IDisposable
                        + "is owned by another app — dictation shortcut inactive");
         }
 
+        _toneHotkey.HotkeyPressed += (s, e) => CycleTone();
+        SyncToneHotkey();
+
         // In installed mode (frozen sidecar present), spawn it now so the user
         // doesn't have to launch it separately. In dev mode this is a no-op and
         // the user runs the sidecar manually, exactly as documented.
@@ -143,6 +160,16 @@ internal sealed class TrayApp : IDisposable
                     : $"Hotkey {combo} is owned by another app — dictation shortcut inactive");
                 UpdateHotkeyLabels();
             }
+            else if (e.PropertyName == nameof(Preferences.ToneHotkeyEnabled) ||
+                     e.PropertyName == nameof(Preferences.ToneHotkeyCode) ||
+                     e.PropertyName == nameof(Preferences.ToneHotkeyModifiers))
+            {
+                SyncToneHotkey();
+            }
+            else if (e.PropertyName == nameof(Preferences.Tone))
+            {
+                RefreshToneMenu();
+            }
         };
 
         _healthTimer.Interval = 3000;
@@ -163,6 +190,75 @@ internal sealed class TrayApp : IDisposable
 
     // --- Tray menu ----------------------------------------------------------------
 
+    // MARK: - Tone
+
+    /// <summary>Register or re-register the tone hotkey to match the setting.
+    /// Unlike the dictation hotkey there is no permission to wait for, so this
+    /// only has to run when the setting or the combination changes.</summary>
+    private void SyncToneHotkey()
+    {
+        var prefs = Preferences.Instance;
+        if (!prefs.ToneHotkeyEnabled)
+        {
+            _toneHotkey.Unregister();
+            return;
+        }
+        var combo = KeyCombo.Display(prefs.ToneHotkeyCode, prefs.ToneHotkeyModifiers);
+        AppLog.Log(_toneHotkey.Reregister(prefs.ToneHotkeyCode, prefs.ToneHotkeyModifiers)
+            ? $"Tone hotkey registered: {combo}"
+            : $"Tone hotkey {combo} is owned by another app — tone shortcut inactive");
+    }
+
+    /// <summary>Advance to the next voice and show it. The tone hotkey calls
+    /// exactly this; the menu is the same action by another route, so the two can
+    /// never disagree about what "next" means.</summary>
+    private void CycleTone() => Announce(Preferences.Instance.CycleTone());
+
+    private void Announce(Tone tone)
+    {
+        _overlay.AnnounceTone(tone);
+        RefreshToneMenu();
+        AppLog.Log($"Tone set to {tone.Label}");
+    }
+
+    private void RefreshToneMenu()
+    {
+        var current = Preferences.Instance.Tone;
+        _toneItem.Text = $"Tone: {current.Label}";
+
+        var items = _toneItem.DropDown.Items;
+        items.Clear();
+        // A voice is applied by the cleanup model, so with cleanup off there is
+        // no pass to apply it in. Saying so beats a menu that looks live and
+        // changes nothing about the pasted text.
+        if (!Preferences.Instance.CleanupEnabled)
+        {
+            items.Add(new ToolStripMenuItem("Cleanup is off — tone has no effect") { Enabled = false });
+            items.Add(new ToolStripSeparator());
+        }
+        foreach (var tone in Tone.All)
+        {
+            var captured = tone;
+            var item = new ToolStripMenuItem(tone.Label)
+            {
+                Checked = ReferenceEquals(tone, current),
+                CheckOnClick = false,
+            };
+            item.Click += (s, e) =>
+            {
+                // Deferred: Announce rebuilds this very menu, and clearing the
+                // collection from inside a click on one of its own items is
+                // fragile. Let the click finish first.
+                _ui.Post(_ =>
+                {
+                    Preferences.Instance.Tone = captured;
+                    Announce(captured);
+                }, null);
+            };
+            items.Add(item);
+        }
+    }
+
     private void BuildMenu()
     {
         var menu = new ContextMenuStrip();
@@ -175,6 +271,14 @@ internal sealed class TrayApp : IDisposable
 
         _toggleItem.Click += (s, e) => ToggleRecording();
         menu.Items.Add(_toggleItem);
+
+        menu.Items.Add(new ToolStripSeparator());
+        // The current voice always has somewhere to be read. A colour on the
+        // pill says a tone changed; it cannot say which one is in force now,
+        // and the pill is only on screen for a moment.
+        _toneItem.DropDown = new ToolStripDropDownMenu();
+        menu.Items.Add(_toneItem);
+        RefreshToneMenu();
 
         menu.Items.Add(new ToolStripSeparator());
         _correctionsItem.DropDown = _correctionsMenu;
@@ -347,7 +451,15 @@ internal sealed class TrayApp : IDisposable
             _ = _recorder.StartRecording();
             // Kicked off before the overlay goes up, so the overlay's own words
             // are less likely to end up in the OCR.
+            // The card is offering a transcript the user has moved on from.
+            _card?.DismissCard();
             StartScreenCapture();
+            // Cheap and synchronous — two Win32 calls, no permission, no pixels.
+            // Gated on cleanup alone: with cleanup off there is no request for it
+            // to travel on.
+            _appContext = Preferences.Instance.CleanupEnabled
+                ? ForegroundApp.Capture()
+                : ForegroundApp.Snapshot.Empty;
             CurrentState = State.Recording;
             _overlay.Show(DictationOverlay.Mode.Recording);
             _maxRecTimer?.Dispose();
@@ -392,6 +504,7 @@ internal sealed class TrayApp : IDisposable
         {
             _overlay.HideOverlay();
             _screenCapture = null;
+            _appContext = ForegroundApp.Snapshot.Empty;
             CurrentState = State.Idle;
             return;
         }
@@ -432,7 +545,11 @@ internal sealed class TrayApp : IDisposable
                 AppLog.Log($"Screen context capture failed: {ex.Message}");
             }
         }
-        SendForTranscription(fileURL, context, screenContext);
+        var app = _appContext;
+        _appContext = ForegroundApp.Snapshot.Empty;
+        if (!app.IsEmpty)
+            AppLog.Log($"Dictating into {(app.Id.Length == 0 ? "?" : app.Id)}");
+        SendForTranscription(fileURL, context, screenContext, app);
     }
 
     /// <summary>Starts the screen capture + OCR for the dictation just beginning.
@@ -467,12 +584,14 @@ internal sealed class TrayApp : IDisposable
         _screenCapture = Task.Run(ScreenContext.CaptureAndRecognizeAsync);
     }
 
-    private void SendForTranscription(string wavPath, string context, string screenContext)
+    private void SendForTranscription(
+        string wavPath, string context, string screenContext, ForegroundApp.Snapshot app)
     {
         var prefs = Preferences.Instance;
         Task.Run(async () =>
         {
-            var outcome = await TranscriptionClient.TranscribeAsync(wavPath, context, screenContext, prefs.CleanupEnabled);
+            var outcome = await TranscriptionClient.TranscribeAsync(
+                wavPath, context, screenContext, app, prefs.Tone.Id, prefs.CleanupEnabled);
             _ui.Post(_ =>
             {
                 // If the user cancelled while we were transcribing, drop the result.
@@ -527,10 +646,25 @@ internal sealed class TrayApp : IDisposable
         _lastTranscript = cleaned;
         _lastItem.Text = $"Last: {preview}";
 
-        // Insert via clipboard + Ctrl+V. We always attempt paste (Windows has no
-        // separate "accessibility permission" gate for SendInput the way macOS
-        // does for CGEvent); if it fails the user can re-paste from the clipboard,
-        // which we leave populated.
+        // Pasting into something that cannot take text loses the transcript
+        // silently, which reads as dictation having failed. Ask what has focus
+        // first, and when there is no target, offer the text instead.
+        //
+        // There is no accessibility-permission branch here, unlike the Mac:
+        // SendInput needs no grant, so the "cannot press Ctrl+V at all" case
+        // that gives the macOS card its second reason does not exist on Windows.
+        if (Preferences.Instance.OfferCopyWhenUnfocused &&
+            FocusInspector.Current() == InsertionTarget.NotEditable)
+        {
+            _lastItem.Text = $"Last (nothing focused — copy it): {preview}";
+            AppLog.Log("No editable target — offering the transcript to copy");
+            _card ??= new TranscriptCard();
+            _card.Present(cleaned, TranscriptCard.Reason.NoFocus);
+            return;
+        }
+
+        // Insert via clipboard + Ctrl+V. If it fails the user can re-paste from
+        // the clipboard, which we leave populated.
         TextInjector.Insert(cleaned);
         AppLog.Log($"Inserted via paste ({cleaned.Length} chars)");
         // Snapshot the field so we can learn from any edits the user makes.
@@ -704,6 +838,8 @@ internal sealed class TrayApp : IDisposable
         _levelTimer?.Dispose();
         _overlay.Dispose();
         _hotkey.Dispose();
+        _toneHotkey.Dispose();
+        _card?.Dispose();
         // SidecarSupervisor.Dispose() intentionally leaves the sidecar running.
         _sidecar.Dispose();
         if (_recorder.IsRecording) _recorder.StopRecording();

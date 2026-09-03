@@ -33,6 +33,14 @@ internal sealed class DictationOverlay : Form
     private const int ShadowPad = 12;
     private const int TopGap = 8;
 
+    // Room under the capsule for the tone chip. Reserved whether or not a chip
+    // is showing, so the window never resizes and the capsule never moves —
+    // only the painting is conditional. Colour is reinforcement, never the whole
+    // signal: seven hues are not learnable on their own, so a non-default voice
+    // also names itself here for as long as the pill is up. Mirrors the Mac.
+    private const int ChipGap = 7;
+    private const int ChipHeight = 20;
+
     // Waveform geometry, matching the Mac bubble.
     private const float InsetX = 15f;
     private const float InsetY = 11f;
@@ -42,6 +50,14 @@ internal sealed class DictationOverlay : Form
     private readonly System.Windows.Forms.Timer _timer = new() { Interval = 16 };
 
     private Mode _mode = Mode.Recording;
+    private Tone _tone = Tone.Faithful;
+    /// <summary>Decays 1 -> 0 after a tone change, driving the ring that radiates
+    /// out of the capsule. Purely a confirmation that the press registered.</summary>
+    private double _radiate;
+    /// <summary>True while a dictation owns the pill. A tone announced during one
+    /// must not schedule a dismissal — the pill belongs to the dictation.</summary>
+    private bool _dictationActive;
+    private readonly System.Windows.Forms.Timer _toneDismiss = new() { Interval = 1350 };
     private float[] _heights = Array.Empty<float>();
     private double _phase;
     private float _rawLevel;
@@ -58,8 +74,12 @@ internal sealed class DictationOverlay : Form
         StartPosition = FormStartPosition.Manual;
         ShowInTaskbar = false;
         TopMost = true;
-        Size = new Size(CapsuleWidth + ShadowPad * 2, CapsuleHeight + ShadowPad * 2);
+        Size = new Size(CapsuleWidth + ShadowPad * 2,
+                        CapsuleHeight + ChipGap + ChipHeight + ShadowPad * 2);
         _timer.Tick += (s, e) => Tick();
+        // Takes the pill back down after a standalone tone announcement — the
+        // one case where it went up without a dictation behind it.
+        _toneDismiss.Tick += (s, e) => { _toneDismiss.Stop(); HideOverlay(); };
     }
 
     // MARK: - Public surface
@@ -69,6 +89,11 @@ internal sealed class DictationOverlay : Form
     {
         _mode = mode;
         _hiding = false;
+        _dictationActive = true;
+        // A tone announcement may already have the pill on screen; that pill now
+        // belongs to the dictation, so cancel the dismissal it scheduled.
+        _toneDismiss.Stop();
+        _tone = Preferences.Instance.Tone;
         _targetOpacity = 1;
         PositionTopCenter();
         if (!Visible)
@@ -91,10 +116,51 @@ internal sealed class DictationOverlay : Form
 
     public void HideOverlay()
     {
+        _dictationActive = false;
+        _toneDismiss.Stop();
         if (!Visible) return;
         _hiding = true;
         _targetOpacity = 0;
         _timer.Start();
+    }
+
+    /// <summary>
+    /// Show the pill in the new voice: recolour it, radiate, and name it in the
+    /// chip below.
+    ///
+    /// The pill normally exists only while dictating, but the tone key is most
+    /// useful <b>before</b> speaking — so when nothing is on screen this summons
+    /// it briefly and takes it away again. Pressed during a dictation it simply
+    /// recolours the pill already there.
+    /// </summary>
+    public void AnnounceTone(Tone tone)
+    {
+        _tone = tone;
+        _radiate = 1;
+
+        if (!Visible)
+        {
+            _mode = Mode.Recording;
+            _hiding = false;
+            _opacity = 0;
+            _phase = 0;
+            _displayLevel = 0;
+            _rawLevel = 0;
+            ResetBars();
+            PositionTopCenter();
+            base.Show();
+        }
+        _hiding = false;
+        _targetOpacity = 1;
+        _timer.Start();
+        Render();
+
+        _toneDismiss.Stop();
+        if (_dictationActive) return;
+        // Long enough to read a word, short enough not to sit over the user's
+        // work. Each further press restarts it, so cycling reads as one
+        // continuous pill rather than a stutter of appearances.
+        _toneDismiss.Start();
     }
 
     // MARK: - Animation
@@ -121,6 +187,7 @@ internal sealed class DictationOverlay : Form
             return;
         }
 
+        if (_radiate > 0) _radiate = Math.Max(0, _radiate - 0.055);
         _phase += 0.15;
         _displayLevel += (_rawLevel - _displayLevel) * 0.35f;
         // Let the level decay when the voice goes quiet, so the bars settle
@@ -192,6 +259,19 @@ internal sealed class DictationOverlay : Form
             g.FillPath(brush, shadow);
         }
 
+        // The ring that radiates out of the capsule when the voice changes.
+        // Drawn under the capsule so it reads as coming from behind it.
+        if (_radiate > 0)
+        {
+            float grow = (float)((1 - _radiate) * 10);
+            int alpha = (int)(90 * _radiate);
+            using var ring = Glyphs.RoundedPath(
+                capsule.X - grow, capsule.Y - grow,
+                capsule.Width + grow * 2, capsule.Height + grow * 2, radius + grow);
+            using var pen = new Pen(Color.FromArgb(alpha, _tone.Tint), 2f);
+            g.DrawPath(pen, ring);
+        }
+
         using (var path = Glyphs.RoundedPath(capsule.X, capsule.Y, capsule.Width, capsule.Height, radius))
         {
             using var fill = new SolidBrush(Color.FromArgb(250, Theme.Paper));
@@ -200,6 +280,8 @@ internal sealed class DictationOverlay : Form
             g.DrawPath(edge, path);
         }
 
+        DrawToneChip(g, capsule);
+
         if (_heights.Length == 0) return;
 
         int n = _heights.Length;
@@ -207,7 +289,7 @@ internal sealed class DictationOverlay : Form
         float startX = capsule.X + InsetX + (capsule.Width - InsetX * 2 - total) / 2f;
         float midY = capsule.Y + capsule.Height / 2f;
 
-        using var bar = new SolidBrush(Theme.Accent);
+        using var bar = new SolidBrush(_tone.Tint);
         for (int i = 0; i < n; i++)
         {
             float h = Math.Max(BarWidth, _heights[i]);
@@ -215,6 +297,38 @@ internal sealed class DictationOverlay : Form
             using var shape = Glyphs.RoundedPath(x, midY - h / 2f, BarWidth, h, BarWidth / 2f);
             g.FillPath(bar, shape);
         }
+    }
+
+    /// <summary>
+    /// Names the voice under the capsule. Skipped for the default: colour only
+    /// becomes information once the user has chosen something, and the default
+    /// dictation should look exactly as it always has.
+    /// </summary>
+    private void DrawToneChip(Graphics g, RectangleF capsule)
+    {
+        if (ReferenceEquals(_tone, Tone.Faithful)) return;
+
+        // Theme.Kicker: the same small semibold face the rest of the app uses
+        // for labels of this weight. Shared instance — do not dispose it.
+        var font = Theme.Kicker;
+        var size = g.MeasureString(_tone.Label, font);
+        float w = size.Width + 18;
+        float h = ChipHeight;
+        float x = capsule.X + (capsule.Width - w) / 2f;
+        float y = capsule.Bottom + ChipGap;
+
+        using (var path = Glyphs.RoundedPath(x, y, w, h, h / 2f))
+        {
+            using var fill = new SolidBrush(_tone.Tint);
+            g.FillPath(fill, path);
+        }
+        using var text = new SolidBrush(Color.White);
+        using var format = new StringFormat
+        {
+            Alignment = StringAlignment.Center,
+            LineAlignment = StringAlignment.Center,
+        };
+        g.DrawString(_tone.Label, font, text, new RectangleF(x, y, w, h), format);
     }
 
     /// <summary>Composites the bubble onto the screen, per pixel.</summary>

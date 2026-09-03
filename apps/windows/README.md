@@ -48,13 +48,18 @@ engine differs (ONNX/DirectML instead of MLX).
 | `AutoStart.cs` | HKCU `Run` key management — boot auto-start toggle (LaunchAgent equivalent) |
 | `AppLog.cs` | Append-only log to `%LOCALAPPDATA%/SunoFlow/app-debug.log` |
 | `ScreenContext.cs` | Screen capture + on-device WinRT OCR for cleanup context (`ScreenContext.swift`) |
+| `ForegroundApp.cs` | The frontmost app + focused window title, for cleanup context and app analytics (`ForegroundApp.swift`) |
+| `Tone.cs` | The writing voices and their tints; ids are the gateway's (`Tone.swift`) |
+| `FocusInspector.cs` | Whether a paste has anywhere to land, from the caret and window class (`FocusInspector.swift`) |
+| `TranscriptCard.cs` | The card offering the transcript when nothing was focused (`TranscriptCard.swift`) |
+| `BluetoothAudioGuard.cs` | Keeps dictation off a Bluetooth headset mic so its output stays high quality (`BluetoothAudioGuard.swift`) |
 | `Assets/*.ico` | Brand-mark icons (idle/recording/offline/processing/app) |
 | `tools/make-icons.js` | Node script that rasterises the brand mark into the `.ico` files |
 
 ## Prerequisites
 
-- Windows 10/11 (64-bit) with a DirectX 12 GPU (DirectML serves NVIDIA / AMD / Intel)
-- .NET 8 SDK (`net8.0-windows` desktop workload)
+- Windows 10/11 (64-bit) with a DirectX 12 GPU (DirectML serves NVIDIA / AMD / Intel) — to **run** it
+- .NET 8 SDK — to **build** it, on any OS (see below)
 - Python 3.10+ for the sidecar (see `sidecars/windows/requirements.txt`)
 
 ## Build
