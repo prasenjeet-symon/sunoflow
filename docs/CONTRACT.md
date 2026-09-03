@@ -77,6 +77,10 @@ remember the result for context continuity.
 | `file` | binary (audio/wav) | yes | PCM WAV, 16 kHz, mono recommended. Filename conventionally `audio.wav`. |
 | `context` | string | no (default `""`) | Accessibility context of the focused field (app/name/role). Sent to cleanup. |
 | `screen` | string | no (default `""`) | OCR words from the screen (reference-only vocabulary). Sent to cleanup. |
+| `app` | string | no (default `""`) | The frontmost application's platform identifier — bundle id on macOS (`com.tinyspeck.slackmacgap`), executable name on Windows (`slack.exe`). Read from the OS, never inferred. The gateway owns the table that turns it into a display name and a category; the sidecar forwards it untouched. |
+| `app_site` | string | no (default `""`) | Host of the page in front when `app` is a browser, e.g. `mail.google.com`. Empty otherwise, and always empty from Windows, which cannot read a browser's address bar without a UI Automation dependency it does not carry — the gateway falls back to matching the tab title there. |
+| `tone` | string | no (default `""`) | The ID of the writing voice the user picked — `formal`, never the wording that produces formal output. The gateway owns the closed set and the instruction behind each entry, so an ID it does not serve normalizes to the faithful default rather than erroring. Empty means the default voice, and the request the sidecar sent before tones existed. Sent by both clients. |
+| `app_detail` | string | no (default `""`) | The focused window's title, e.g. `Inbox (12) - Gmail - Google Chrome`. **Reference material for the cleanup prompt only.** It is the one field here that carries content, and it is never reported to analytics. |
 
 **Headers**:
 | Name | Required | Notes |
@@ -137,7 +141,7 @@ gateway's answer identically:
 1. Validate clip duration ≥ `MIN_AUDIO_SECONDS` (0.1s). Else → empty.
 2. If `model is None` → empty (model not downloaded/loaded yet).
 3. `model.transcribe(path)` → `raw_text`. On exception → empty.
-4. If `cleanup=true`: POST `{text, context, recent, screen, dictionary}` to the
+4. If `cleanup=true`: POST `{text, context, recent, screen, app, app_site, app_detail, dictionary, tone}` to the
    cleanup gateway with the device key. `dictionary` is the subset of the user's
    entries that look relevant to *this* transcript (`relevant_for`) — the file
    itself never leaves the machine. A refusal → 402 (see the table above). An
@@ -429,7 +433,7 @@ These live in `sidecars/shared/` and are inherited, not re-implemented:
   to cleanup, appended after each successful transcription.
 - **Cleanup gateway POST** — `clean_with_gateway(text, context, recent, screen, key, dictionary)`
   POSTs to `SUNOFLOW_CLEANUP_URL` (default
-  `https://cleanup.mirrorli.art/cleanup`) with the caller's device key as the
+  `https://cleanup.ogcode.xyz/cleanup`) with the caller's device key as the
   bearer token, 60s timeout. Soft-fails to raw text on an outage; raises
   `NotEntitled` on a refusal.
 - **Entitlement probe** — `check_entitlement(key)` GETs `/entitlement` for the

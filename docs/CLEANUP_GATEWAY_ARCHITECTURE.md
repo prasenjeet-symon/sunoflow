@@ -156,6 +156,7 @@ Takes a raw transcript plus optional reference material and returns the cleaned 
   "context": "",
   "recent":  [],
   "screen":  "",
+  "tone":    "professional",
   "dictionary": [
     {"from": "cavach", "to": "Kavach", "kind": "correction"},
     {"from": "my Instagram", "to": "https://instagram.com/someone", "kind": "expansion"}
@@ -168,6 +169,7 @@ Takes a raw transcript plus optional reference material and returns the cleaned 
 | `context` | string | no | Text already written before the cursor (reference only). |
 | `recent` | string[] | no | The user's last few cleaned dictations (reference only). |
 | `screen` | string | no | OCR words from the user's screen (reference only). |
+| `tone` | string | no | ID of the writing voice the user picked — one of `professional`, `formal`, `casual`, `friendly`, `concise`, `confident`. Absent, empty, or unrecognised → the faithful default, which leaves the user's wording alone. |
 | `dictionary` | object[] | no | The user's own saved terms — `{from, to, kind}`, `kind` ∈ `correction`\|`expansion` (missing/unknown → `correction`). Unlike the other fields this one is *acted on*, not just referenced. Capped at `cleanup.MaxEntries` (64); blank entries dropped. |
 
 **On the dictionary.** It lives only on the user's machine. The sidecar sends
@@ -176,6 +178,20 @@ that touches none of them carries no `dictionary` field at all. The gateway
 holds them for the length of the request: they are never persisted, and the
 logging middleware logs no request bodies. See §7.1 for how they reach the
 prompt and `docs/CONTRACT.md` for what the two kinds mean.
+
+**On the tone.** The client sends an *ID*, never wording: `"formal"`, not the
+instruction that produces formal output. The gateway owns every instruction the
+model sees (§7.1), so this field selects a row from a server-side table and can
+never supply text of its own — an ID the gateway does not serve normalizes to
+the faithful tone rather than erroring. That is also what an older client which
+never sends the field gets, and what the whole installed base got before tones
+existed: the faithful prompt is byte-for-byte the one that shipped before, and
+the user's own wording survives untouched.
+
+A tone is the one thing that licenses rewording, and it licenses nothing else.
+The voice may change *how* something is said; it may not add a fact, a greeting
+or a sign-off the speaker did not dictate, change how certain a claim is, or
+translate. See `internal/cleanup/tone.go`.
 
 **Response** `200 OK`
 ```json
@@ -274,10 +290,15 @@ The gateway **must** produce identical cleanup behaviour to the current local `s
 
 ### 7.1 Prompt builder
 
-`BuildPrompt(text, context, recent, screen, dict)`:
+`BuildPrompt(text, context, recent, screen, dict, tone)`:
 
 ```
 <cleanup_instruction>
+
+[TONE — the voice the user asked for; applies to the NEW TRANSCRIPT only]
+<shared rewriting limits>
+THE REQUESTED VOICE — PROFESSIONAL:
+<voice definition>
 
 [DICTIONARY — the user's own saved terms; reference only, do NOT repeat or edit]
 SPELLINGS (what the transcript mis-hears -> how the user writes it):
@@ -285,7 +306,7 @@ SPELLINGS (what the transcript mis-hears -> how the user writes it):
 SHORTHAND (what the user says out loud -> the value it stands for):
 - "my Instagram" -> "https://instagram.com/someone"
 
-[SCREEN — words visible on screen near the input field; reference only, do NOT repeat or edit]
+[SCREEN — words visible anywhere on the user's screen; reference only, do NOT repeat or edit]
 <screen>
 
 [CONTEXT — already written before the cursor; reference only, do NOT repeat or edit]
@@ -321,18 +342,27 @@ Reproduces `_looks_like_echo` + the retry in `clean_with_gateway`:
 
 1. Call the backend with the full prompt (dictionary + context + recent + screen).
 2. If the result is non-empty **and** passes the echo check → return it.
-3. If it looks like an echo (the model regurgitated reference material) → **retry with no context/recent/screen**, but **keeping the dictionary**. Those three are the bulky, noisy sources that actually get echoed; the dictionary is short, structured, and the thing the user explicitly asked us to apply, so dropping it would silently switch the feature off on exactly the dictations that needed a second attempt.
+3. If it looks like an echo (the model regurgitated reference material) → **retry with no context/recent/screen**, but **keeping the dictionary and the tone**. Those three are the bulky, noisy sources that actually get echoed; the dictionary and the tone are short, structured, and the things the user explicitly asked us to apply, so dropping either would silently switch the feature off on exactly the dictations that needed a second attempt — and a retry that reverted to the faithful voice would read to the user as the tone key having missed the press.
 4. If the retry is non-empty and not too long → return it.
 5. Otherwise → return the raw `text` unchanged.
 
 **Echo detection** (`LooksLikeEcho`):
-- `len(cleaned) > len(text)*1.5 + 30 + expansionAllowance` → echo.
-- Any of the dictionary section headers found in `cleaned` → echo, at any length.
+- `len(cleaned) > len(text)*growth(tone) + 30 + expansionAllowance` → echo.
+- Any of the dictionary or tone section headers found in `cleaned` → echo, at any length.
 - Any `recent` entry of length ≥ 15 found verbatim in `cleaned` → echo.
 - `context` (length ≥ 20): its last 40 chars found in `cleaned` → echo.
 - `screen` (length ≥ 40): its last 40 chars found in `cleaned` → echo.
 
-**Retry length guard:** `len(cleaned) <= len(text)*1.5 + 30 + expansionAllowance`.
+**Retry length guard:** `len(cleaned) <= len(text)*growth(tone) + 30 + expansionAllowance`.
+
+**`growth(tone)`** is 1.5 for the faithful default — the original guard, unchanged
+— and up to 2.0 for the voices that may legitimately add words (see
+`internal/cleanup/tone.go`). The 1.5x rests on cleanup only ever *removing*
+words, which a tone breaks; in practice ordinary rewrites still land well inside
+it, so the extra room is headroom for a premise that no longer holds rather than
+a fix for an observed failure. It costs the guard nothing that matters: real
+echoes overshoot by multiples, not by 60%, and the substring rules catch them at
+any tone.
 
 **`expansionAllowance`** is the total length of the `expansion` values offered in
 this request. The length rule works because cleanup normally only ever removes
