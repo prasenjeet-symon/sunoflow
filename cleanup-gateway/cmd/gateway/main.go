@@ -54,6 +54,12 @@ func main() {
 			Timeout:       cfg.GeminiTimeout,
 			ThinkingLevel: cfg.GeminiThinking,
 			Client:        backend.NewHTTPClient(cfg.GeminiTimeout + 5*time.Second),
+
+			// Suno Answer: separate model + deadline (C2, D3). The stream
+			// client is built lazily inside the backend.
+			AnswerModel:           cfg.ResearchModel,
+			AnswerMediaResolution: cfg.AnswerMediaResolution,
+			AnswerTimeout:         cfg.AnswerTimeout,
 		}
 	default:
 		logger.Error("unsupported backend", "backend", cfg.Backend)
@@ -79,8 +85,84 @@ func main() {
 		QuotaDaily:  cfg.QuotaDaily,
 		LeaseSecret: cfg.LeaseSecret,
 		Analytics:   stats,
+		AnswerModel: cfg.ResearchModel,
+		STTProvider: cfg.STTProvider,
 	}
 	limiter := ratelimit.New(st, cfg.QuotaRPM, cfg.QuotaDaily, logger)
+	// Suno Answer has its own meter: separate ledger, separate allowances (D5).
+	answerLimiter := ratelimit.NewAnswer(st, cfg.AnswerQuotaRPM, cfg.AnswerQuotaDaily, cfg.AnswerHardDaily, logger)
+
+	// Cloud STT (the warm-start dictation path). Defaults to "groq"; config.Load
+	// has validated the provider name. A groq/openrouter provider with no
+	// STT_API_KEY soft-disables here (warn + srv.STT stays nil → /stt answers
+	// 501) instead of failing boot, so a gateway that never set an STT key still
+	// starts exactly as before.
+	var sttLimiter *ratelimit.STTLimiter
+	if (cfg.STTProvider == "groq" || cfg.STTProvider == "openrouter") && cfg.STTAPIKey == "" {
+		logger.Warn("cloud STT disabled: STT_PROVIDER set but STT_API_KEY is empty",
+			"provider", cfg.STTProvider)
+		cfg.STTProvider = "" // fall through to the disabled path below
+	}
+	switch cfg.STTProvider {
+	case "openrouter":
+		model := cfg.STTModel
+		if model == "" {
+			model = "mistralai/voxtral-small-24b-2507"
+		}
+		baseURL := cfg.STTBaseURL
+		if baseURL == "" {
+			baseURL = "https://openrouter.ai/api/v1"
+		}
+		srv.STT = &backend.OpenRouterSTTBackend{
+			APIKey:  cfg.STTAPIKey,
+			Model:   model,
+			BaseURL: baseURL,
+			Timeout: cfg.STTTimeout,
+			Client:  backend.NewHTTPClient(cfg.STTTimeout + 5*time.Second),
+		}
+	case "groq":
+		model := cfg.STTModel
+		if model == "" {
+			model = "whisper-large-v3-turbo"
+		}
+		baseURL := cfg.STTBaseURL
+		if baseURL == "" {
+			baseURL = "https://api.groq.com/openai/v1"
+		}
+		srv.STT = &backend.GroqSTTBackend{
+			APIKey:   cfg.STTAPIKey,
+			Model:    model,
+			BaseURL:  baseURL,
+			Language: cfg.STTLanguage,
+			Timeout:  cfg.STTTimeout,
+			Client:   backend.NewHTTPClient(cfg.STTTimeout + 5*time.Second),
+		}
+	case "gemini":
+		model := cfg.STTModel
+		if model == "" {
+			model = cfg.GeminiModel
+		}
+		baseURL := cfg.STTBaseURL
+		if baseURL == "" {
+			baseURL = cfg.GeminiURL
+		}
+		srv.STT = &backend.GeminiSTTBackend{
+			APIKey:        cfg.GeminiAPIKey,
+			Model:         model,
+			BaseURL:       baseURL,
+			ThinkingLevel: cfg.GeminiThinking,
+			Timeout:       cfg.STTTimeout,
+			Client:        backend.NewHTTPClient(cfg.STTTimeout + 5*time.Second),
+		}
+	}
+	if srv.STT != nil {
+		sttLimiter = ratelimit.NewSTT(st, cfg.STTQuotaRPM, cfg.STTQuotaDaily, cfg.STTHardDaily, logger)
+		logger.Info("cloud STT enabled", "provider", srv.STT.STTName())
+	} else {
+		// Either STT_PROVIDER="" (explicitly off) or a keyless groq/openrouter
+		// that was soft-disabled with a warning just above.
+		logger.Info("cloud STT disabled")
+	}
 
 	// Entitlement lives in Firestore alongside the accounts. Without a project
 	// configured the gateway keeps to its own key table and no subscription is
@@ -101,15 +183,19 @@ func main() {
 		logger.Warn("FIREBASE_PROJECT not set — subscriptions are NOT enforced")
 	}
 
-	handler := server.NewMux(srv, limiter, cfg.AdminToken, accounts)
+	handler := server.NewMux(srv, limiter, answerLimiter, sttLimiter, cfg.AdminToken, accounts)
 
 	httpServer := &http.Server{
 		Addr:              cfg.GatewayAddr,
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       120 * time.Second,
+		// WriteTimeout must clear the longest streaming response (Suno Answer:
+		// a 90s upstream deadline plus slop) or it kills healthy answer streams
+		// mid-flight — the server's write deadline covers the whole response,
+		// not per-write. Cleanup's 30s case stays comfortably inside it.
+		WriteTimeout: 150 * time.Second,
+		IdleTimeout:  120 * time.Second,
 	}
 
 	// Ensure the DB directory exists for non-default paths.

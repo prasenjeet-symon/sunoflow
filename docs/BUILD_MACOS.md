@@ -20,7 +20,7 @@ login auto-start the way an end user would.
 | **macOS** | 13.0 Ventura or newer | SwiftUI APIs used by the menu-bar app | — |
 | **Xcode Command Line Tools** | Swift 5.9+ | Build the Swift app | `xcode-select --install` |
 | **Homebrew Python** | 3.10–3.12 (arm64) | Build/run the sidecar (`parakeet-mlx` needs ≥3.10) | `brew install python@3.12` |
-| **Homebrew ffmpeg** | any | `parakeet-mlx` shells out to `ffmpeg` for audio decode | `brew install ffmpeg` |
+| **ffmpeg** | any (dev) | `parakeet-mlx` decodes audio + the cloud path encodes Opus via `ffmpeg` | `brew install ffmpeg` for dev; **the release bundles its own** — see below |
 | **Homebrew openssl** | any | `setup-signing.sh` generates the self-signed cert | `brew install openssl` (or LibreSSL is fine) |
 | **Git** | any | Clone the repo | `brew install git` |
 
@@ -31,8 +31,20 @@ uname -m                          # must print arm64
 sw_vers                           # ProductVersion ≥ 13.0
 swift --version                   # swift-driver version 5.9+
 python3.12 --version              # 3.10–3.12
-which ffmpeg                      # /opt/homebrew/bin/ffmpeg
+which ffmpeg                      # /opt/homebrew/bin/ffmpeg (dev only)
 ```
+
+### Bundled ffmpeg (release)
+
+The shipped app is **self-contained** — end users do not need ffmpeg installed.
+`release.sh` → `sidecar/build.sh` runs `sidecar/build-ffmpeg.sh`, which compiles a
+minimal **LGPL** ffmpeg (with libopus, statically linked) from source into
+`sidecar/vendor/ffmpeg/ffmpeg`. The PyInstaller spec bundles it, and the sidecar
+prepends it to `PATH` at startup (`ensure_ffmpeg_on_path`), so both `parakeet-mlx`
+(audio decode) and the cloud-path Opus encoder find it. No GPL components are
+included — it is redistributable, and the license + source note ship beside the
+binary. For **dev**, the Homebrew ffmpeg above is enough; the build script is only
+needed when producing a release bundle (`build.sh` runs it automatically).
 
 The sidecar's `requirements.txt` pins `mlx`, `mlx-metal`, `parakeet-mlx`,
 `numba`, `librosa`, `fastapi`, `uvicorn`, `python-multipart`, `requests`, and

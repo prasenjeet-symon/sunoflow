@@ -46,6 +46,54 @@ type Config struct {
 	QuotaRPM   int // default per-key requests/minute
 	QuotaDaily int // default per-key requests/day
 
+	// Suno Answer (the paid ask-a-question feature). Model, deadline and quota
+	// are all separately tunable from cleanup: answers are grounded (web search)
+	// and streamed, so a different model class and a much longer ceiling apply.
+	// ResearchModel defaults to the same flash-lite class as cleanup.
+	ResearchModel string
+	// AnswerMediaResolution is the Gemini 3 media-resolution bucket for the
+	// answer screenshot (MEDIA_RESOLUTION_LOW/MEDIUM/HIGH/ULTRA_HIGH). It fixes
+	// the per-image token cost; the model default is HIGH (≈1120 tokens/image),
+	// so we default to MEDIUM (≈560) — half the image tokens per turn, still
+	// legible for typical UI, now that the screenshot rides every turn. Set to
+	// MEDIA_RESOLUTION_HIGH for dense-text/OCR screenshots, or LOW to save more.
+	AnswerMediaResolution string
+	AnswerTimeout         time.Duration // total stream deadline per answer request
+	AnswerQuotaRPM        int           // default per-account answer messages/minute
+	AnswerQuotaDaily      int           // default per-account answer messages/day
+	AnswerHardDaily       int           // gateway-side hard ceiling on messages/day
+
+	// Cloud STT (the warm-start dictation path): a new install can dictate
+	// immediately over the cloud while its local model downloads in the
+	// background, then the sidecar cuts over to on-device and stops calling here.
+	//
+	// Defaults to "groq" — measured ~3-4x faster than the alternatives (a
+	// dedicated Whisper on Groq's LPUs, ~0.3-0.6s vs ~2s), and more accurate too.
+	// It activates only once STT_API_KEY is set: a groq/openrouter provider with
+	// no key SOFT-DISABLES the /stt route (it answers 501) with a warning at
+	// boot rather than failing to start, so a gateway with no STT key still runs
+	// exactly as before. Set STT_PROVIDER="" to disable STT explicitly.
+	//
+	// Three providers are supported. "groq" is a dedicated Whisper endpoint
+	// (OpenAI-compatible /audio/transcriptions) — the fast default, needs its own
+	// key. "openrouter" sends the audio to an audio-capable model via OpenRouter's
+	// OpenAI-compatible chat endpoint (default model Mistral Voxtral) — one key
+	// covers STT plus any model swap, but ~3-4x slower. "gemini" reuses
+	// GeminiAPIKey and needs no new credential, at the cost of transcribing
+	// through the same flash-lite class used for cleanup.
+	STTProvider string // "groq" (default) | "openrouter" | "gemini" | "" (disabled)
+	STTAPIKey   string // provider key for "groq"/"openrouter"; "gemini" reuses GeminiAPIKey
+	STTModel    string // e.g. whisper-large-v3-turbo (groq); empty falls back per provider
+	STTBaseURL  string // provider API root
+	// STTLanguage is an optional BCP-47 hint passed to the provider (e.g. "en").
+	// Empty lets the provider auto-detect, which is the right default for a
+	// multilingual user base.
+	STTLanguage   string
+	STTTimeout    time.Duration // per-call timeout for a transcription
+	STTQuotaRPM   int           // default per-account transcriptions/minute
+	STTQuotaDaily int           // default per-account transcriptions/day
+	STTHardDaily  int           // gateway-side hard ceiling on transcriptions/day
+
 	// LeaseSecret signs the offline entitlement leases the gateway hands to
 	// entitled devices. The sidecar verifies them with the same value, so the
 	// two must match: changing it here without shipping a matching sidecar
@@ -77,6 +125,23 @@ func Load() (Config, error) {
 		QuotaRPM:            envInt("DEFAULT_QUOTA_RPM", 60),
 		QuotaDaily:          envInt("DEFAULT_QUOTA_DAILY", 5000),
 		LeaseSecret:         envStr("LEASE_SECRET", ""),
+
+		ResearchModel:         envStr("RESEARCH_MODEL", "gemini-3.5-flash-lite"),
+		AnswerMediaResolution: envStr("ANSWER_MEDIA_RESOLUTION", "MEDIA_RESOLUTION_MEDIUM"),
+		AnswerTimeout:         envDuration("ANSWER_TIMEOUT", 90*time.Second),
+		AnswerQuotaRPM:        envInt("ANSWER_QUOTA_RPM", 5),
+		AnswerQuotaDaily:      envInt("ANSWER_QUOTA_DAILY", 50),
+		AnswerHardDaily:       envInt("ANSWER_HARD_DAILY", 100),
+
+		STTProvider:   envStr("STT_PROVIDER", "groq"),
+		STTAPIKey:     envStr("STT_API_KEY", ""),
+		STTModel:      envStr("STT_MODEL", ""),
+		STTBaseURL:    envStr("STT_BASE_URL", ""),
+		STTLanguage:   envStr("STT_LANGUAGE", ""),
+		STTTimeout:    envDuration("STT_TIMEOUT", 30*time.Second),
+		STTQuotaRPM:   envInt("STT_QUOTA_RPM", 15),
+		STTQuotaDaily: envInt("STT_QUOTA_DAILY", 300),
+		STTHardDaily:  envInt("STT_HARD_DAILY", 600),
 	}
 	if cfg.AdminToken == "" {
 		return Config{}, fmt.Errorf("ADMIN_TOKEN is required")
@@ -93,6 +158,18 @@ func Load() (Config, error) {
 	// boots without a key would soft-fail every cleanup to raw text silently.
 	if cfg.GeminiAPIKey == "" {
 		return Config{}, fmt.Errorf("GEMINI_API_KEY is required")
+	}
+	// Cloud STT is opt-in. When configured, validate it here so a typo is a
+	// boot failure rather than a 501 on the first warm-start dictation.
+	// Only the provider name is validated here (a typo should fail loudly). A
+	// groq/openrouter provider with no STT_API_KEY is NOT a boot error: main
+	// soft-disables STT with a warning so the gateway still starts — important
+	// now that "groq" is the default, so a deployment that never set an STT key
+	// keeps booting exactly as before.
+	switch cfg.STTProvider {
+	case "", "groq", "openrouter", "gemini":
+	default:
+		return Config{}, fmt.Errorf("STT_PROVIDER must be groq, openrouter, gemini, or empty to disable; got %q", cfg.STTProvider)
 	}
 	return cfg, nil
 }

@@ -23,6 +23,7 @@ trial or subscription, so how its failures are classified *is* the paywall:
 Override SUNOFLOW_CLEANUP_URL / SUNOFLOW_CLEANUP_KEY for dev (e.g. point at a
 local docker-compose stack).
 """
+import base64
 import os
 import platform
 import threading
@@ -35,6 +36,12 @@ from sidecars.shared import lease
 
 CLEANUP_URL = os.environ.get("SUNOFLOW_CLEANUP_URL", "https://cleanup.ogcode.xyz/cleanup")
 ENTITLEMENT_URL = CLEANUP_URL.rsplit("/", 1)[0] + "/entitlement"
+# Cloud speech-to-text (the warm-start dictation path). Same gateway host and
+# auth as cleanup, its own endpoint. Override with SUNOFLOW_STT_URL for dev.
+STT_URL = os.environ.get("SUNOFLOW_STT_URL", CLEANUP_URL.rsplit("/", 1)[0] + "/stt")
+# Cheap gateway liveness endpoint, pinged periodically only to keep the pooled
+# TLS connection warm (see keepalive_gateway).
+GATEWAY_HEALTH_URL = CLEANUP_URL.rsplit("/", 1)[0] + "/health"
 
 # One pooled connection to the gateway, kept warm across dictations.
 #
@@ -57,6 +64,33 @@ _ADAPTER = HTTPAdapter(max_retries=Retry(
 _session = requests.Session()
 _session.mount("https://", _ADAPTER)
 _session.mount("http://", _ADAPTER)  # dev/test point the URLs at plain HTTP
+
+
+def keepalive_gateway() -> None:
+    """Keep the pooled TLS connection to the gateway warm.
+
+    urllib3 drops a pooled connection after ~300s idle, so a dictation after a
+    quiet spell otherwise re-pays DNS + TCP + TLS (~0.4s, and much worse cold) on
+    the critical path between the user's last word and their pasted text. A cheap
+    /health ping every 2 minutes on the SAME session the dictation path uses
+    holds the connection open. Best-effort: every error is swallowed. Meant to be
+    run on a daemon thread started at sidecar startup.
+    """
+    while True:
+        time.sleep(120)
+        try:
+            _session.get(GATEWAY_HEALTH_URL, timeout=5)
+        except Exception:
+            pass
+        # The Suno Answer stream keeps its own pool (a 90s stream must never
+        # queue behind an idle cleanup socket), so warm it too — otherwise the
+        # first Answer after a quiet spell re-handshakes. Imported lazily:
+        # answer imports cleanup, so a module-level import here would cycle.
+        try:
+            from . import answer as _answer
+            _answer.warm()
+        except Exception:
+            pass
 
 # No default. A key used to ship here, identical in every install, so anyone who
 # downloaded SunoFlow could use the gateway for free and it could not be revoked
@@ -130,6 +164,25 @@ def _refusal_message(resp) -> str:
     if not isinstance(body, dict) or "error" not in body:
         return ""
     return (body.get("message") or "").strip() or _DEFAULT_BLOCKED
+
+
+def _refusal(resp):
+    """(message, code) for a refusal response, or ("", "") when not one.
+
+    Companion to :func:`_refusal_message` for callers that must pass the
+    gateway's own error token through verbatim (Suno Answer: the account sheet
+    distinguishes "canceled" from "trial_expired" on the 402 it already knows
+    how to render from /transcribe).
+    """
+    message = _refusal_message(resp)
+    if not message:
+        return "", ""
+    try:
+        body = resp.json()
+        code = body.get("error") or ""
+    except Exception:
+        code = ""
+    return message, code
 
 
 def _allow_or_raise(key: str, why: str, quiet: bool = False) -> None:
@@ -257,6 +310,7 @@ def clean_with_gateway(
     app: str = "",
     app_site: str = "",
     app_detail: str = "",
+    stt_source: str = "",
 ) -> str:
     """Clean a transcript via the hosted cleanup gateway.
 
@@ -311,6 +365,11 @@ def clean_with_gateway(
     # default path cannot have changed behaviour.
     if tone:
         payload["tone"] = tone
+    # Which engine produced this transcript (analytics only): "local" | "cloud".
+    # Omitted when unset so the request is unchanged for a caller that never sets
+    # it; the gateway reports a missing value as "unknown".
+    if stt_source:
+        payload["stt_source"] = stt_source
 
     try:
         resp = _session.post(
@@ -342,3 +401,77 @@ def clean_with_gateway(
     # Gateway already applies echo-retry, but guard against an empty payload
     # falling through — return raw rather than an empty string.
     return (body.get("cleaned") or "").strip() or text
+
+
+def transcribe_with_gateway(
+    audio: bytes,
+    key: str = "",
+    fmt: str = "wav",
+    language: str = "",
+) -> str:
+    """Transcribe audio via the hosted cloud STT endpoint (the warm-start path).
+
+    Used only while the local model is downloading (or being validated): the
+    sidecar sends the same recording it would feed the local model and gets back
+    a raw transcript, which then rides the normal cleanup pass exactly as a local
+    transcript would.
+
+    Entitlement is enforced here the same way it is for cleanup — cloud STT is a
+    paid feature on the same subscription:
+
+      * a refusal (401/402/403 with our JSON body) raises NotEntitled;
+      * an outage (429/5xx/network) defers to the signed lease via
+        _allow_or_raise, which refuses only when no valid lease covers it.
+
+    The one difference from clean_with_gateway is the soft-fail target: there is
+    no raw text to fall back to (this call *is* what produces it), so a
+    lease-covered outage returns "" — an empty transcript the caller treats as a
+    missed dictation (in shadow mode it falls back to the local result instead).
+    """
+    key = key or CLEANUP_KEY
+    if not key:
+        raise NotEntitled(_NOT_CONNECTED, code="not_connected")
+    if not audio:
+        return ""
+
+    payload = {
+        "audio": base64.b64encode(audio).decode("ascii"),
+        "format": (fmt or "wav"),
+    }
+    if language:
+        payload["language"] = language
+
+    try:
+        resp = _session.post(
+            STT_URL,
+            headers=_headers(key),
+            json=payload,
+            timeout=60,
+        )
+    except Exception as exc:
+        _allow_or_raise(key, str(exc))
+        return ""
+
+    message = _refusal_message(resp)
+    if message:
+        raise NotEntitled(message)
+    if not resp.ok:
+        # Includes 501 (cloud STT not configured on this gateway): indistinguishable
+        # from an outage to the caller, so the lease decides and we return empty.
+        _allow_or_raise(key, f"HTTP {resp.status_code}")
+        return ""
+
+    try:
+        body = resp.json()
+    except Exception as exc:
+        print(f"STT gateway returned an unreadable body: {exc}")
+        return ""
+
+    lease.save(body.get("lease") or "", key)
+    # Diagnostic: the gateway reports which provider served the call and its own
+    # gateway→provider time. Logged next to the sidecar's end-to-end cloud_stt_ms
+    # so the difference isolates the sidecar↔gateway network overhead.
+    prov, gms = body.get("provider"), body.get("stt_ms")
+    if prov or gms is not None:
+        print(f"[stt] provider={prov} gateway_stt_ms={gms}")
+    return (body.get("transcript") or "").strip()

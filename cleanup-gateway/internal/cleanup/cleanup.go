@@ -294,6 +294,14 @@ func dictionarySection(dict []Entry) []string {
 	return append(parts, "")
 }
 
+// DictionarySection is the exported view of dictionarySection, for prompts the
+// research (Suno Answer) package builds: same [DICTIONARY] block, same cap,
+// rendered exactly as cleanup renders it so there is one source of truth for
+// what a dictionary entry looks like on the wire.
+func DictionarySection(dict []Entry) []string {
+	return dictionarySection(dict)
+}
+
 // BuildPrompt assembles the full prompt. Each bracketed section is included only
 // if its input is non-empty; sections are joined with "\n". The tone comes first
 // because it is the one section that modifies the rules themselves, and it reads

@@ -49,6 +49,12 @@ Write-Host "==> Installing dependencies"
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt pyinstaller
 
+# --- bundled ffmpeg (LGPL) -------------------------------------------------
+# Fetch the self-contained LGPL ffmpeg the spec bundles, so the app carries no
+# system ffmpeg dependency for the cloud path's Opus upload.
+Write-Host "==> Fetching bundled ffmpeg (LGPL)"
+& (Join-Path $PSScriptRoot "fetch-ffmpeg.ps1")
+
 # --- freeze ----------------------------------------------------------------
 Write-Host "==> Running PyInstaller (sidecar.spec)"
 pyinstaller --clean --noconfirm sidecar.spec

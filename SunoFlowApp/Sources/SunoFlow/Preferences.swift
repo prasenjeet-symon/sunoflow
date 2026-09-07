@@ -7,6 +7,13 @@ extension Notification.Name {
     /// Posted when the tone hotkey or its combination changes, so the
     /// AppDelegate can register or re-register it.
     static let sunoToneHotkeyChanged = Notification.Name("suno.toneHotkeyChanged")
+    /// Posted when the Suno Answer hotkey or its combination changes, so the
+    /// AppDelegate can register or re-register it.
+    static let sunoAnswerHotkeyChanged = Notification.Name("suno.answerHotkeyChanged")
+    /// Posted when the gateway refuses Suno Answer (not entitled). The
+    /// AppDelegate opens the account sheet — the same surface a dictation 402
+    /// lands on — carrying `message` and `code` in userInfo.
+    static let sunoAnswerNotEntitled = Notification.Name("suno.answerNotEntitled")
 }
 
 /// Cross-process notifications (delivered via DistributedNotificationCenter).
@@ -38,9 +45,14 @@ final class Preferences: ObservableObject {
         static let toneHotkeyEnabled = "toneHotkeyEnabled"
         static let toneHotkeyKeyCode = "toneHotkeyKeyCode"
         static let toneHotkeyModifiers = "toneHotkeyModifiers"
+        static let answerHotkeyEnabled = "answerHotkeyEnabled"
+        static let answerHotkeyKeyCode = "answerHotkeyKeyCode"
+        static let answerHotkeyModifiers = "answerHotkeyModifiers"
         static let screenContextEnabled = "screenContextEnabled"
         static let offerCopyWhenUnfocused = "offerCopyWhenUnfocused"
         static let onboardingCompleted = "onboardingCompleted"
+        static let cloudWarmStartEnabled = "cloudWarmStartEnabled"
+        static let cloudWarmStartDisclosed = "cloudWarmStartDisclosed"
     }
 
     /// Core Audio device UID to record from. Empty means "system default input".
@@ -111,6 +123,27 @@ final class Preferences: ObservableObject {
         didSet { persistToneHotkey() }
     }
 
+    /// Show the Suno Answer popup (⌃⌥Space by default). Off by default because
+    /// turning it on is the consent step (E1/E2): the toggle's description says
+    /// exactly what leaves the Mac — a screen snapshot attached to each
+    /// question — and nothing is captured while the feature is off.
+    @Published var answerHotkeyEnabled: Bool {
+        didSet {
+            defaults.set(answerHotkeyEnabled, forKey: Key.answerHotkeyEnabled)
+            NotificationCenter.default.post(name: .sunoAnswerHotkeyChanged, object: nil)
+        }
+    }
+
+    /// Carbon virtual key code for the Suno Answer hotkey.
+    @Published var answerHotkeyKeyCode: UInt32 {
+        didSet { persistAnswerHotkey() }
+    }
+
+    /// Carbon modifier mask (cmdKey / optionKey / …) for the Suno Answer hotkey.
+    @Published var answerHotkeyModifiers: UInt32 {
+        didSet { persistAnswerHotkey() }
+    }
+
     /// Capture the screen and run on-device OCR when dictation stops, so the
     /// cleanup LLM gets heuristic context about the app/field being typed
     /// into. Requires the Screen Recording permission. Off by default because
@@ -134,6 +167,29 @@ final class Preferences: ObservableObject {
         didSet { defaults.set(onboardingCompleted, forKey: Key.onboardingCompleted) }
     }
 
+    /// Let a new install dictate immediately over the cloud while the on-device
+    /// model (~2 GB) downloads in the background, then hand transcription back to
+    /// the local model once it is ready and proven. Sent to the sidecar as
+    /// `allow_cloud` on every `/transcribe`.
+    ///
+    /// On by default — the whole point is that a new user can dictate on first
+    /// launch instead of waiting for a multi-gigabyte download. When it is on,
+    /// the raw audio of a dictation is processed in the cloud *only* until the
+    /// device cuts over to on-device; the first-run disclosure (see
+    /// `cloudWarmStartDisclosed`) says so before the first word is captured, and
+    /// this switch turns it off — dictation then waits for the local model, the
+    /// on-device-only behaviour SunoFlow otherwise ships with.
+    @Published var cloudWarmStartEnabled: Bool {
+        didSet { defaults.set(cloudWarmStartEnabled, forKey: Key.cloudWarmStartEnabled) }
+    }
+
+    /// Whether the one-time cloud warm-start disclosure has been shown. Gates the
+    /// first-run notice so it appears once (not the whole reversal of the setting
+    /// — a user who turns cloud STT back on later has already seen it).
+    @Published var cloudWarmStartDisclosed: Bool {
+        didSet { defaults.set(cloudWarmStartDisclosed, forKey: Key.cloudWarmStartDisclosed) }
+    }
+
     private init() {
         defaults.register(defaults: [
             Key.micDeviceUID: "",
@@ -146,9 +202,14 @@ final class Preferences: ObservableObject {
             Key.toneHotkeyEnabled: false,
             Key.toneHotkeyKeyCode: Int(DefaultToneHotkey.keyCode),
             Key.toneHotkeyModifiers: Int(DefaultToneHotkey.modifiers),
+            Key.answerHotkeyEnabled: false,
+            Key.answerHotkeyKeyCode: Int(DefaultAnswerHotkey.keyCode),
+            Key.answerHotkeyModifiers: Int(DefaultAnswerHotkey.modifiers),
             Key.screenContextEnabled: false,
             Key.offerCopyWhenUnfocused: true,
             Key.onboardingCompleted: false,
+            Key.cloudWarmStartEnabled: true,
+            Key.cloudWarmStartDisclosed: false,
         ])
         // didSet does not fire for assignments inside init, so these load the
         // stored values without redundantly writing them back.
@@ -162,9 +223,14 @@ final class Preferences: ObservableObject {
         toneHotkeyEnabled = defaults.bool(forKey: Key.toneHotkeyEnabled)
         toneHotkeyKeyCode = UInt32(defaults.integer(forKey: Key.toneHotkeyKeyCode))
         toneHotkeyModifiers = UInt32(defaults.integer(forKey: Key.toneHotkeyModifiers))
+        answerHotkeyEnabled = defaults.bool(forKey: Key.answerHotkeyEnabled)
+        answerHotkeyKeyCode = UInt32(defaults.integer(forKey: Key.answerHotkeyKeyCode))
+        answerHotkeyModifiers = UInt32(defaults.integer(forKey: Key.answerHotkeyModifiers))
         screenContextEnabled = defaults.bool(forKey: Key.screenContextEnabled)
         offerCopyWhenUnfocused = defaults.bool(forKey: Key.offerCopyWhenUnfocused)
         onboardingCompleted = defaults.bool(forKey: Key.onboardingCompleted)
+        cloudWarmStartEnabled = defaults.bool(forKey: Key.cloudWarmStartEnabled)
+        cloudWarmStartDisclosed = defaults.bool(forKey: Key.cloudWarmStartDisclosed)
     }
 
     private func persistHotkey() {
@@ -179,6 +245,12 @@ final class Preferences: ObservableObject {
         NotificationCenter.default.post(name: .sunoToneHotkeyChanged, object: nil)
     }
 
+    private func persistAnswerHotkey() {
+        defaults.set(Int(answerHotkeyKeyCode), forKey: Key.answerHotkeyKeyCode)
+        defaults.set(Int(answerHotkeyModifiers), forKey: Key.answerHotkeyModifiers)
+        NotificationCenter.default.post(name: .sunoAnswerHotkeyChanged, object: nil)
+    }
+
     /// Restore the built-in ⌥Space shortcut.
     func resetHotkeyToDefault() {
         hotkeyKeyCode = DefaultHotkey.keyCode
@@ -189,6 +261,12 @@ final class Preferences: ObservableObject {
     func resetToneHotkeyToDefault() {
         toneHotkeyKeyCode = DefaultToneHotkey.keyCode
         toneHotkeyModifiers = DefaultToneHotkey.modifiers
+    }
+
+    /// Restore the built-in ⌃⌥Space Suno Answer shortcut.
+    func resetAnswerHotkeyToDefault() {
+        answerHotkeyKeyCode = DefaultAnswerHotkey.keyCode
+        answerHotkeyModifiers = DefaultAnswerHotkey.modifiers
     }
 }
 

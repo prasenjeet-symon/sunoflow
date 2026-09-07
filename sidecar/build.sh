@@ -44,6 +44,11 @@ pip install --upgrade pip >/dev/null
 pip install -r requirements.txt
 pip install pyinstaller
 
+# Ensure the bundled LGPL ffmpeg exists — the spec requires it (the app ships
+# self-contained, no system ffmpeg). Idempotent: skips if already built.
+echo "Ensuring bundled ffmpeg (LGPL, static libopus)..."
+./build-ffmpeg.sh
+
 echo "Freezing sidecar (this can take a few minutes)..."
 pyinstaller --clean --noconfirm "$SPEC"
 

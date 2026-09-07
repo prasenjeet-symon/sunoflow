@@ -29,6 +29,16 @@ sidecars/*/model/
 sidecar/config.json
 sidecar/corrections.json
 sidecars/*/corrections.json
+# Warm-start cutover verdict — per-machine runtime state, written next to
+# corrections.json (dev-source mode) or in Application Support (frozen install).
+sidecar/warmstart.json
+sidecars/*/warmstart.json
+
+# Vendored ffmpeg — build artifacts produced by build-ffmpeg.sh / fetch-ffmpeg.ps1
+# (macOS: built from source, LGPL; Windows: fetched LGPL static build). Not
+# committed: large binaries, reproduced at build time.
+sidecar/vendor/
+sidecars/windows/vendor/
 
 # PyInstaller build output (frozen sidecars)
 sidecar/.venv-build/
@@ -45,6 +55,9 @@ SunoFlowApp/signing/
 *.xcodeproj/xcuserdata/
 *.xcworkspace/xcuserdata/
 DerivedData/
+
+# Throwaway prototypes compiled with swiftc (e.g. tools/answer-proto)
+tools/*/.build/
 
 # ── Release output (release.sh) ────────────────────────
 *.dmg

@@ -50,3 +50,50 @@ type Backend interface {
 	// Healthy reports whether the backend is reachable and ready to serve.
 	Healthy(ctx context.Context) bool
 }
+
+// AnswerChunk is one piece of a streamed answer.
+type AnswerChunk struct {
+	// Text is the next fragment of the user-visible answer. Empty when the
+	// chunk carries only metadata.
+	Text string
+	// Sources, populated at most once per stream, usually on the final chunks:
+	// the domains grounding used and how many web searches the model ran.
+	Domains []string
+	// SearchQueries counts the web searches the model ran for this answer.
+	SearchQueries int
+	// Err, on the final value before the channel closes, ends the stream with
+	// an error after some text may already have been emitted.
+	Err error
+}
+
+// AnswerBackend is the optional streaming seam for Suno Answer (D6). Backends
+// that cannot stream simply don't implement it; the answer route is wired only
+// when a backend supports it, so cleanup's Backend stays untouched.
+type AnswerBackend interface {
+	// StreamAnswer streams a grounded answer for the given prompt. promptText
+	// is the text half (joined prompt lines); imageJPEG is the turn-1
+	// screenshot as JPEG bytes, or nil.
+	//
+	// The returned channel yields chunks until the stream ends; the channel is
+	// then closed. An error mid-stream is signalled by closing the channel —
+	// the last value before close carries Err set. ctx governs the whole
+	// stream: the caller's deadline (or a client disconnect, if propagated)
+	// must abort the upstream request.
+	StreamAnswer(ctx context.Context, prompt string, imageJPEG []byte) (<-chan AnswerChunk, error)
+}
+
+// STTBackend is the optional cloud speech-to-text seam (the warm-start
+// dictation path). It is a distinct provider from the cleanup Backend — the
+// gateway may transcribe on Whisper while it cleans up on Gemini — so it is its
+// own interface injected as its own field, rather than a method bolted onto
+// Backend. When no STT backend is configured the /stt route answers 501.
+type STTBackend interface {
+	// Transcribe returns the verbatim transcript of the given audio. audio is
+	// the raw encoded file bytes (e.g. a 16kHz mono WAV); mime is its content
+	// type ("audio/wav"). It returns a hard error on failure — unlike cleanup
+	// there is no raw text to fall back to, so the caller (the sidecar) decides
+	// whether to retry, wait for the local model, or surface nothing.
+	Transcribe(ctx context.Context, audio []byte, mime string) (string, error)
+	// STTName identifies the provider for logging and analytics ("groq"/"gemini").
+	STTName() string
+}

@@ -1200,6 +1200,7 @@ struct SettingsView: View {
             startupGroup
             hotkeyGroup
             toneGroup
+            answerGroup
             recordingGroup
             unfocusedGroup
             screenContextGroup
@@ -1254,6 +1255,53 @@ struct SettingsView: View {
                     )
                     .frame(width: 150, height: 30)
                 }
+            }
+            Rule(strong: true)
+        }
+    }
+
+    /// Suno Answer: dictate a question, get a sourced answer in a popup.
+    ///
+    /// The toggle is the consent step (E1/E2): turning it on is what says yes
+    /// to a screen snapshot travelling with each question. Off means nothing
+    /// is captured and no hotkey exists — the feature has no presence at all.
+    private var answerGroup: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SectionLabel(text: "Suno Answer")
+            Rule(strong: true)
+            settingRow(
+                "Ask questions from anywhere",
+                "Press a shortcut, ask a question out loud, and get a short answer in a popup at your cursor. Each question includes a snapshot of your screen so the answer fits what you're looking at. Off means nothing is captured.",
+                divider: prefs.answerHotkeyEnabled
+            ) {
+                brandToggle($prefs.answerHotkeyEnabled)
+                    .onChange(of: prefs.answerHotkeyEnabled) { newValue in
+                        // Same collision move as the tone hotkey: if a
+                        // customised dictation shortcut already owns ⌃⌥Space,
+                        // the newcomer moves to the fallback instead of two
+                        // Carbon hotkeys fighting over one combination.
+                        if newValue,
+                           prefs.answerHotkeyKeyCode == prefs.hotkeyKeyCode,
+                           prefs.answerHotkeyModifiers == prefs.hotkeyModifiers {
+                            prefs.answerHotkeyKeyCode = DefaultAnswerHotkey.fallbackKeyCode
+                            prefs.answerHotkeyModifiers = DefaultAnswerHotkey.fallbackModifiers
+                        }
+                    }
+            }
+            if prefs.answerHotkeyEnabled {
+                VStack(spacing: 12) {
+                    HStack(spacing: 12) {
+                        Button("Reset") { prefs.resetAnswerHotkeyToDefault() }
+                            .buttonStyle(.sunoGhost)
+                        HotkeyRecorder(
+                            keyCode: $prefs.answerHotkeyKeyCode,
+                            modifiers: $prefs.answerHotkeyModifiers,
+                            conflict: (prefs.hotkeyKeyCode, prefs.hotkeyModifiers)
+                        )
+                        .frame(width: 150, height: 30)
+                    }
+                }
+                .padding(.vertical, Theme.Space.row)
             }
             Rule(strong: true)
         }
@@ -1513,11 +1561,13 @@ struct SettingsView: View {
 
             Rule(strong: true)
 
+            warmStartGroup
+
             SectionLabel(text: "Where it runs")
             Rule(strong: true)
             SunoRow(
                 title: "On this Mac",
-                subtitle: "Speech is turned into text by your own machine. The recording is never uploaded.",
+                subtitle: "Once the on-device model is ready, speech is turned into text by your own machine and the recording is never uploaded.",
                 systemImage: "desktopcomputer"
             )
             SunoRow(
@@ -1531,6 +1581,68 @@ struct SettingsView: View {
         .rowIconColumn()
         .onAppear { startModelPolling() }
         .onDisappear { stopModelPolling() }
+    }
+
+    /// The cloud warm-start control and its live state.
+    ///
+    /// On by default (the disclosure said so at first run): until the on-device
+    /// model has downloaded, dictation is transcribed in the cloud so a new user
+    /// can start immediately, then it cuts over to on-device automatically. The
+    /// toggle turns that off — dictation then waits for the local model, the
+    /// on-device-only behaviour the section below describes.
+    private var warmStartGroup: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SectionLabel(text: "While the model downloads")
+            Rule(strong: true)
+            settingRow(
+                "Dictate right away using the cloud",
+                "Until the on-device model finishes downloading, your speech — both dictation and Suno Answer questions — is transcribed in the cloud so you can start right away. SunoFlow switches to on-device automatically once the local model is ready and stops sending audio. Off keeps everything on this Mac — dictation and Suno Answer wait until the download finishes.",
+                divider: true
+            ) {
+                brandToggle($prefs.cloudWarmStartEnabled)
+            }
+            if let st = modelStatus {
+                warmStartStatusRow(st)
+            }
+            Rule(strong: true)
+        }
+    }
+
+    @ViewBuilder
+    private func warmStartStatusRow(_ st: ModelStatus) -> some View {
+        if st.model_loaded, st.warm_start?.cut_over ?? true {
+            SunoRow(title: "Transcribing on this Mac", divider: false) {
+                StatusText(text: "On-device", color: Theme.success)
+            }
+        } else if st.model_loaded, prefs.cloudWarmStartEnabled {
+            // Model is ready but still being validated against the cloud.
+            let ws = st.warm_start
+            SunoRow(
+                title: "Checking the on-device model",
+                subtitle: "Comparing it against the cloud on your next few dictations before switching over.",
+                divider: false
+            ) {
+                if let ws {
+                    Text("\(ws.samples)/\(ws.min_samples)")
+                        .font(.sunoValue).monospacedDigit()
+                        .foregroundStyle(Theme.body)
+                }
+            }
+        } else if prefs.cloudWarmStartEnabled {
+            SunoRow(
+                title: "Using the cloud for now",
+                subtitle: "Your on-device model is still downloading. Dictation works in the meantime.",
+                divider: false
+            ) {
+                StatusText(text: "Cloud", color: Theme.body)
+            }
+        } else {
+            SunoRow(
+                title: "Waiting for the on-device model",
+                subtitle: "Cloud dictation is off, so dictation is unavailable until the download finishes.",
+                divider: false
+            )
+        }
     }
 
     @ViewBuilder

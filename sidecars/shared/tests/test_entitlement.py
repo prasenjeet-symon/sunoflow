@@ -77,7 +77,8 @@ def test_the_device_key_is_forwarded_to_the_cleanup_call(client, monkeypatch):
     seen = {}
 
     def fake_clean(text, context="", recent=None, screen="", key="",
-                   dictionary=None, tone="", app="", app_site="", app_detail=""):
+                   dictionary=None, tone="", app="", app_site="", app_detail="",
+                   stt_source=""):
         seen["key"] = key
         return "Hello world."
 
@@ -93,7 +94,7 @@ def test_the_bearer_prefix_is_stripped(client, monkeypatch):
     monkeypatch.setattr(app_module, "clean_with_gateway",
                         lambda text, context="", recent=None, screen="", key="",
                         dictionary=None, tone="", app="", app_site="",
-                        app_detail="": seen.setdefault("key", key) or "x")
+                        app_detail="", stt_source="": seen.setdefault("key", key) or "x")
     _post(client)
     assert not seen["key"].startswith("Bearer")
 
@@ -192,7 +193,7 @@ def _capture_tone(monkeypatch):
     seen = {}
 
     def fake(text, context="", recent=None, screen="", key="", dictionary=None,
-             tone="", app="", app_site="", app_detail=""):
+             tone="", app="", app_site="", app_detail="", stt_source=""):
         seen["tone"] = tone
         return text
 
@@ -225,7 +226,7 @@ def test_the_app_form_fields_reach_the_gateway_call(client, monkeypatch):
     seen = {}
 
     def fake(text, context="", recent=None, screen="", key="", dictionary=None,
-             tone="", app="", app_site="", app_detail=""):
+             tone="", app="", app_site="", app_detail="", stt_source=""):
         seen.update(app=app, app_site=app_site, app_detail=app_detail)
         return text
 
@@ -253,7 +254,7 @@ def test_no_app_fields_is_the_request_it_always_was(client, monkeypatch):
     seen = {}
 
     def fake(text, context="", recent=None, screen="", key="", dictionary=None,
-             tone="", app="", app_site="", app_detail=""):
+             tone="", app="", app_site="", app_detail="", stt_source=""):
         seen.update(app=app, app_site=app_site, app_detail=app_detail)
         return text
 

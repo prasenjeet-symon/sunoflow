@@ -12,10 +12,10 @@ Two different things live in here, and the difference decides who applies them:
   or just mentioning the thing — "I don't have an Instagram" must not sprout a
   URL — so only the cleanup model ever applies these, never ``apply()``.
 
-The file stays on this machine. What leaves, per dictation, is the handful of
-entries that look relevant to the transcript in hand (``relevant_for``), sent to
-the cleanup gateway so the model can act on them. See docs/CONTRACT.md
-§learn / §corrections.
+The file stays on this machine. What leaves, per dictation, is the
+corrections the transcript could plausibly need (``relevant_for``), plus every
+expansion — the model judges those from the full sentence, so they are never
+pre-matched. See docs/CONTRACT.md §learn / §corrections.
 
 This module is pure logic (no FastAPI) so it can be unit-tested in isolation and
 shared by every sidecar. A sidecar instance owns one ``Corrections`` object and
@@ -283,14 +283,20 @@ class Corrections:
     def relevant_for(self, text: str, limit: int = 40) -> list:
         """The entries worth sending to the cleanup model for this transcript.
 
-        Filtering here rather than shipping the whole dictionary keeps the
-        prompt small, and keeps every entry the user did not just say on this
-        machine: a term only leaves when the transcript already looks like it.
+        Corrections are filtered to the ones this transcript could need: a
+        mishearing *is* what the speech model produced, so literal matching is
+        correct by construction, and filtering keeps unrelated spellings out of
+        the prompt (only an entry the user plausibly just said may be applied).
 
-        A correction has to appear literally — the mishearing *is* what the
-        speech model produced. An expansion is matched on its distinctive words
-        instead, since the spoken lead-in varies ("my Instagram ID", "my
-        Instagram handle", "my Instagram").
+        Expansions are NOT filtered — every one is sent on every dictation.
+        Their trigger is hand-typed spoken shorthand whose lead-in varies ("my
+        Instagram ID" / "my Instagram handle") and which the user may spell
+        wrong, so pre-matching can silently drop exactly the entry needed; the
+        model, which sees the whole sentence, judges whether the speaker was
+        giving the value or merely mentioning the thing, and the prompt
+        instructs it to leave an unused entry alone. There are only a few, and
+        the sort below still orders expansions first so an unusually large
+        collection sheds corrections, never the personal values.
         """
         if not self.data or not text:
             return []
@@ -299,19 +305,15 @@ class Corrections:
         for key, entry in self.data.items():
             frm, kind = entry["from"], _kind_of(entry)
             if kind == KIND_EXPANSION:
-                tokens = _distinctive_tokens(frm)
-                hit = (
-                    all(re.search(r"(?<!\w)" + re.escape(t), lowered) for t in tokens)
-                    if tokens
-                    else _contains_phrase(lowered, frm)
-                )
-            else:
-                hit = _contains_phrase(lowered, frm)
-            if hit:
+                # Always offered; no trigger matching.
+                out.append({"from": frm, "to": entry["to"], "kind": kind, "count": 0})
+                continue
+            if _contains_phrase(lowered, frm):
                 out.append({"from": frm, "to": entry["to"], "kind": kind, "count": entry.get("count", 0)})
-        # Expansions first, then most-used, so the cap sheds the entries least
-        # likely to matter. Expansions are always count 0 — they are added by
-        # hand, never learned — so sorting on count alone would drop exactly the
-        # entries the user took the trouble to type in.
+        # Expansions first (they ride along on every call), then most-used, so
+        # the cap sheds the entries least likely to matter — never a personal
+        # value. Expansions are always count 0 — they are added by hand, never
+        # learned — so sorting on count alone would drop exactly the entries
+        # the user took the trouble to type in.
         out.sort(key=lambda e: (e["kind"] != KIND_EXPANSION, -e["count"], len(e["from"])))
         return [{"from": e["from"], "to": e["to"], "kind": e["kind"]} for e in out[:limit]]

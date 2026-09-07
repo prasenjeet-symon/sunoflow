@@ -18,8 +18,12 @@ func cachedResolver() (r *Resolver, lookups *int, advance func(time.Duration)) {
 	now := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
 	count := 0
 	r = &Resolver{
-		ttl:      DecisionTTL,
-		cache:    map[string]cached{},
+		ttl:        DecisionTTL,
+		cache:      map[string]cached{},
+		refreshing: map[string]bool{},
+		// Run background refreshes inline so the stale-while-revalidate path is
+		// observable deterministically in a test (production launches a goroutine).
+		spawn:    func(f func()) { f() },
 		lastSeen: map[string]time.Time{},
 		seenGap:  5 * time.Minute,
 		now:      func() time.Time { return now },
@@ -55,7 +59,10 @@ func TestDecisionCacheSurvivesTheGapBetweenDictations(t *testing.T) {
 	}
 }
 
-func TestDecisionCacheStillExpires(t *testing.T) {
+func TestStaleDecisionIsRefreshedInBackground(t *testing.T) {
+	// Past the TTL the decision is renewed — but the renewal is what happens, not
+	// a blocking re-read on the way to the answer. The dictation is served from
+	// the cached decision; Firestore is consulted behind it.
 	r, lookups, advance := cachedResolver()
 	ctx := context.Background()
 
@@ -67,7 +74,90 @@ func TestDecisionCacheStillExpires(t *testing.T) {
 		t.Fatalf("resolve after expiry: %v", err)
 	}
 	if *lookups != 2 {
-		t.Errorf("cache must expire after %s and re-read; store was read %d times", DecisionTTL, *lookups)
+		t.Errorf("a stale decision must be refreshed; store was read %d times, want 2", *lookups)
+	}
+}
+
+func TestStaleDecisionIsServedBeforeTheRefreshLands(t *testing.T) {
+	// The point of the change: a dictation past the TTL gets the last-known
+	// verdict immediately, and only then is the fresh one fetched. So a device
+	// that just lost entitlement still serves ONE stale dictation, then flips.
+	r, _, advance := cachedResolver()
+	ctx := context.Background()
+
+	if res, err := r.Resolve(ctx, "sf_key"); err != nil || !res.Entitled {
+		t.Fatalf("cold resolve should be entitled: %+v %v", res, err)
+	}
+	// The account lapses in Firestore.
+	r.lookupFn = func(ctx context.Context, keyID string) (Resolution, error) {
+		return Resolution{KeyID: keyID, Entitled: false, Reason: ReasonLapsed}, nil
+	}
+
+	advance(DecisionTTL + time.Second)
+	// This one is served from the (entitled) cache even though Firestore now says no…
+	res, err := r.Resolve(ctx, "sf_key")
+	if err != nil || !res.Entitled {
+		t.Fatalf("the stale read must serve the last-known (entitled) verdict: %+v %v", res, err)
+	}
+	// …and the background refresh (inline here) has since flipped the cache.
+	res, err = r.Resolve(ctx, "sf_key")
+	if err != nil || res.Entitled {
+		t.Fatalf("after the refresh the verdict must be the fresh (not entitled) one: %+v %v", res, err)
+	}
+}
+
+func TestStaleDecisionSurvivesAFirestoreOutage(t *testing.T) {
+	// Serving stale through an outage is deliberate: today a cache miss during a
+	// Firestore outage 503s the dictation, and the offline lease already grants a
+	// lapsed device 72h, so keeping a known-good device working here costs nothing.
+	r, _, advance := cachedResolver()
+	ctx := context.Background()
+
+	if _, err := r.Resolve(ctx, "sf_key"); err != nil {
+		t.Fatalf("cold resolve: %v", err)
+	}
+	r.lookupFn = func(ctx context.Context, keyID string) (Resolution, error) {
+		return Resolution{}, context.DeadlineExceeded // Firestore unreachable
+	}
+	advance(DecisionTTL + time.Second)
+	res, err := r.Resolve(ctx, "sf_key")
+	if err != nil {
+		t.Fatalf("a stale read must not surface the refresh error: %v", err)
+	}
+	if !res.Entitled {
+		t.Errorf("the last-known (entitled) verdict must be served through the outage")
+	}
+}
+
+func TestConcurrentStaleReadsRefreshOnce(t *testing.T) {
+	// A burst of stale reads for one key must collapse to a single Firestore
+	// refresh, not one per request.
+	r, lookups, advance := cachedResolver()
+	var queued []func()
+	r.spawn = func(f func()) { queued = append(queued, f) } // hold refreshes in-flight
+	ctx := context.Background()
+
+	if _, err := r.Resolve(ctx, "sf_key"); err != nil { // cold → lookups 1
+		t.Fatalf("cold resolve: %v", err)
+	}
+	advance(DecisionTTL + time.Second)
+	_, _ = r.Resolve(ctx, "sf_key") // stale → queues one refresh, marks in-flight
+	_, _ = r.Resolve(ctx, "sf_key") // stale again → deduped, nothing queued
+	if len(queued) != 1 {
+		t.Fatalf("concurrent stale reads must queue one refresh, got %d", len(queued))
+	}
+	for _, f := range queued { // let the refresh run → lookups 2, in-flight cleared
+		f()
+	}
+	if *lookups != 2 {
+		t.Fatalf("the single refresh must read the store once more, got %d", *lookups)
+	}
+	// Once the in-flight refresh clears, a later stale read refreshes again.
+	queued = nil
+	advance(DecisionTTL + time.Second)
+	_, _ = r.Resolve(ctx, "sf_key")
+	if len(queued) != 1 {
+		t.Fatalf("after the refresh cleared, a new stale read should refresh; got %d", len(queued))
 	}
 }
 

@@ -81,6 +81,7 @@ remember the result for context continuity.
 | `app_site` | string | no (default `""`) | Host of the page in front when `app` is a browser, e.g. `mail.google.com`. Empty otherwise, and always empty from Windows, which cannot read a browser's address bar without a UI Automation dependency it does not carry — the gateway falls back to matching the tab title there. |
 | `tone` | string | no (default `""`) | The ID of the writing voice the user picked — `formal`, never the wording that produces formal output. The gateway owns the closed set and the instruction behind each entry, so an ID it does not serve normalizes to the faithful default rather than erroring. Empty means the default voice, and the request the sidecar sent before tones existed. Sent by both clients. |
 | `app_detail` | string | no (default `""`) | The focused window's title, e.g. `Inbox (12) - Gmail - Google Chrome`. **Reference material for the cleanup prompt only.** It is the one field here that carries content, and it is never reported to analytics. |
+| `allow_cloud` | bool | no (default `false`) | The user's per-install consent to the **warm-start cloud STT path**: transcribe in the cloud while the local model downloads, then cut over to on-device. Defaults `false` so a client that never sends it (or a user who declined) never leaves the device — the path is opt-in. See *Warm-start routing* below. |
 
 **Headers**:
 | Name | Required | Notes |
@@ -137,10 +138,34 @@ gateway's answer identically:
 | 401 / 403 with a non-JSON body | An intermediary (a proxy), not us. Treat as an outage. |
 | 429, 5xx, timeout, DNS failure | Outage. The stored lease decides: serve the raw transcript while a valid lease exists, else 402. |
 
+**Warm-start routing (cloud STT).** Where step 2–3 below get `raw_text` depends
+on the warm-start controller (`warmstart.py`), given the user's `allow_cloud`
+consent and whether the local model is loaded. The controller is a shared,
+platform-agnostic state machine (a copy ships in each sidecar tree):
+
+| Route | When | `raw_text` from |
+|---|---|---|
+| `wait` | no consent, model not loaded | — (soft-empty, the pre-feature behaviour) |
+| `cloud` | consent, model not loaded | `POST /stt` on the gateway; the local model download is also kicked off |
+| `shadow` | consent, model loaded, not yet validated | the **cloud** (authoritative) while the local model runs silently on the same audio and is scored against it |
+| `local` | validated, or model loaded with consent off | on-device inference only |
+
+Cutover to `local` is one-way and sticky (persisted in `warmstart.json` next to
+`corrections.json`): it fires once the last N local-vs-cloud comparisons clear
+both a real-time-factor gate and a word-agreement gate (env-tunable
+`SUNOFLOW_STT_{RTF_TARGET,MIN_AGREEMENT,MIN_SAMPLES}`; a master switch
+`SUNOFLOW_CLOUD_STT=0` disables the whole path). Cloud STT (`/stt`) enforces
+entitlement itself, exactly like `/cleanup`, so a cloud/shadow route needs no
+separate entitlement check; only a purely local route with `cleanup=false` still
+calls `GET /entitlement`.
+
 **Pipeline order:**
 1. Validate clip duration ≥ `MIN_AUDIO_SECONDS` (0.1s). Else → empty.
-2. If `model is None` → empty (model not downloaded/loaded yet).
-3. `model.transcribe(path)` → `raw_text`. On exception → empty.
+2. Route the dictation (table above). `wait` → empty; `cloud`/`shadow` obtain
+   `raw_text` from `POST /stt` (shadow keeps the cloud result and records a
+   local comparison sample); `local` runs `model.transcribe(path)`.
+3. Local inference (`local`/`shadow` routes) → `raw_text`. On exception → empty
+   (in `shadow`, the cloud result stands).
 4. If `cleanup=true`: POST `{text, context, recent, screen, app, app_site, app_detail, dictionary, tone}` to the
    cleanup gateway with the device key. `dictionary` is the subset of the user's
    entries that look relevant to *this* transcript (`relevant_for`) — the file
@@ -333,7 +358,17 @@ Report STT model presence, load state, and download progress.
   "variant": "fp32",
   "variant_label": "full precision",
   "variant_reason": "DirectML GPU with 8.6 GB of memory",
-  "download_bytes": 2550000000
+  "download_bytes": 2550000000,
+  "warm_start": {
+    "cut_over": false,
+    "enabled": true,
+    "samples": 2,
+    "median_rtf": 0.18,
+    "median_agreement": 0.94,
+    "rtf_target": 1.0,
+    "min_agreement": 0.8,
+    "min_samples": 3
+  }
 }
 ```
 | Field | Type | Meaning |
@@ -356,6 +391,19 @@ Report STT model presence, load state, and download progress.
 | `variant_label` | string | `variant` in words, for display: `full precision` / `int8`. Empty with `variant`. |
 | `variant_reason` | string | Why that variant, in a sentence a user can read. Empty with `variant`. |
 | `download_bytes` | int64 | Size of `variant`'s file set, for sizing the download before it starts. `0` when there is no choice. |
+| `warm_start` | object | Warm-start (cloud STT) state, for a "Cloud → On-device" banner. Consent-independent — the app combines it with its own `allow_cloud` pref and `model_loaded` to decide what to show. See below. |
+
+`warm_start` fields:
+| Field | Type | Meaning |
+|---|---|---|
+| `cut_over` | bool | The device has validated the local model and migrated to on-device only; the cloud path is done. |
+| `enabled` | bool | The master switch (`SUNOFLOW_CLOUD_STT`) is on for this install. |
+| `samples` | int | Local-vs-cloud comparison samples recorded so far (resets on restart). |
+| `median_rtf` | float\|null | Median real-time factor of recent local inferences; `null` before any sample. |
+| `median_agreement` | float\|null | Median word-agreement of recent local transcripts vs the cloud reference; `null` before any sample. |
+| `rtf_target` | float | Speed gate: local must be at or below this to cut over. |
+| `min_agreement` | float | Quality gate: median agreement must be at or above this to cut over. |
+| `min_samples` | int | Consecutive passing samples required to cut over. |
 
 `error` and `load_error` are deliberately separate. `error` is about fetching
 the files and its remedy is to download again; `load_error` is about starting

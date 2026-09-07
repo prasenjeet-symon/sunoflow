@@ -267,6 +267,51 @@ def test_the_macos_sidecar_omits_an_empty_dictionary(gateway):
     assert "dictionary" not in gateway.last_request()
 
 
+def test_the_answer_route_corrects_the_query_and_announces_it(gateway, monkeypatch):
+    """The mac copy must correct the dictated query exactly like the shared one:
+    gateway gets the fixed wording, app gets a ``query`` event, byte-for-byte
+    otherwise. Corrections apply; expansions never do."""
+    monkeypatch.setattr(
+        mac, "ANSWER_URL", f"http://127.0.0.1:{gateway._port}/answer"
+    )
+    monkeypatch.setattr(
+        mac, "corrections", {mac._norm_key("cavach"): mac._entry("cavach", "Kavach", 0)}
+    )
+    gateway.replies(200, b"event: meta\ndata: {}\n\nevent: done\ndata: {}\n\n",
+                    ctype="text/event-stream")
+    client = TestClient(mac.app)
+    try:
+        resp = client.post(
+            "/answer",
+            data={"query": "what is cavach", "history": "[]"},
+            headers={"X-SunoFlow-Device-Key": f"Bearer {KEY}"},
+        )
+    finally:
+        client.close()
+    assert gateway.last_request()["query"] == "what is Kavach"
+    assert resp.content.startswith(b"event: query\ndata: ")
+    assert b'"query": "what is Kavach"' in resp.content or b'"query":"what is Kavach"' in resp.content
+    assert resp.content.endswith(b"event: done\ndata: {}\n\n")
+
+
+def test_the_answer_route_leaves_a_clean_query_alone(gateway, monkeypatch):
+    monkeypatch.setattr(
+        mac, "ANSWER_URL", f"http://127.0.0.1:{gateway._port}/answer"
+    )
+    gateway.replies(200, b"event: done\ndata: {}\n\n", ctype="text/event-stream")
+    client = TestClient(mac.app)
+    try:
+        resp = client.post(
+            "/answer",
+            data={"query": "what is rust", "history": "[]"},
+            headers={"X-SunoFlow-Device-Key": f"Bearer {KEY}"},
+        )
+    finally:
+        client.close()
+    assert gateway.last_request()["query"] == "what is rust"
+    assert resp.content == b"event: done\ndata: {}\n\n"  # byte-for-byte passthrough
+
+
 # --- and the same for the chosen tone -----------------------------------------
 
 def test_the_macos_sidecar_sends_the_tone(gateway):

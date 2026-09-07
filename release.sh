@@ -104,6 +104,12 @@ if [ -f "$APP_DIR/Resources/AppIcon.icns" ]; then
     cp "$APP_DIR/Resources/AppIcon.icns" "$BUNDLE/Contents/Resources/AppIcon.icns"
 fi
 
+# The Suno Answer transcript page (markdown + KaTeX + fonts) loads from the
+# bundle's AnswerWeb folder.
+if [ -d "$APP_DIR/Resources/AnswerWeb" ]; then
+    cp -R "$APP_DIR/Resources/AnswerWeb" "$BUNDLE/Contents/Resources/AnswerWeb"
+fi
+
 # ── 3. Bundle the frozen sidecar ─────────────────────────────────────────────
 FROZEN="$SIDECAR_DIR/dist/SunoFlowSidecar"
 SIDECAR_DEST="$BUNDLE/Contents/Resources/sidecar"

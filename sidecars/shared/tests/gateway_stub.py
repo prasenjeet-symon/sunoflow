@@ -48,6 +48,9 @@ class Stub(http.server.BaseHTTPRequestHandler):
         body = type(self).reply["body"]
         self.send_response(type(self).reply["code"])
         self.send_header("Content-Type", type(self).reply["ctype"])
+        retry_after = type(self).reply.get("retry_after")
+        if retry_after is not None:
+            self.send_header("Retry-After", str(retry_after))
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -72,12 +75,13 @@ class Gateway:
         """The body of the most recent request the sidecar sent."""
         return Stub.last_request
 
-    def replies(self, code, body, ctype="application/json"):
+    def replies(self, code, body, ctype="application/json", retry_after=None):
         Stub.last_request = None
         Stub.reply = {
             "code": code,
             "body": body if isinstance(body, bytes) else json.dumps(body).encode(),
             "ctype": ctype,
+            "retry_after": retry_after,
         }
 
     def unreachable(self):
@@ -116,6 +120,9 @@ def serve(cleanup_mod, lease_mod, monkeypatch, tmp_path):
 
     monkeypatch.setattr(cleanup_mod, "CLEANUP_URL", f"http://127.0.0.1:{port}/cleanup")
     monkeypatch.setattr(cleanup_mod, "ENTITLEMENT_URL", f"http://127.0.0.1:{port}/entitlement")
+    # STT_URL exists on both sidecar copies once the warm-start path is wired;
+    # raising=False keeps this working against an older module that predates it.
+    monkeypatch.setattr(cleanup_mod, "STT_URL", f"http://127.0.0.1:{port}/stt", raising=False)
     monkeypatch.setattr(cleanup_mod, "CLEANUP_KEY", "")
     monkeypatch.setattr(lease_mod, "LEASE_SECRET", SECRET)
     monkeypatch.setattr(lease_mod, "LEASE_PATH", str(tmp_path / "lease.json"))

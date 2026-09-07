@@ -2,14 +2,23 @@
 
 A local, Wispr Flow / Superwhisper-style dictation app for macOS: press a hotkey,
 speak, and the transcribed (and cleaned-up) text is typed into whatever app you're
-focused on. Speech-to-text runs entirely on-device — no cloud STT, your voice never
-leaves your Mac.
+focused on. Speech-to-text runs on-device — once the model is set up, your voice
+never leaves your Mac.
+
+On a fresh install you can dictate from the first minute: while the on-device
+model (~2.5 GB) downloads in the background, speech is transcribed over a cloud
+path so you don't have to wait for the download. SunoFlow validates the local
+model and **switches to on-device automatically** once it's ready, then stops
+sending audio. This warm-start is on by default and disclosed at first run; turn
+it off (**Settings → Speech Model**) to stay fully on-device from the very first
+word, dictating only after the download finishes.
 
 - **Speech-to-text (on-device)**: NVIDIA Parakeet TDT 0.6B, run via
   [`parakeet-mlx`](https://github.com/senstella/parakeet-mlx) on Apple's MLX
   framework (Apple Silicon GPU/Neural Engine, no CUDA needed). The model is
   **downloaded on demand** from inside the app on first run — it is not bundled,
-  so the installer stays small.
+  so the installer stays small. Until it finishes, the opt-out cloud warm-start
+  above keeps dictation working.
 - **Cleanup pass**: an LLM fixes grammar/punctuation and strips filler words from
   the raw transcript. By default this uses a local Ollama model; the cleanup backend
   is configurable (see *Settings → AI Cleanup*).

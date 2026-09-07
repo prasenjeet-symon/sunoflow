@@ -1,0 +1,614 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<!-- Suno Answer transcript. Rendered inside the AnswerPopup's WKWebView.
+     Fonts must stay embedded or off (the paper design runs the system stack
+     for prose) — KaTeX ships its own woff2 files beside this page. -->
+<link rel="stylesheet" href="katex.min.css">
+<style>
+  :root {
+    /* Same tokens Theme.swift derives its NSColors from — hex copies of the
+       SwiftUI values (paper #FFFFFF, ink #17171B, body #5A5A65, faint #8C8C96,
+       accent #4F49B5, accent-soft #F1F0FA, wash #F6F5F2, rule #ECEAE6,
+       danger #A83A30). The page background stays transparent; the panel's
+       paper layer shows through. */
+    --ink: #17171B;
+    --body: #5A5A65;
+    --faint: #8C8C96;
+    --accent: #4F49B5;
+    --accent-soft: #F1F0FA;
+    --wash: #F6F5F2;
+    --rule: #ECEAE6;
+    --danger: #A83A30;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    background: transparent;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+    font-size: 13px;
+    color: var(--ink);
+    -webkit-font-smoothing: antialiased;
+  }
+  body { padding: 2px 6px 8px 6px; }
+  ::-webkit-scrollbar { width: 8px; }
+  ::-webkit-scrollbar-thumb { background: var(--rule); border-radius: 4px; }
+  ::-webkit-scrollbar-thumb:hover { background: #DDDAD4; }
+
+  /* ---- user turn: voice-message bubble -------------------------------- */
+  .voice {
+    background: var(--accent-soft);
+    border-radius: 12px;
+    padding: 8px 10px;
+    margin: 2px 26px 14px 0;      /* bubble hugs the right edge, like a sent message */
+    animation: rise 0.22s cubic-bezier(0.2, 0.7, 0.3, 1) both;
+  }
+  .voice-row { display: flex; align-items: center; gap: 8px; }
+  .voice-play {
+    flex: none;
+    width: 26px; height: 26px;
+    border-radius: 13px;
+    border: none;
+    background: var(--accent);
+    color: #fff;
+    cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    padding: 0;
+  }
+  .voice-play svg { display: block; }
+  .voice-play .ico-stop { display: none; }
+  .voice.playing .ico-play { display: none; }
+  .voice.playing .ico-stop { display: block; }
+  .voice-wave { flex: 1; height: 26px; min-width: 0; }
+  .voice-dur {
+    flex: none;
+    font-size: 10.5px;
+    font-weight: 600;
+    color: var(--accent);
+    font-variant-numeric: tabular-nums;
+    min-width: 26px;
+    text-align: right;
+  }
+
+  /* ---- typed follow-up turn (plain text, no waveform) ------------------ */
+  .typed {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--ink);
+    background: var(--accent-soft);
+    border-radius: 10px;
+    padding: 7px 10px;
+    margin: 2px 26px 14px 0;
+    line-height: 1.45;
+    word-wrap: break-word;
+    animation: rise 0.22s cubic-bezier(0.2, 0.7, 0.3, 1) both;
+  }
+
+  /* New turns settle up into place — a shorter, gentler version of the
+     panel's own spring drop, so the motion idea stays one idea. */
+  @keyframes rise {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .voice, .typed, .answer, .marker, .thinking-dot { animation: none; }
+  }
+
+  /* ---- answer ---------------------------------------------------------- */
+  .answer {
+    line-height: 1.5; color: var(--ink); word-wrap: break-word;
+    animation: rise 0.22s cubic-bezier(0.2, 0.7, 0.3, 1) both;
+  }
+  .answer p { margin: 0 0 8px 0; }
+  .answer p:last-child { margin-bottom: 0; }
+  .answer h1, .answer h2, .answer h3, .answer h4, .answer h5, .answer h6 {
+    margin: 10px 0 5px 0; font-weight: 600; line-height: 1.3;
+  }
+  .answer h1 { font-size: 16px; } .answer h2 { font-size: 14.5px; }
+  .answer h3, .answer h4, .answer h5, .answer h6 { font-size: 13.5px; }
+  .answer ul, .answer ol { margin: 4px 0 8px 0; padding-left: 20px; }
+  .answer li { margin: 2px 0; }
+  .answer blockquote {
+    margin: 6px 0 8px 0; padding: 2px 10px;
+    border-left: 2.5px solid var(--rule); color: var(--body);
+  }
+  .answer pre {
+    background: var(--wash);
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    padding: 8px 10px;
+    margin: 6px 0 8px 0;
+    overflow-x: auto;
+  }
+  .answer code {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 11.5px;
+  }
+  .answer pre code { font-size: 11px; }
+  .answer :not(pre) > code {
+    background: var(--wash);
+    border-radius: 4px;
+    padding: 1px 4px;
+  }
+  .answer table { border-collapse: collapse; margin: 6px 0 8px 0; max-width: 100%; display: block; overflow-x: auto; }
+  .answer th, .answer td { border: 1px solid var(--rule); padding: 4px 8px; text-align: left; font-size: 12.5px; }
+  .answer th { background: var(--wash); font-weight: 600; }
+  .answer hr { border: none; border-top: 1px solid var(--rule); margin: 10px 0; }
+  .answer a { color: var(--accent); text-decoration: none; }
+  .answer a:hover { text-decoration: underline; }
+  .answer strong { font-weight: 600; }
+  .answer img { max-width: 100%; border-radius: 6px; }
+
+  /* KaTeX display math sits in its own block; give it air and allow the
+     horizontal scroll a wide derivation can need instead of clipping it. */
+  .math-block { margin: 8px 0; overflow-x: auto; overflow-y: hidden; }
+  .math-block .katex-display { margin: 0; }
+  .katex { font-size: 1.06em; }
+
+  /* ---- transient marker (Thinking… / error card) ----------------------- */
+  .marker {
+    font-size: 12px; font-style: italic; color: var(--faint);
+    margin: 6px 0 14px 0;
+    animation: rise 0.18s cubic-bezier(0.2, 0.7, 0.3, 1) both;
+  }
+  .marker.error {
+    font-style: normal; color: var(--ink);
+    background: var(--wash); border: 1px solid var(--rule);
+    border-radius: 8px; padding: 8px 10px;
+  }
+  .marker.error .sign { float: left; margin-right: 7px; color: var(--danger); }
+
+  /* The thinking line breathes: three accent dots, phase-offset, plus a
+     soft-pulsing label. Ink stays put; only the dots move. */
+  .thinking { display: flex; align-items: center; gap: 6px; }
+  .thinking-dot {
+    width: 4px; height: 4px; border-radius: 2px;
+    background: var(--accent);
+    animation: think 1.2s ease-in-out infinite;
+  }
+  .thinking-dot:nth-child(2) { animation-delay: 0.15s; }
+  .thinking-dot:nth-child(3) { animation-delay: 0.3s; }
+  .thinking span { margin-left: 3px; }
+  @keyframes think {
+    0%, 100% { opacity: 0.25; transform: translateY(0); }
+    40%      { opacity: 1;    transform: translateY(-2px); }
+  }
+
+  /* ---- minimized peek: only the latest answer ------------------------- */
+  /* When the panel collapses it asks the page to go compact: everything in
+     the transcript hides except the one element marked `.latest` (the newest
+     answer). Expanding removes the class and the whole conversation returns. */
+  body.compact #root > *          { display: none; }
+  body.compact #root > .latest    { display: block; margin-bottom: 0; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script src="markdown-it.min.js"></script>
+<script src="katex.min.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  var root = document.getElementById("root");
+  var turnCount = 0;
+  // The answer element currently receiving streamed deltas — tracked by
+  // reference because a listening pill used to be able to sit after it in
+  // the DOM (recording UI moved to the input row's mic badge 2026-09-05,
+  // but the by-reference discipline is kept: `endAnswer`'s swap and the
+  // turn-1 retry path both re-check `parentNode`).
+  var liveAnswer = null;
+
+  // ---------------------------------------------------------------- helpers
+
+  function el(tag, cls, text) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text !== undefined) e.textContent = text;
+    return e;
+  }
+
+  // --------------------------------------------------------- math extraction
+  //
+  // Markdown-it would eat TeX: the `_` of `\vec{x}_i` becomes italics, a `|`
+  // inside an environment splits a table cell, and `\\` row breaks collapse.
+  // So before parsing, every math span is lifted out into a placeholder and
+  // restored — rendered by KaTeX — after markdown has had its turn. Passes run
+  // in priority order: fenced ```math blocks, display forms, then inline.
+  var mathSpans = [];
+
+  function stashMath(raw) {
+    var id = mathSpans.push(raw) - 1;
+    return "\u2063MATH" + id + "\u2063";
+  }
+
+  function renderStashed(display, tex) {
+    var html;
+    try {
+      html = katex.renderToString(tex, {
+        displayMode: display,
+        throwOnError: false,
+        strict: false,
+        trust: ["\\url"]
+      });
+    } catch (err) {
+      // KaTeX throws only for structural errors; show the TeX rather than
+      // dropping the answer's tail.
+      var pre = el("code", null, tex);
+      html = pre.outerHTML;
+    }
+    var span = el(display ? "div" : "span", display ? "math-block" : null);
+    span.innerHTML = html;
+    return span;
+  }
+
+  function extractFences(md) {
+    return md.replace(/```math\r?\n([\s\S]*?)```/g, function (_, body) {
+      return "\n\n" + stashMath("$ $\u2063" + body + "\u2063$ $") + "\n\n";
+    });
+  }
+
+  function extractDisplay(md) {
+    // $$...$$ first, then \[...\] — both may span lines. The body rides
+    // between "$ \u2063" and "\u2063$ $" — a wrap no answer body can
+    // contain, so the unwrap in renderAnswerHTML is exact.
+    return md.replace(/\$\$([\s\S]+?)\$\$/g, function (_, body) {
+      return stashMath("$ $\u2063" + body + "\u2063$ $");
+    });
+  }
+
+  function extractBracketDisplay(md) {
+    return md.replace(/\\\[([\s\S]+?)\\\]/g, function (_, body) {
+      return stashMath("$ $\u2063" + body + "\u2063$ $");
+    });
+  }
+
+  function extractInline(md) {
+    // $...$ with no whitespace just inside either delimiter (so "$5 and $6"
+    // stays text), and \(...\). Backslash-escaped \$ is skipped via the
+    // char-class trick ([^$] can't cross an escaped one, so match it first).
+    return md.replace(/(^|[^\\])\$([^$\n]|\$[^$\n])*?\$/g, function (m, lead, _b) {
+      var inner = m.slice(1 + lead.length, -1);
+      if (!inner.trim()) return m;
+      if (/^\s|\s$/.test(inner) && !/^\\/.test(inner)) return m;
+      return lead + stashMath(inner);
+    });
+  }
+
+  function extractParens(md) {
+    return md.replace(/\\\(([\s\S]+?)\\\)/g, function (_, body) {
+      return stashMath(body);
+    });
+  }
+
+  function extractMath(md) {
+    mathSpans = [];
+    md = extractFences(md);
+    md = extractDisplay(md);
+    md = extractBracketDisplay(md);
+    md = extractInline(md);
+    md = extractParens(md);
+    return md;
+  }
+
+  // ------------------------------------------------------------ answer HTML
+
+  var md = window.markdownit({
+    html: false,          // D7 posture: untrusted data is never markup
+    linkify: false,
+    breaks: false,
+    typographer: false
+  });
+
+  // Render markdown, then swap the math placeholders back in and let KaTeX
+  // render them. `katex.renderToString` on a detached element is fastest and
+  // avoids HTML-escaping the TeX twice.
+  function renderAnswerHTML(text) {
+    var withPlaceholders = extractMath(text);
+    var html = md.render(withPlaceholders);
+    var holder = el("div", "answer");
+    holder.innerHTML = html;
+    // Placeholder text nodes survive markdown as literal "MATH<n>" text —
+    // walk them and replace with rendered math. A single text node can carry
+    // several placeholders (inline + display in one paragraph), so match
+    // globally, group by node, and rebuild each node once.
+    var walker = document.createTreeWalker(holder, NodeFilter.SHOW_TEXT, null);
+    var byNode = [];
+    while (walker.nextNode()) {
+      var t = walker.currentNode.nodeValue;
+      var re = /\u2063MATH(\d+)\u2063/g;
+      var hit;
+      var local = [];
+      while ((hit = re.exec(t)) !== null) {
+        local.push({ id: +hit[1], index: hit.index, len: hit[0].length });
+      }
+      if (local.length) byNode.push([walker.currentNode, local]);
+    }
+    for (var i = 0; i < byNode.length; i++) {
+      var node = byNode[i][0];
+      var hits = byNode[i][1];
+      var parent = node.parentNode;
+      var cursor = 0;
+      var anchor = node;                       // insert each piece before this
+      for (var j = 0; j < hits.length; j++) {
+        var hitInfo = hits[j];
+        if (hitInfo.index > cursor) {
+          var textPart = document.createTextNode(node.nodeValue.slice(cursor, hitInfo.index));
+          parent.insertBefore(textPart, anchor);
+        }
+        var payload = mathSpans[hitInfo.id];
+        var display = payload.indexOf("$ $\u2063") === 0;
+        var body = display
+          ? payload.slice(4, -4)               // strip "$ $\u2063" and "\u2063$ $"
+          : payload;
+        parent.insertBefore(renderStashed(display, body), anchor);
+        cursor = hitInfo.index + hitInfo.len;
+      }
+      if (cursor < node.nodeValue.length) {
+        parent.insertBefore(document.createTextNode(node.nodeValue.slice(cursor)), anchor);
+      }
+      parent.removeChild(node);                // original consumed
+    }
+    return holder;
+  }
+
+  // ------------------------------------------------------------ voice turn
+
+  function fmtDuration(sec) {
+    var s = Math.max(1, Math.round(sec));
+    return s >= 60 ? Math.floor(s / 60) + ":" + ("0" + (s % 60)).slice(-2) : s + "s";
+  }
+
+  // Draw the recording's loudness envelope as symmetric bars. `samples` is
+  // normalized 0..1; `played` (0..1) recolors bars left of the playhead.
+  function drawWave(svg, samples, played) {
+    var W = svg.viewBox.baseVal.width;
+    var H = svg.viewBox.baseVal.height;
+    var n = samples.length;
+    var gap = 2;
+    var bw = Math.max(2, (W - (n - 1) * gap) / n);
+    for (var i = 0; i < n; i++) {
+      var amp = Math.max(0.08, Math.min(1, samples[i]));
+      var h = Math.max(2, Math.round(amp * (H - 4)));
+      var r = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+      r.setAttribute("x", (i * (bw + gap)).toFixed(1));
+      r.setAttribute("y", ((H - h) / 2).toFixed(1));
+      r.setAttribute("width", bw.toFixed(1));
+      r.setAttribute("height", h.toFixed(1));
+      r.setAttribute("rx", Math.min(1.5, bw / 2));
+      r.setAttribute("fill", i / n <= played ? "#4F49B5" : "#4F49B5");
+      r.setAttribute("fill-opacity", i / n <= played ? "1" : "0.42");
+      svg.appendChild(r);
+    }
+  }
+
+  // One voice turn: play button, real envelope waveform, duration. Playback is
+  // an accent sweep across the bars — no audio is stored or played back.
+  function addVoiceTurn(samples, seconds) {
+    turnCount += 1;
+    var box = el("div", "voice");
+    box.id = "turn" + turnCount;
+    var row = el("div", "voice-row");
+
+    var btn = el("button", "voice-play");
+    btn.setAttribute("aria-label", "Replay the recorded question");
+    btn.innerHTML =
+      '<svg class="ico-play" width="10" height="12" viewBox="0 0 10 12">' +
+      '<path d="M0.5 0.9 L9.5 6 L0.5 11.1 Z" fill="#fff"/></svg>' +
+      '<svg class="ico-stop" width="10" height="10" viewBox="0 0 10 10">' +
+      '<rect x="1" y="1" width="8" height="8" rx="1.5" fill="#fff"/></svg>';
+
+    var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("class", "voice-wave");
+    svg.setAttribute("viewBox", "0 0 232 26");
+    svg.setAttribute("preserveAspectRatio", "none");
+
+    var dur = el("span", "voice-dur", fmtDuration(seconds));
+
+    row.appendChild(btn);
+    row.appendChild(svg);
+    row.appendChild(dur);
+    box.appendChild(row);
+    root.appendChild(box);
+
+    drawWave(svg, samples, 0);
+
+    // Playback: sweep the playhead across the wave over the recorded duration.
+    var playing = false;
+    var raf = 0;
+    btn.addEventListener("click", function () {
+      if (playing) { stopPlayback(); return; }
+      playing = true;
+      box.classList.add("playing");
+      var t0 = performance.now();
+      var durMs = Math.max(600, seconds * 1000);
+      function step(t) {
+        var p = Math.min(1, (t - t0) / durMs);
+        while (svg.firstChild) svg.removeChild(svg.firstChild);
+        drawWave(svg, samples, p);
+        if (p >= 1) { stopPlayback(); return; }
+        raf = requestAnimationFrame(step);
+      }
+      raf = requestAnimationFrame(step);
+    });
+    function stopPlayback() {
+      playing = false;
+      box.classList.remove("playing");
+      cancelAnimationFrame(raf);
+      while (svg.firstChild) svg.removeChild(svg.firstChild);
+      drawWave(svg, samples, 0);
+    }
+    return box;
+  }
+
+  // ------------------------------------------- live follow-up recording
+  //
+  // Since 2026-09-05 the recording UI lives in the input row's mic badge
+  // (native, MicBadgeView) — the transcript shows nothing while a dictated
+  // follow-up records. `commitListening` is the one entry the flow still
+  // needs: on stop, the take becomes the turn's permanent bubble right here.
+  // beginListening/updateListening/cancelListening are retained as no-ops so
+  // the bridge contract (and tests) stay stable.
+
+  function beginListening() {
+    // No in-transcript pill anymore. An in-flight answer keeps streaming;
+    // liveAnswer is untouched because nothing new enters the DOM here.
+  }
+
+  function updateListening(level) {
+  }
+
+  // Stop: the take becomes the turn's permanent bubble — the voice bubble
+  // drawn from the recording's real envelope, or (recorder produced nothing)
+  // the same quiet plain bubble a lost dictation degrades to.
+  function commitListening(samples, seconds) {
+    if (samples && samples.length) {
+      addVoiceTurn(samples, seconds);
+    } else {
+      turnCount += 1;
+      var box = el("div", "typed", "🎙 Voice question");
+      box.id = "turn" + turnCount;
+      root.appendChild(box);
+    }
+  }
+
+  // Esc: discard the take. Nothing entered the DOM while recording, so the
+  // transcript is already exactly what it showed before.
+  function cancelListening() {
+  }
+
+  function addTypedTurn(text) {
+    turnCount += 1;
+    var box = el("div", "typed");
+    box.id = "turn" + turnCount;
+    box.textContent = text;
+    root.appendChild(box);
+    return box;
+  }
+
+  // ---------------------------------------------------------------- markers
+
+  function addMarker(kind, text) {
+    var m = el("div", "marker" + (kind === "error" ? " error" : ""));
+    m.id = "marker";
+    if (kind === "error") {
+      var sign = el("span", "sign", "⚠︎");
+      m.appendChild(sign);
+      m.appendChild(document.createTextNode(text));
+    } else if (kind === "thinking") {
+      // Three accent dots breathing in phase, then the label — the motion
+      // says "working" without any text movement.
+      m.classList.add("thinking-line");
+      var row = el("div", "thinking");
+      row.appendChild(el("span", "thinking-dot"));
+      row.appendChild(el("span", "thinking-dot"));
+      row.appendChild(el("span", "thinking-dot"));
+      row.appendChild(el("span", null, text));
+      m.appendChild(row);
+    } else {
+      m.textContent = text;
+    }
+    root.appendChild(m);
+    return m;
+  }
+
+  // -------------------------------------------------------------- answers
+
+  // The minimized peek shows exactly one element: whichever answer is tagged
+  // `.latest`. We keep that tag on the newest answer as the conversation grows,
+  // so collapsing at any moment reveals the most recent answer.
+  function markLatest(node) {
+    var prev = root.querySelectorAll(".latest");
+    for (var i = 0; i < prev.length; i++) prev[i].classList.remove("latest");
+    if (node) node.classList.add("latest");
+  }
+
+  function setCompact(on) {
+    if (on) {
+      // Mark the newest answer (falling back to the last element if none has
+      // arrived yet) as the survivor, then hide everything else.
+      var answers = root.querySelectorAll(".answer");
+      markLatest(answers.length ? answers[answers.length - 1] : root.lastElementChild);
+      document.body.classList.add("compact");
+    } else {
+      document.body.classList.remove("compact");
+    }
+  }
+
+  function beginAnswer() {
+    removeMarker();
+    // A new turn opens a fresh answer element — a stale reference (e.g. the
+    // just-finished previous answer) must not absorb this turn's deltas.
+    liveAnswer = null;
+  }
+
+  function appendAnswer(chunk) {
+    // Streamed chunks accumulate into the open answer element; re-rendering
+    // markdown on every token is wasteful, so the text node grows until the
+    // turn completes, then the full markdown render replaces it.
+    // `liveAnswer` is tracked by reference, not "last child" — commits and
+    // error cards can land after the open answer in the DOM.
+    var last = liveAnswer;
+    if (!last || !last.parentNode) {
+      last = el("div", "answer");
+      last.id = "ans";
+      last.textContent = chunk;
+      root.appendChild(last);
+      liveAnswer = last;
+      markLatest(last);           // keep the peek pointed at the newest answer
+    } else {
+      last.textContent += chunk;
+    }
+  }
+
+  function endAnswer() {
+    var last = liveAnswer;
+    if (!last || !last.parentNode || !last.classList.contains("answer")) return;
+    var text = last.textContent;
+    var rendered = renderAnswerHTML(text);
+    // Carry the id over so tests and anchors survive the swap.
+    if (last.id) rendered.id = last.id;
+    root.replaceChild(rendered, last);
+    markLatest(rendered);         // the finished answer is the peek's target
+    liveAnswer = null;
+  }
+
+  // ------------------------------------------------------------ session ops
+
+  function removeMarker() {
+    var m = document.getElementById("marker");
+    if (m) m.remove();
+  }
+
+  function reset() {
+    root.textContent = "";
+    turnCount = 0;
+    liveAnswer = null;
+  }
+
+  // ------------------------------------------------------------ JS bridge
+
+  window.sunoflow = {
+    reset: reset,
+    addVoiceTurn: function (samples, seconds) {
+      addVoiceTurn(samples, seconds);
+      return turnCount;
+    },
+    addTypedTurn: addTypedTurn,
+    beginListening: beginListening,
+    updateListening: updateListening,
+    commitListening: commitListening,
+    cancelListening: cancelListening,
+    showThinking: function () { addMarker("thinking", "Thinking…"); },
+    showError: function (message) { addMarker("error", message); },
+    removeMarker: removeMarker,
+    beginAnswer: beginAnswer,
+    appendAnswer: appendAnswer,
+    endAnswer: endAnswer,
+    setCompact: setCompact
+  };
+  window.__sunoReady = true;
+})();
+</script>
+</body>
+</html>

@@ -167,6 +167,18 @@ datas += collect_data_files("fastapi")
 if os.path.exists(CORRECTIONS):
     datas.append((CORRECTIONS, "."))
 
+# Bundle the LGPL ffmpeg fetched by fetch-ffmpeg.ps1, under ffmpeg/ in the
+# bundle; the sidecar prepends that dir to PATH at startup. Unlike macOS, the
+# Windows STT engine (onnx-asr) does NOT need ffmpeg — it's only for the cloud
+# path's Opus upload — so this is bundle-if-present (Opus falls back to raw WAV
+# when absent) rather than a hard requirement. build.ps1 runs the fetch first.
+_ffmpeg = os.path.join(str(SPEC_DIR), "vendor", "ffmpeg.exe")
+if os.path.exists(_ffmpeg):
+    binaries += [(_ffmpeg, "ffmpeg")]
+else:
+    print("WARNING: sidecars/windows/vendor/ffmpeg.exe not found — Opus upload "
+          "will fall back to WAV. Run fetch-ffmpeg.ps1 to bundle it.")
+
 # --------------------------------------------------------------------------- #
 # Analysis
 # --------------------------------------------------------------------------- #

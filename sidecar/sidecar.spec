@@ -182,6 +182,24 @@ datas += collect_data_files("fastapi")
 if os.path.exists(CORRECTIONS):
     datas.append((CORRECTIONS, "."))
 
+# Bundled LGPL ffmpeg (built by ./build-ffmpeg.sh) so the app carries no system
+# ffmpeg dependency: both parakeet-mlx (audio decode) and the Opus cloud-upload
+# encoder shell out to it. It lands under ffmpeg/ in the bundle; the sidecar
+# prepends that dir to PATH at startup (server.ensure_ffmpeg_on_path). Required
+# on purpose — freezing without it would ship a bundle that cannot transcribe on
+# a machine that has no system ffmpeg.
+_ffmpeg = os.path.join(str(SPEC_DIR), "vendor", "ffmpeg", "ffmpeg")
+if not os.path.exists(_ffmpeg):
+    raise SystemExit(
+        "vendor/ffmpeg/ffmpeg is missing — run ./build-ffmpeg.sh before freezing."
+    )
+binaries += [(_ffmpeg, "ffmpeg")]
+# Ship ffmpeg's LGPL license + source note next to the binary (LGPL compliance).
+for _lic in ("COPYING.LGPLv2.1", "README.ffmpeg.txt"):
+    _p = os.path.join(str(SPEC_DIR), "vendor", "ffmpeg", _lic)
+    if os.path.exists(_p):
+        datas.append((_p, "ffmpeg"))
+
 # --------------------------------------------------------------------------- #
 # Analysis
 # --------------------------------------------------------------------------- #

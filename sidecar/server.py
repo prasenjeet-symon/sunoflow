@@ -2,23 +2,37 @@ import json
 import os
 import platform
 import re
+import shutil
+import subprocess
+import sys
 import tempfile
 import threading
 import time
 import wave
+import base64
 from collections import deque
 from contextlib import asynccontextmanager
 from difflib import SequenceMatcher
 
 import requests
 from requests.adapters import HTTPAdapter, Retry
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi import FastAPI, File, Form, Query, UploadFile, Header
 from starlette.concurrency import run_in_threadpool
 
 import parakeet_mlx
 
 import lease
+import warmstart
+from warmstart import (
+    ROUTE_CLOUD,
+    ROUTE_LOCAL,
+    ROUTE_SHADOW,
+    ROUTE_WAIT,
+    WarmStartController,
+    real_time_factor,
+    word_agreement,
+)
 
 MODEL_ID = "mlx-community/parakeet-tdt-0.6b-v3"
 
@@ -33,6 +47,17 @@ MODEL_ID = "mlx-community/parakeet-tdt-0.6b-v3"
 # point at a local docker-compose stack).
 CLEANUP_URL = os.environ.get("SUNOFLOW_CLEANUP_URL", "https://cleanup.ogcode.xyz/cleanup")
 ENTITLEMENT_URL = CLEANUP_URL.rsplit("/", 1)[0] + "/entitlement"
+# Suno Answer (the paid ask-a-question feature) rides the same gateway host,
+# same auth, but its own SSE endpoint. Override with SUNOFLOW_ANSWER_URL for dev.
+ANSWER_URL = os.environ.get(
+    "SUNOFLOW_ANSWER_URL", CLEANUP_URL.rsplit("/", 1)[0] + "/answer"
+)
+# Cloud speech-to-text (the warm-start dictation path). Same gateway host and
+# auth as cleanup, its own endpoint. Override with SUNOFLOW_STT_URL for dev.
+STT_URL = os.environ.get("SUNOFLOW_STT_URL", CLEANUP_URL.rsplit("/", 1)[0] + "/stt")
+# Cheap gateway liveness endpoint, pinged periodically only to keep the pooled
+# TLS connection warm (see _keepalive_gateway_connection).
+GATEWAY_HEALTH_URL = CLEANUP_URL.rsplit("/", 1)[0] + "/health"
 # No default. A key used to ship here, identical in every install, which meant
 # anyone who downloaded SunoFlow could use the gateway for free and it could not
 # be revoked without breaking everyone. The device key now arrives per request
@@ -82,6 +107,106 @@ _ADAPTER = HTTPAdapter(max_retries=Retry(
 _session = requests.Session()
 _session.mount("https://", _ADAPTER)
 _session.mount("http://", _ADAPTER)  # dev/test point the URLs at plain HTTP
+
+
+def _keepalive_gateway_connection() -> None:
+    """Keep the pooled TLS connection to the gateway warm.
+
+    urllib3 drops a pooled connection after ~300s idle, so a dictation after a
+    quiet spell otherwise re-pays DNS + TCP + TLS (~0.4s, and much worse cold) on
+    the critical path between the user's last word and their pasted text. A cheap
+    /health ping every 2 minutes on the SAME session the dictation path uses
+    holds the connection open — and through Cloudflare, whose edge→origin
+    connection is otherwise dropped on the origin's 75s default keepalive
+    timeout. Best-effort: every error is swallowed.
+
+    The Suno Answer stream keeps its OWN pool (`_answer_session`) so a 90s stream
+    never blocks a cleanup, which means the dictation ping above doesn't cover
+    it — the first Answer after an idle spell would otherwise re-handshake. Warm
+    that pool on the same schedule.
+    """
+    while True:
+        time.sleep(120)
+        try:
+            _session.get(GATEWAY_HEALTH_URL, timeout=5)
+        except Exception:
+            pass
+        try:
+            _answer_session.get(GATEWAY_HEALTH_URL, timeout=5)
+        except Exception:
+            pass
+
+
+def ensure_ffmpeg_on_path() -> str:
+    """Make a bundled ffmpeg discoverable, so the app carries no system dependency.
+
+    ffmpeg is needed by BOTH the local STT engine (parakeet-mlx shells out to it
+    to decode audio) and by encode_opus below. A shipped app can't rely on the
+    user having Homebrew's ffmpeg, and a GUI-launched process gets a minimal PATH
+    anyway — so we bundle a static ffmpeg and point the process at it here.
+
+    Resolution order for the directory that holds the ffmpeg binary:
+      1. $SUNOFLOW_FFMPEG — an explicit path to the binary or its directory.
+      2. The frozen bundle (PyInstaller: sys._MEIPASS, else the executable's dir).
+      3. A repo-local ``vendor/ffmpeg`` next to this file (dev bundling).
+    The first hit is prepended to PATH; when nothing is bundled, PATH is left
+    untouched and the system ffmpeg (dev/brew) is used. Returns the path, or "".
+    """
+    exe = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
+
+    def _hit(d):
+        return d if d and os.path.exists(os.path.join(d, exe)) else None
+
+    dirs = []
+    override = os.environ.get("SUNOFLOW_FFMPEG", "").strip()
+    if override:
+        dirs.append(override if os.path.isdir(override) else os.path.dirname(override))
+    if getattr(sys, "frozen", False):
+        base = getattr(sys, "_MEIPASS", None) or os.path.dirname(sys.executable)
+        dirs += [base, os.path.join(base, "ffmpeg")]
+    dirs.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "vendor", "ffmpeg"))
+
+    for d in dirs:
+        found = _hit(d)
+        if found:
+            os.environ["PATH"] = found + os.pathsep + os.environ.get("PATH", "")
+            return os.path.join(found, exe)
+    return ""
+
+
+# Resolve a bundled ffmpeg onto PATH at import, before anything shells out to it.
+ensure_ffmpeg_on_path()
+
+
+# Compress the cloud upload to Ogg/Opus by default. Off (raw WAV) when set to
+# 0/false — e.g. if the gateway is pointed at OpenRouter, whose chat audio input
+# accepts only wav/mp3, not Opus.
+_STT_COMPRESS = os.environ.get("SUNOFLOW_STT_COMPRESS", "1").strip().lower() not in ("0", "false", "no", "")
+
+
+def encode_opus(wav_path: str):
+    """Encode a WAV file to Ogg/Opus (24 kbps mono) to shrink the cloud upload
+    (~10x smaller than 16 kHz PCM), which speeds the sidecar→gateway→provider
+    legs. Returns Opus bytes, or None to fall back to raw WAV when compression is
+    disabled, ffmpeg/libopus is unavailable (e.g. the Windows build), or encoding
+    fails. Groq's Whisper accepts Ogg/Opus; see _STT_COMPRESS for OpenRouter.
+    """
+    if not _STT_COMPRESS:
+        return None
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return None
+    try:
+        p = subprocess.run(
+            [ffmpeg, "-hide_banner", "-loglevel", "error", "-i", wav_path,
+             "-ac", "1", "-c:a", "libopus", "-b:a", "24k", "-f", "ogg", "pipe:1"],
+            capture_output=True, timeout=15,
+        )
+        if p.returncode == 0 and p.stdout:
+            return p.stdout
+    except Exception as exc:
+        print(f"Opus encode failed, sending raw WAV: {exc}")
+    return None
 
 # --- Managed model directory ---------------------------------------------------
 # For distribution the app ships WITHOUT the model bundled. The user downloads
@@ -186,6 +311,16 @@ def _save_corrections(data: dict) -> None:
 
 # key (normalized "from") -> {"from": str, "to": str, "count": int}
 corrections = _load_corrections()
+
+
+def _cloud_stt_enabled() -> bool:
+    """Master switch for the cloud warm-start path (SUNOFLOW_CLOUD_STT).
+
+    On by default; a dev run or a deployment that never wants cloud STT sets it
+    to 0/false to keep every dictation on-device (or waiting for the model). The
+    per-request consent flag still gates it on top of this.
+    """
+    return os.environ.get("SUNOFLOW_CLOUD_STT", "1").strip().lower() not in ("0", "false", "no", "")
 
 
 def _norm_key(s: str) -> str:
@@ -329,13 +464,20 @@ def apply_corrections(text: str) -> str:
 def relevant_corrections(text: str, limit: int = 40) -> list:
     """The entries worth sending to the cleanup model for this transcript.
 
-    Filtering here rather than shipping the whole dictionary keeps the prompt
-    small, and keeps every entry the user did not just say on this machine: a
-    term only leaves when the transcript already looks like it.
+    Corrections are filtered to the ones this transcript could need: a
+    mishearing *is* what the speech model produced, so literal matching is
+    correct by construction, and filtering keeps unrelated spellings out of
+    the prompt (only an entry the user plausibly just said may be applied).
 
-    A correction has to appear literally — the mishearing *is* what the speech
-    model produced. An expansion is matched on its distinctive words instead,
-    since the spoken lead-in varies ("my Instagram ID", "my Instagram handle").
+    Expansions are NOT filtered — every one is sent on every dictation.
+    Their trigger is hand-typed spoken shorthand whose lead-in varies ("my
+    Instagram ID" / "my Instagram handle") and which the user may spell
+    wrong, so pre-matching can silently drop exactly the entry needed; the
+    model, which sees the whole sentence, judges whether the speaker was
+    giving the value or merely mentioning the thing, and the prompt
+    instructs it to leave an unused entry alone. There are only a few, and
+    the sort below still orders expansions first so an unusually large
+    collection sheds corrections, never the personal values.
     """
     if not corrections or not text:
         return []
@@ -344,21 +486,18 @@ def relevant_corrections(text: str, limit: int = 40) -> list:
     for entry in corrections.values():
         frm, kind = entry["from"], _kind_of(entry)
         if kind == KIND_EXPANSION:
-            tokens = _distinctive_tokens(frm)
-            hit = (
-                all(re.search(r"(?<!\w)" + re.escape(t), lowered) for t in tokens)
-                if tokens
-                else _contains_phrase(lowered, frm)
-            )
-        else:
-            hit = _contains_phrase(lowered, frm)
-        if hit:
+            # Always offered; no trigger matching.
+            out.append({"from": frm, "to": entry["to"], "kind": kind,
+                        "count": 0})
+            continue
+        if _contains_phrase(lowered, frm):
             out.append({"from": frm, "to": entry["to"], "kind": kind,
                         "count": entry.get("count", 0)})
-    # Expansions first, then most-used, so the cap sheds the entries least
-    # likely to matter. Expansions are always count 0 — they are added by
-    # hand, never learned — so sorting on count alone would drop exactly the
-    # entries the user took the trouble to type in.
+    # Expansions first (they ride along on every call), then most-used, so the
+    # cap sheds the entries least likely to matter — never a personal value.
+    # Expansions are always count 0 — they are added by hand, never learned —
+    # so sorting on count alone would drop exactly the entries the user took
+    # the trouble to type in.
     out.sort(key=lambda e: (e["kind"] != KIND_EXPANSION, -e["count"], len(e["from"])))
     return [{"from": e["from"], "to": e["to"], "kind": e["kind"]} for e in out[:limit]]
 
@@ -372,6 +511,25 @@ def _local_model_complete() -> bool:
     return all(
         os.path.exists(os.path.join(MODEL_DIR, f)) for f in MODEL_FILES
     )
+
+
+# Warm-start controller: routes dictation cloud→local while the model downloads,
+# validates local against the cloud, and cuts over. Its cutover verdict persists
+# next to the corrections file so a machine that already migrated does not reopen
+# the cloud path on the next launch. Kept in lockstep with the shared tree's
+# controller (sidecar/warmstart.py is a copy of sidecars/shared/warmstart.py).
+#
+# Defined here, after _local_model_complete, so the seeding below can read it: an
+# install that already has the model on disk never needed warm-start, so it is
+# treated as already migrated rather than starting to send audio to the cloud to
+# "validate" a model it has transcribed with locally all along. A fresh install
+# has nothing on disk, so this does not fire for it.
+_warmstart = WarmStartController.from_env(
+    enabled=_cloud_stt_enabled(),
+    state_path=os.path.join(os.path.dirname(CORRECTIONS_PATH), "warmstart.json"),
+)
+if not _warmstart.cut_over and _local_model_complete():
+    _warmstart.force_local()
 
 
 def _load_model_now() -> None:
@@ -484,6 +642,11 @@ async def lifespan(app: FastAPI):
         # can trigger a download from the dashboard and we'll load on demand.
         print(f"Could not load model at startup: {exc}")
         model = None
+    # Keep the gateway TLS connection warm so dictations after an idle gap don't
+    # pay a fresh handshake on the critical path. Daemon thread; dies with us.
+    threading.Thread(
+        target=_keepalive_gateway_connection, name="sf-gateway-keepalive", daemon=True
+    ).start()
     yield
 
 
@@ -554,6 +717,25 @@ def _refusal_message(resp) -> str:
     if not isinstance(body, dict) or "error" not in body:
         return ""
     return (body.get("message") or "").strip() or _DEFAULT_BLOCKED
+
+
+def _refusal(resp):
+    """(message, code) for a refusal response, or ("", "") when not one.
+
+    Companion to :func:`_refusal_message` for callers that must pass the
+    gateway's own error token through verbatim (Suno Answer: the account sheet
+    distinguishes "canceled" from "trial_expired" on the 402 it already knows
+    how to render from /transcribe).
+    """
+    message = _refusal_message(resp)
+    if not message:
+        return "", ""
+    try:
+        body = resp.json()
+        code = body.get("error") or ""
+    except Exception:
+        code = ""
+    return message, code
 
 
 def _allow_or_raise(key: str, why: str, quiet: bool = False) -> None:
@@ -681,6 +863,7 @@ def clean_with_gateway(
     app: str = "",
     app_site: str = "",
     app_detail: str = "",
+    stt_source: str = "",
 ) -> str:
     """Clean a transcript via the hosted cleanup gateway.
 
@@ -737,6 +920,11 @@ def clean_with_gateway(
     # default path cannot have changed behaviour.
     if tone:
         payload["tone"] = tone
+    # Which engine produced this transcript (analytics only): "local" | "cloud".
+    # Omitted when unset so the request is unchanged for a caller that never sets
+    # it; the gateway reports a missing value as "unknown".
+    if stt_source:
+        payload["stt_source"] = stt_source
 
     try:
         resp = _session.post(
@@ -770,6 +958,112 @@ def clean_with_gateway(
     return (body.get("cleaned") or "").strip() or text
 
 
+def transcribe_with_gateway(
+    audio: bytes,
+    key: str = "",
+    fmt: str = "wav",
+    language: str = "",
+) -> str:
+    """Transcribe audio via the hosted cloud STT endpoint (the warm-start path).
+
+    Used only while the local model is downloading (or being validated): the
+    sidecar sends the same recording it would feed the local model and gets back
+    a raw transcript, which then rides the normal cleanup pass exactly as a local
+    transcript would.
+
+    Entitlement is enforced here the same way as cleanup — cloud STT is a paid
+    feature on the same subscription: a refusal (401/402/403 with our JSON body)
+    raises NotEntitled; an outage (429/5xx/network, and a 501 from a gateway with
+    no STT provider) defers to the signed lease via _allow_or_raise. The one
+    difference from clean_with_gateway is the soft-fail target: there is no raw
+    text to fall back to (this call *is* what makes it), so a lease-covered outage
+    returns "" — the caller treats it as a missed dictation (in shadow mode it
+    falls back to the local result instead).
+
+    Kept in lockstep with sidecars/shared/cleanup.transcribe_with_gateway; the
+    parity is pinned in sidecar/tests/test_stt_parity.py.
+    """
+    key = key or CLEANUP_KEY
+    if not key:
+        raise NotEntitled(_NOT_CONNECTED, code="not_connected")
+    if not audio:
+        return ""
+
+    payload = {"audio": base64.b64encode(audio).decode("ascii"), "format": (fmt or "wav")}
+    if language:
+        payload["language"] = language
+
+    try:
+        resp = _session.post(STT_URL, headers=_headers(key), json=payload, timeout=60)
+    except Exception as exc:
+        _allow_or_raise(key, str(exc))
+        return ""
+
+    message = _refusal_message(resp)
+    if message:
+        raise NotEntitled(message)
+    if not resp.ok:
+        _allow_or_raise(key, f"HTTP {resp.status_code}")
+        return ""
+
+    try:
+        body = resp.json()
+    except Exception as exc:
+        print(f"STT gateway returned an unreadable body: {exc}")
+        return ""
+
+    lease.save(body.get("lease") or "", key)
+    # Diagnostic: the gateway reports which provider served the call and its own
+    # gateway→provider time. Logged next to the sidecar's end-to-end cloud_stt_ms
+    # so the difference isolates the sidecar↔gateway network overhead.
+    prov, gms = body.get("provider"), body.get("stt_ms")
+    if prov or gms is not None:
+        print(f"[stt] provider={prov} gateway_stt_ms={gms}")
+    return (body.get("transcript") or "").strip()
+
+
+def _local_transcribe(path: str) -> str:
+    """Run local inference, soft-failing to "" — never breaks a dictation.
+
+    MLX's default stream is thread-local, so this must run on the event-loop
+    thread (the one the model was loaded on), not a threadpool worker.
+    """
+    try:
+        return model.transcribe(path).text.strip()
+    except Exception as exc:
+        print(f"Transcription failed, returning empty: {exc}")
+        return ""
+
+
+def _local_transcribe_timed(path: str, audio_seconds) -> tuple:
+    """Local inference plus its real-time factor, for the shadow comparison.
+
+    A failure returns ("", inf): agreement then scores 0 and the speed gate never
+    passes, so a broken local model can never trigger a cutover.
+    """
+    t0 = time.perf_counter()
+    try:
+        text = model.transcribe(path).text.strip()
+    except Exception as exc:
+        print(f"Shadow local transcription failed: {exc}")
+        return "", float("inf")
+    return text, real_time_factor(time.perf_counter() - t0, audio_seconds)
+
+
+def _ensure_download_started() -> None:
+    """Kick off the background model download if it is not already running.
+
+    Idempotent — mirrors the guard in the /model/download route so a cloud-served
+    dictation can start the local model downloading without a second click.
+    """
+    with _dl_lock:
+        if _dl_state["active"]:
+            return
+    if _local_model_complete() and model is not None:
+        return
+    threading.Thread(target=_run_download, daemon=True).start()
+
+
 class NotEntitledResponse(JSONResponse):
     """402 with the gateway's own wording, so the app can show it verbatim."""
 
@@ -787,13 +1081,17 @@ async def transcribe(
     app_id: str = Form("", alias="app"),
     app_site: str = Form(""),
     app_detail: str = Form(""),
+    # The user's per-install consent to cloud STT while the local model downloads.
+    # Defaults False so a client that never sends it (or a user who declined)
+    # never leaves the device — the warm-start path is opt-in.
+    allow_cloud: bool = Form(False),
     device_key: str = Header("", alias="X-SunoFlow-Device-Key"),
 ):
     key = device_key.removeprefix("Bearer ").strip()
     try:
         return await _transcribe_inner(
             file, cleanup, context, screen, tone, key,
-            app_id, app_site, app_detail,
+            app_id, app_site, app_detail, allow_cloud,
         )
     except NotEntitled as exc:
         # Deliberately NOT a soft failure: an expired account stops working.
@@ -803,12 +1101,15 @@ async def transcribe(
 
 async def _transcribe_inner(
     file, cleanup, context, screen, tone, key,
-    app_id="", app_site="", app_detail="",
+    app_id="", app_site="", app_detail="", allow_cloud=False,
 ):
+    t_start = time.perf_counter()
+    timings = {}
+    audio_bytes = await file.read()
     fd, tmp_path = tempfile.mkstemp(suffix=".wav")
     try:
         with os.fdopen(fd, "wb") as tmp:
-            tmp.write(await file.read())
+            tmp.write(audio_bytes)
 
         # parakeet-mlx underflows on empty/too-short audio: the mel length goes
         # negative and wraps to a huge unsigned value, so mx.eval tries to
@@ -820,23 +1121,80 @@ async def _transcribe_inner(
             print(f"Skipping transcription: audio too short ({duration} s)")
             return {"raw": "", "cleaned": ""}
 
-        if model is None:
-            # The sidecar is up but the STT model isn't loaded yet (user hasn't
-            # downloaded it, or the download is still running). Surface this as
-            # a soft empty result rather than crashing on None.transcribe.
-            print("Transcription skipped: model not loaded.")
+        # Warm-start routing. The controller decides where this dictation is
+        # transcribed given the user's cloud consent and whether the local model
+        # is loaded yet; see warmstart.py for the state machine.
+        route = _warmstart.route(consent=allow_cloud, model_loaded=model is not None)
+
+        # Whether the cloud STT call ran. It enforces entitlement on its own, so a
+        # cloud/shadow route needs no separate check below.
+        used_gateway_stt = False
+        # Which engine produced raw_text, sent to the gateway for its
+        # local-vs-cloud analytics. Default local; cloud/shadow override below.
+        stt_source = "local"
+
+        if route == ROUTE_WAIT:
+            # No cloud allowed and the model isn't loaded yet — the pre-feature
+            # behaviour: a soft empty result rather than crashing on None.transcribe.
+            print("Transcription skipped: model not loaded (cloud STT off).")
             return {"raw": "", "cleaned": ""}
 
-        # MLX's default stream is thread-local, so transcribe must run on the
-        # same thread the model was loaded on (the event loop thread), not a
-        # threadpool worker.
-        try:
-            result = model.transcribe(tmp_path)
-            raw_text = result.text.strip()
-        except Exception as exc:
-            # Never let a single bad clip break dictation — fail soft to empty.
-            print(f"Transcription failed, returning empty: {exc}")
-            return {"raw": "", "cleaned": ""}
+        # For a cloud call, compress the WAV to Ogg/Opus (~10x smaller) to shrink
+        # the upload; falls back to raw WAV when compression is off/unavailable.
+        upload_bytes, upload_fmt = audio_bytes, "wav"
+        if route in (ROUTE_CLOUD, ROUTE_SHADOW):
+            _t = time.perf_counter()
+            opus = await run_in_threadpool(encode_opus, tmp_path)
+            if opus:
+                upload_bytes, upload_fmt = opus, "ogg"
+                timings["opus_ms"] = (time.perf_counter() - _t) * 1000
+                print(f"[stt] opus upload {len(opus)}B (from {len(audio_bytes)}B wav)")
+
+        if route == ROUTE_CLOUD:
+            # Serve the cloud now, and make sure the local model is downloading in
+            # the background so the device can cut over to on-device later.
+            try:
+                _ensure_download_started()
+            except Exception as exc:
+                print(f"Could not start background model download: {exc}")
+            _t = time.perf_counter()
+            raw_text = await run_in_threadpool(
+                transcribe_with_gateway, upload_bytes, key, upload_fmt, ""
+            )
+            timings["cloud_stt_ms"] = (time.perf_counter() - _t) * 1000
+            used_gateway_stt = True
+            stt_source = "cloud"
+
+        elif route == ROUTE_LOCAL:
+            # MLX's default stream is thread-local, so transcribe must run on the
+            # event loop thread (where the model loaded), not a threadpool worker.
+            raw_text = _local_transcribe(tmp_path)
+
+        else:  # ROUTE_SHADOW
+            # Cloud stays authoritative during validation; local runs silently on
+            # the same audio so we can compare speed and accuracy before trusting
+            # it. The user never sees the unvalidated local result.
+            local_text, rtf = _local_transcribe_timed(tmp_path, duration)
+            if rtf != float("inf"):
+                timings["local_ms"] = rtf * duration * 1000
+            _t = time.perf_counter()
+            cloud_text = await run_in_threadpool(
+                transcribe_with_gateway, upload_bytes, key, upload_fmt, ""
+            )
+            timings["cloud_stt_ms"] = (time.perf_counter() - _t) * 1000
+            used_gateway_stt = True
+            if cloud_text:
+                _warmstart.record_shadow(
+                    rtf=rtf, agreement=word_agreement(local_text, cloud_text)
+                )
+                raw_text = cloud_text
+                stt_source = "cloud"
+            else:
+                # Cloud missed this one (a lease-covered outage): fall back to the
+                # local result we already produced rather than dropping the
+                # dictation. No sample recorded — nothing to compare against.
+                raw_text = local_text
+                stt_source = "local"
     finally:
         os.unlink(tmp_path)
 
@@ -844,10 +1202,12 @@ async def _transcribe_inner(
         # Only the entries this transcript could plausibly need — the rest of the
         # dictionary stays on this Mac.
         relevant = relevant_corrections(raw_text)
+        _t = time.perf_counter()
         cleaned_text = await run_in_threadpool(
             clean_with_gateway, raw_text, context, list(recent_transcripts), screen,
-            key, relevant, tone, app_id, app_site, app_detail,
+            key, relevant, tone, app_id, app_site, app_detail, stt_source,
         )
+        timings["cleanup_ms"] = (time.perf_counter() - _t) * 1000
     else:
         # Cleanup off still has to prove entitlement, or switching it off would
         # be a free-dictation switch.
@@ -855,7 +1215,13 @@ async def _transcribe_inner(
         # voice is applied by the model, and this path makes no model call.
         # The apps are expected to gate the tone picker on cleanup being on
         # rather than leaving the key looking broken.
-        await run_in_threadpool(check_entitlement, key)
+        #
+        # Skip it when the cloud STT call already ran this dictation — that call
+        # enforced entitlement itself, so a second round trip would be redundant.
+        if not used_gateway_stt:
+            _t = time.perf_counter()
+            await run_in_threadpool(check_entitlement, key)
+            timings["entitlement_ms"] = (time.perf_counter() - _t) * 1000
         cleaned_text = raw_text
 
     # Apply the learned corrections as the final step so they always win over
@@ -868,7 +1234,228 @@ async def _transcribe_inner(
     if raw_text.strip():
         recent_transcripts.append(cleaned_text)
 
+    # Per-stage timing summary for latency measurement. Content-free — stage
+    # durations, the route, and the clip length only; no transcript.
+    _stages = " ".join(f"{k}={v:.0f}" for k, v in timings.items())
+    print(f"[timing] route={route} stt_source={stt_source} audio={duration:.1f}s {_stages} "
+          f"total_ms={(time.perf_counter() - t_start) * 1000:.0f}")
+
     return {"raw": raw_text, "cleaned": cleaned_text}
+
+
+# --- Suno Answer (SSE proxy to the hosted gateway) -----------------------------
+#
+# A separate paid feature from cleanup: the app dictates a question, the gateway
+# streams a grounded answer back as server-sent events. The sidecar is a dumb
+# proxy — it selects dictionary entries relevant to the query (keyed on the
+# question, not a transcript), forwards the request, and pipes bytes through.
+# No prompt building, no fallback, no retry: a retried POST /answer would
+# double-spend a paid message when the first attempt reached the gateway but
+# the connection died mid-stream.
+#
+# Wire contract (gateway -> sidecar -> app, byte-for-byte):
+#   query   {"query":"..."}    sidecar-inserted ONLY, ahead of meta, when the
+#                              dictionary corrected the dictated query; the app
+#                              revises its user bubble to the corrected wording
+#   meta    {"lease": "..."}   first gateway event, always
+#   delta   {"text": "..."}    one fragment of the answer
+#   sources {"domains":[...],"queries":N}
+#   done    {}
+#   error   {"error":code,"message":"..."}   terminal, no fallback after it
+#
+# Pre-stream failures become that same stream with one ``error`` event, so the
+# app parses exactly one response shape. 402-class refusals are the exception:
+# they come back as the same 402 JSON body /transcribe returns, because the
+# app's account sheet already knows how to render it.
+
+_answer_adapter = HTTPAdapter(max_retries=Retry(
+    total=0, connect=0, read=0, status=0, backoff_factor=0,
+))
+_answer_session = requests.Session()
+_answer_session.mount("https://", _answer_adapter)
+_answer_session.mount("http://", _answer_adapter)
+
+# Total ceiling on one answer turn. The gateway's own deadline is 90s (D3); the
+# proxy waits slightly longer so the gateway's own timeout error event — which
+# tells the user something kinder than a network error would — is what arrives.
+ANSWER_TIMEOUT = 100.0
+
+MAX_QUERY_LEN = 2000
+MAX_HISTORY_TURNS = 16
+MAX_HISTORY_LEN = 4000
+MAX_DICT_ENTRIES = 64
+MAX_IMAGE_BYTES = 3 << 20
+
+
+def _sse_bytes(event: str, payload: dict) -> bytes:
+    """One SSE event frame, matching the gateway's framing."""
+    return f"event: {event}\ndata: {json.dumps(payload)}\n\n".encode("utf-8")
+
+
+def _answer_error_stream(code: str, message: str):
+    yield _sse_bytes("error", {"error": code, "message": message})
+
+
+def stream_answer(query, history=None, image_bytes=None, key="", dictionary=None):
+    """Generator of raw SSE byte chunks from the gateway.
+
+    Raises NotEntitled when the gateway refuses the device (the caller turns
+    that into the same 402 response /transcribe returns). Any other pre-stream
+    failure returns a generator carrying exactly one ``error`` event.
+    """
+    if not key:
+        raise NotEntitled(_NOT_CONNECTED, code="not_connected")
+
+    query = (query or "").strip()[:MAX_QUERY_LEN]
+    if not query:
+        raise ValueError("empty query")
+
+    history = list(history or [])[-MAX_HISTORY_TURNS:]
+    turns = []
+    for turn in history:
+        if not isinstance(turn, dict):
+            continue
+        q = str(turn.get("q") or "").strip()[:MAX_HISTORY_LEN]
+        a = str(turn.get("a") or "").strip()[:MAX_HISTORY_LEN]
+        if q or a:
+            turns.append({"q": q, "a": a})
+
+    dictionary = list(dictionary or [])[:MAX_DICT_ENTRIES]
+
+    payload = {"query": query, "history": turns}
+    if dictionary:
+        payload["dictionary"] = dictionary
+    if image_bytes:
+        if len(image_bytes) > MAX_IMAGE_BYTES:
+            raise ValueError("image too large")
+        payload["image"] = base64.b64encode(image_bytes).decode("ascii")
+
+    try:
+        resp = _answer_session.post(
+            ANSWER_URL,
+            headers=_headers(key),
+            json=payload,
+            stream=True,
+            timeout=(10, ANSWER_TIMEOUT),
+        )
+    except Exception:
+        # Network-level failure before any byte: not an entitlement question —
+        # the request may never have arrived. The app gets a structured error
+        # event rather than an exception, so its UI path is one code.
+        return _answer_error_stream("unavailable", "Suno Answer is unavailable right now. Try again shortly.")
+
+    refusal, code = _refusal(resp)
+    if refusal:
+        raise NotEntitled(refusal, code=code or "not_entitled")
+
+    if resp.status_code == 429:
+        # Retry-After=60 marks the daily allowance; =1 marks the per-minute
+        # bucket, which is a "slow down", not a day over — different words.
+        retry_after = resp.headers.get("Retry-After", "60")
+        if retry_after.strip() == "1":
+            return _answer_error_stream(
+                "unavailable",
+                "Suno is answering as fast as it can — wait a few seconds and try again.",
+            )
+        return _answer_error_stream(
+            "limit",
+            "You've used all your Suno Answers for today. They reset tomorrow.",
+        )
+
+    if not resp.ok:
+        return _answer_error_stream(
+            "unavailable",
+            "Suno Answer is unavailable right now. Try again shortly.",
+        )
+
+    # The lease rides the stream's first ``meta`` event, not a header, so there
+    # is nothing to save here — the gateway's meta event carries it to the
+    # client verbatim.
+
+    def _pump():
+        try:
+            for chunk in resp.iter_content(chunk_size=1024):
+                if chunk:
+                    yield chunk
+        finally:
+            resp.close()
+
+    return _pump()
+
+
+@app.post("/answer")
+async def answer(
+    query: str = Form(...),
+    history: str = Form("[]"),
+    image: UploadFile = File(None),
+    device_key: str = Header("", alias="X-SunoFlow-Device-Key"),
+):
+    """Proxy one Suno Answer turn to the hosted gateway as SSE.
+
+    ``query`` is this turn's dictated question; ``history`` is a JSON array of
+    prior ``{q, a}`` pairs, oldest first, carried from the app's in-memory popup
+    session. ``image`` rides the FIRST turn of a session only.
+    """
+    key = device_key.removeprefix("Bearer ").strip()
+    try:
+        turns = json.loads(history) if history else []
+        if not isinstance(turns, list):
+            turns = []
+    except Exception:
+        turns = []
+
+    image_bytes = b""
+    if image is not None:
+        image_bytes = await image.read()
+
+    # Correct the dictated query against the user's dictionary BEFORE the
+    # gateway sees it: a question built from mis-heard words searches for
+    # mis-heard words. In-process regex pass — microseconds, no extra
+    # round trip (latency was the constraint). Corrections only, exactly
+    # like /transcribe: expansions need the model's judgement about
+    # whether the speaker was giving the value or just mentioning the
+    # thing, so they are never substituted blind.
+    corrected = query.strip()[:MAX_QUERY_LEN]
+    if corrected:
+        corrected = apply_corrections(corrected).strip()[:MAX_QUERY_LEN] or corrected
+
+    try:
+        relevant = await run_in_threadpool(relevant_corrections, query, 40)
+        gen = await run_in_threadpool(
+            stream_answer, corrected or query, turns, image_bytes, key, relevant
+        )
+    except NotEntitled as exc:
+        # Same refusal shape as /transcribe: the app's account sheet renders it.
+        print(f"Refusing Suno Answer — {exc}")
+        return NotEntitledResponse(str(exc), getattr(exc, "code", "not_entitled"))
+    except ValueError as exc:
+        # Bad query/image from the app itself: the app's SSE parser still needs
+        # the event shape, so even this comes back in-stream.
+        return StreamingResponse(
+            _answer_error_stream("unavailable", str(exc)),
+            media_type="text/event-stream",
+        )
+
+    # Tell the app when the dictionary fixed the query: one ``query`` event
+    # ahead of the gateway's stream. The app swaps its user bubble to the
+    # corrected wording — that visible fix is the "we heard you right"
+    # feedback. Nothing is prepended when nothing changed (the common
+    # case), so the stream stays byte-for-byte gateway output.
+    if corrected and corrected != query.strip()[:MAX_QUERY_LEN]:
+        prefix = _sse_bytes("query", {"query": corrected})
+
+        def _prefixed(inner=gen):
+            yield prefix
+            for chunk in inner:
+                yield chunk
+
+        gen = _prefixed()
+
+    return StreamingResponse(
+        gen,
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.post("/learn")
@@ -959,6 +1546,25 @@ def model_status():
         "error": snap["error"],
         "model_dir": MODEL_DIR,
         "model_id": MODEL_ID,
+        # Warm-start state so the app can show a "Cloud → On-device" banner.
+        # Consent-independent fields only (cut_over, progress, gates); the app
+        # combines them with its own cloud-consent pref and model_loaded to
+        # decide what to display. Additive — older clients ignore it.
+        "warm_start": _warm_start_status(),
+    }
+
+
+def _warm_start_status() -> dict:
+    ws = _warmstart.snapshot(model_loaded=model is not None)
+    return {
+        "cut_over": ws["cut_over"],
+        "enabled": ws["enabled"],
+        "samples": ws["samples"],
+        "median_rtf": ws["median_rtf"],
+        "median_agreement": ws["median_agreement"],
+        "rtf_target": ws["rtf_target"],
+        "min_agreement": ws["min_agreement"],
+        "min_samples": ws["min_samples"],
     }
 
 

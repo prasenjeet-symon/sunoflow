@@ -26,6 +26,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Second Carbon hotkey: cycles the tone. `HotkeyManager` instances need
     /// distinct ids so their events can be told apart in the shared handler.
     private let toneHotkeyManager = HotkeyManager(id: 2)
+    /// Third Carbon hotkey: Suno Answer. Registered only when the feature is
+    /// turned on in Settings (the toggle is the consent step).
+    private let answerHotkeyManager = HotkeyManager(id: 3)
+    private let answerFlow = AnswerFlow()
     private let audioRecorder = AudioRecorder()
     private let overlay = DictationOverlay()
     private let transcriptCard = TranscriptCard()
@@ -52,6 +56,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let correctionsMenu = NSMenu()
     private var toneMenuItem: NSMenuItem!
     private let toneMenu = NSMenu()
+    private var answerMenuItem: NSMenuItem!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
@@ -101,6 +106,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.syncToneHotkey()
         }
 
+        // Suno Answer: the flow owns popup + recording, AppDelegate owns the
+        // Carbon hotkey and the exclusivity rule against dictation.
+        answerFlow.install(isDictationBusy: { [weak self] in
+            guard let self else { return false }
+            return self.state == .recording || self.state == .processing
+        })
+        answerHotkeyManager.onHotkey = { [weak self] in self?.answerFlow.toggle() }
+        syncAnswerHotkey()
+        NotificationCenter.default.addObserver(
+            forName: .sunoAnswerHotkeyChanged, object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.syncAnswerHotkey()
+        }
+        // The gateway refuses a paid answer the same way it refuses dictation.
+        // Same surface, same wording, same once-per-lapse guard.
+        NotificationCenter.default.addObserver(
+            forName: .sunoAnswerNotEntitled, object: nil, queue: .main
+        ) { [weak self] note in
+            let message = note.userInfo?["message"] as? String ?? "Your SunoFlow subscription isn't active."
+            let code = note.userInfo?["code"] as? String ?? "not_entitled"
+            self?.showDictationBlocked(code: code, message: message)
+        }
+
         // A second launch of the app asks us to surface the Settings window.
         DistributedNotificationCenter.default().addObserver(
             forName: AppNotifications.openSettings, object: nil, queue: .main
@@ -127,6 +155,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         healthCheckTimer?.invalidate()
         hotkeyManager.unregister()
         toneHotkeyManager.unregister()
+        answerHotkeyManager.unregister()
+        answerFlow.dismiss()
         if audioRecorder.isRecording {
             audioRecorder.stopRecording()
         }
@@ -161,6 +191,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         toggleItem.target = self
         menu.addItem(toggleItem)
+
+        answerMenuItem = NSMenuItem(title: "Suno Answer", action: #selector(menuAnswerToggle), keyEquivalent: "")
+        answerMenuItem.target = self
+        answerMenuItem.isHidden = !Preferences.shared.answerHotkeyEnabled
+        menu.addItem(answerMenuItem)
 
         menu.addItem(NSMenuItem.separator())
         // The current voice always has somewhere to be read. A colour on the
@@ -211,6 +246,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             modifiers: prefs.toneHotkeyModifiers
         )
         AppLog.log("Tone hotkey \(toneHotkeyManager.isRegistered ? "registered" : "FAILED to register"): \(KeyCombo.display(keyCode: prefs.toneHotkeyKeyCode, modifiers: prefs.toneHotkeyModifiers))")
+    }
+
+    /// Register or re-register the Suno Answer hotkey to match the setting.
+    /// Same shape as `syncToneHotkey`: off means unregistered, on means a
+    /// plain Carbon hotkey with no permission to wait for.
+    private func syncAnswerHotkey() {
+        let prefs = Preferences.shared
+        guard prefs.answerHotkeyEnabled else {
+            answerHotkeyManager.unregister()
+            return
+        }
+        answerHotkeyManager.reregister(
+            keyCode: prefs.answerHotkeyKeyCode,
+            modifiers: prefs.answerHotkeyModifiers
+        )
+        AppLog.log("Answer hotkey \(answerHotkeyManager.isRegistered ? "registered" : "FAILED to register"): \(KeyCombo.display(keyCode: prefs.answerHotkeyKeyCode, modifiers: prefs.answerHotkeyModifiers))")
     }
 
     /// Advance to the next voice and show it. The tone hotkey calls exactly
@@ -321,6 +372,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         toggleRecording()
     }
 
+    /// The menu-bar route to the answer hotkey's action, hidden while the
+    /// feature is off (the feature itself is opt-in; the menu item follows).
+    @objc private func menuAnswerToggle() {
+        answerFlow.toggle()
+    }
+
     @objc private func openSettings() {
         SettingsWindowController.shared.show()
     }
@@ -417,6 +474,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // A card left over from the last dictation is about to be answered by
         // this one — take it down before the overlay comes up.
         transcriptCard.dismiss()
+        // A8: dictation and Suno Answer are mutually exclusive, and dictation
+        // wins — an answer session (even a paid in-flight request) is aborted
+        // when the user starts dictating.
+        answerFlow.dismiss()
 
         // Before recording the next utterance, learn from any edits the user made
         // to the previously pasted text.
@@ -544,7 +605,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             screenContext: screenContext,
             app: app,
             cleanup: Preferences.shared.cleanupEnabled,
-            tone: Preferences.shared.tone.rawValue
+            tone: Preferences.shared.tone.rawValue,
+            allowCloud: Preferences.shared.cloudWarmStartEnabled
         ) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self = self else { return }
@@ -697,6 +759,15 @@ extension AppDelegate: NSMenuDelegate {
         // cleanup toggle can change from Settings, so both are re-read here
         // rather than only when something in this file moved them.
         refreshToneMenu()
+        // The Answer entry follows the Settings toggle: hidden when the
+        // feature is off, labelled with the live combination when on.
+        if let item = answerMenuItem {
+            let prefs = Preferences.shared
+            item.isHidden = !prefs.answerHotkeyEnabled
+            if prefs.answerHotkeyEnabled {
+                item.title = "Suno Answer (\(KeyCombo.display(keyCode: prefs.answerHotkeyKeyCode, modifiers: prefs.answerHotkeyModifiers)))"
+            }
+        }
     }
 }
 

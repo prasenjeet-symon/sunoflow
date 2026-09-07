@@ -63,6 +63,18 @@ CREATE TABLE IF NOT EXISTS usage (
   count       INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (key_id, day)
 );
+CREATE TABLE IF NOT EXISTS answer_usage (
+  key_id      TEXT NOT NULL,
+  day         TEXT NOT NULL,
+  count       INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (key_id, day)
+);
+CREATE TABLE IF NOT EXISTS stt_usage (
+  key_id      TEXT NOT NULL,
+  day         TEXT NOT NULL,
+  count       INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (key_id, day)
+);
 `)
 	if err != nil {
 		return fmt.Errorf("migrate: %w", err)
@@ -157,6 +169,78 @@ func (s *Store) IncrementUsage(ctx context.Context, keyID string) error {
 		keyID, day)
 	if err != nil {
 		return fmt.Errorf("increment usage: %w", err)
+	}
+	return nil
+}
+
+// AnswerUsageForToday returns how many Suno Answer messages the given meter key
+// has started today (UTC). Same shape as UsageForToday, but over the answer
+// quota ledger: a paid feature metered separately from dictation, so dictation
+// volume can never crowd a user out of their answer allowance — and a heavy
+// answer day never throttles their dictations.
+func (s *Store) AnswerUsageForToday(ctx context.Context, keyID string) (int, error) {
+	day := time.Now().UTC().Format("2006-01-02")
+	var count int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT count FROM answer_usage WHERE key_id = ? AND day = ?`,
+		keyID, day,
+	).Scan(&count)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("answer usage lookup: %w", err)
+	}
+	return count, nil
+}
+
+// IncrementAnswerUsage bumps the per-key per-day answer counter. Best-effort at
+// the call site: a failed write must not fail a request the backend is already
+// streaming.
+func (s *Store) IncrementAnswerUsage(ctx context.Context, keyID string) error {
+	day := time.Now().UTC().Format("2006-01-02")
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO answer_usage (key_id, day, count) VALUES (?, ?, 1)
+		 ON CONFLICT(key_id, day) DO UPDATE SET count = count + 1`,
+		keyID, day)
+	if err != nil {
+		return fmt.Errorf("increment answer usage: %w", err)
+	}
+	return nil
+}
+
+// STTUsageForToday returns how many cloud transcriptions the given meter key
+// has made today (UTC), over the STT ledger. Cloud STT is the warm-start path:
+// it costs real money per call and is metered separately from both dictation
+// (cleanup) and answer, so a burst of warm-start transcriptions can never
+// crowd a user out of their cleanup or answer allowances, or vice versa.
+func (s *Store) STTUsageForToday(ctx context.Context, keyID string) (int, error) {
+	day := time.Now().UTC().Format("2006-01-02")
+	var count int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT count FROM stt_usage WHERE key_id = ? AND day = ?`,
+		keyID, day,
+	).Scan(&count)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("stt usage lookup: %w", err)
+	}
+	return count, nil
+}
+
+// IncrementSTTUsage bumps the per-key per-day STT counter. Best-effort at the
+// call site: a failed write must not fail a transcription the backend is about
+// to perform.
+func (s *Store) IncrementSTTUsage(ctx context.Context, keyID string) error {
+	day := time.Now().UTC().Format("2006-01-02")
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO stt_usage (key_id, day, count) VALUES (?, ?, 1)
+		 ON CONFLICT(key_id, day) DO UPDATE SET count = count + 1`,
+		keyID, day)
+	if err != nil {
+		return fmt.Errorf("increment stt usage: %w", err)
 	}
 	return nil
 }

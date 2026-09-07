@@ -9,21 +9,50 @@ What stays platform-specific (lives in the adapter, NOT here):
   - model loading, inference, and the model's on-disk location
   - the model download manager (file manifest + source URLs differ per platform)
 """
+import json
 import os
 import tempfile
+import threading
+import time
 from collections import deque
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, File, Form, Header, Query, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
-from sidecars.shared.audio import MIN_AUDIO_SECONDS, wav_duration_seconds
-from sidecars.shared.cleanup import NotEntitled, check_entitlement, clean_with_gateway
+from sidecars.shared.answer import MAX_QUERY_LEN, _sse_bytes, stream_answer
+from sidecars.shared.audio import MIN_AUDIO_SECONDS, encode_opus, wav_duration_seconds
+from sidecars.shared.cleanup import (
+    NotEntitled,
+    check_entitlement,
+    clean_with_gateway,
+    keepalive_gateway,
+    transcribe_with_gateway,
+)
 from sidecars.shared.corrections import Corrections
+from sidecars.shared.warmstart import (
+    ROUTE_CLOUD,
+    ROUTE_LOCAL,
+    ROUTE_SHADOW,
+    ROUTE_WAIT,
+    WarmStartController,
+    real_time_factor,
+    word_agreement,
+)
 
 # Option A: keep the last few cleaned dictations so the model has continuity.
 RECENT_HISTORY_N = 3
+
+
+def _cloud_stt_enabled() -> bool:
+    """Master switch for the cloud warm-start path (SUNOFLOW_CLOUD_STT).
+
+    On by default; a dev run or a deployment that never wants cloud STT sets it
+    to 0/false to keep every dictation on-device (or waiting for the model). The
+    per-request consent flag still gates it on top of this.
+    """
+    return os.environ.get("SUNOFLOW_CLOUD_STT", "1").strip().lower() not in ("0", "false", "no", "")
 
 
 class SttAdapter:
@@ -108,6 +137,49 @@ def create_app(adapter: SttAdapter, corrections_path: str) -> FastAPI:
     corrections = Corrections(corrections_path)
     recent_transcripts: "deque[str]" = deque(maxlen=RECENT_HISTORY_N)
 
+    # Warm-start controller: routes dictation cloud→local while the model
+    # downloads, validates local against the cloud, and cuts over. Its cutover
+    # verdict persists next to the corrections file so a machine that already
+    # migrated does not reopen the cloud path on the next launch.
+    warmstart = WarmStartController.from_env(
+        enabled=_cloud_stt_enabled(),
+        state_path=os.path.join(os.path.dirname(corrections_path), "warmstart.json"),
+    )
+    # An install that already has the model on disk never needed warm-start:
+    # treat it as already migrated so an upgrade does not start sending audio to
+    # the cloud to "validate" a model it has been transcribing with locally all
+    # along. New installs launch with nothing on disk, so this does not fire for
+    # them; and once a device has cut over the persisted verdict already covers it.
+    if not warmstart.cut_over and adapter.is_present():
+        warmstart.force_local()
+
+    def _local_transcribe(path: str) -> str:
+        """Run local inference, soft-failing to "" — never breaks a dictation.
+
+        Runs on the caller's thread (the event loop), which is required: MLX's
+        default stream is thread-local, so inference must happen on the thread the
+        model was loaded on, not a threadpool worker.
+        """
+        try:
+            return adapter.transcribe_file(path).strip()
+        except Exception as exc:
+            print(f"Transcription failed, returning empty: {exc}")
+            return ""
+
+    def _local_transcribe_timed(path: str, audio_seconds) -> tuple:
+        """Local inference plus its real-time factor, for the shadow comparison.
+
+        A failure returns ("", inf): agreement then scores 0 and the speed gate
+        never passes, so a broken local model can never trigger a cutover.
+        """
+        t0 = time.perf_counter()
+        try:
+            text = adapter.transcribe_file(path).strip()
+        except Exception as exc:
+            print(f"Shadow local transcription failed: {exc}")
+            return "", float("inf")
+        return text, real_time_factor(time.perf_counter() - t0, audio_seconds)
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         try:
@@ -125,6 +197,11 @@ def create_app(adapter: SttAdapter, corrections_path: str) -> FastAPI:
             if not adapter.load_error:
                 adapter.load_error = str(exc)
             print(f"Could not load model at startup: {exc}")
+        # Keep the gateway TLS connection warm so dictations after an idle gap
+        # don't pay a fresh handshake on the critical path. Daemon; dies with us.
+        threading.Thread(
+            target=keepalive_gateway, name="sf-gateway-keepalive", daemon=True
+        ).start()
         yield
 
     app = FastAPI(lifespan=lifespan)
@@ -160,6 +237,10 @@ def create_app(adapter: SttAdapter, corrections_path: str) -> FastAPI:
         app_id: str = Form("", alias="app"),
         app_site: str = Form(""),
         app_detail: str = Form(""),
+        # The user's per-install consent to cloud STT while the local model
+        # downloads. Defaults False so a client that never sends it (or a user
+        # who declined) never leaves the device — the warm-start path is opt-in.
+        allow_cloud: bool = Form(False),
         device_key: str = Header("", alias="X-SunoFlow-Device-Key"),
     ):
         """Transcribe a clip, and refuse if this device may not dictate.
@@ -173,7 +254,7 @@ def create_app(adapter: SttAdapter, corrections_path: str) -> FastAPI:
         try:
             return await _transcribe_inner(
                 file, cleanup, context, screen, tone, key,
-                app_id, app_site, app_detail,
+                app_id, app_site, app_detail, allow_cloud,
             )
         except NotEntitled as exc:
             # Deliberately NOT a soft failure: an expired or unconnected account
@@ -183,12 +264,13 @@ def create_app(adapter: SttAdapter, corrections_path: str) -> FastAPI:
 
     async def _transcribe_inner(
         file, cleanup, context, screen, tone, key,
-        app_id="", app_site="", app_detail="",
+        app_id="", app_site="", app_detail="", allow_cloud=False,
     ):
+        audio_bytes = await file.read()
         fd, tmp_path = tempfile.mkstemp(suffix=".wav")
         try:
             with os.fdopen(fd, "wb") as tmp:
-                tmp.write(await file.read())
+                tmp.write(audio_bytes)
 
             # STT engines underflow on empty/too-short audio: the mel length goes
             # negative and wraps to a huge unsigned value, so inference tries to
@@ -200,19 +282,72 @@ def create_app(adapter: SttAdapter, corrections_path: str) -> FastAPI:
                 print(f"Skipping transcription: audio too short ({duration} s)")
                 return {"raw": "", "cleaned": ""}
 
-            if not adapter.is_loaded():
-                # The sidecar is up but the STT model isn't loaded yet (user
-                # hasn't downloaded it, or the download is still running).
-                # Surface this as a soft empty result rather than crashing.
-                print("Transcription skipped: model not loaded.")
+            # Warm-start routing. The controller decides where this dictation is
+            # transcribed given the user's cloud consent and whether the local
+            # model is loaded yet; see warmstart.py for the state machine.
+            route = warmstart.route(consent=allow_cloud, model_loaded=adapter.is_loaded())
+
+            # Whether the cloud STT call ran. It enforces entitlement on its own,
+            # so a cloud/shadow route needs no separate check below.
+            used_gateway_stt = False
+            # Which engine produced raw_text, sent to the gateway for its
+            # local-vs-cloud analytics. Default local; cloud/shadow override.
+            stt_source = "local"
+
+            if route == ROUTE_WAIT:
+                # No cloud allowed and the model isn't loaded yet — the pre-feature
+                # behaviour: a soft empty result rather than crashing on inference.
+                print("Transcription skipped: model not loaded (cloud STT off).")
                 return {"raw": "", "cleaned": ""}
 
-            try:
-                raw_text = adapter.transcribe_file(tmp_path).strip()
-            except Exception as exc:
-                # Never let a single bad clip break dictation — fail soft to empty.
-                print(f"Transcription failed, returning empty: {exc}")
-                return {"raw": "", "cleaned": ""}
+            # For a cloud call, compress the WAV to Ogg/Opus (~10x smaller) to
+            # shrink the upload; falls back to raw WAV if compression is
+            # off/unavailable (e.g. no ffmpeg on Windows).
+            upload_bytes, upload_fmt = audio_bytes, "wav"
+            if route in (ROUTE_CLOUD, ROUTE_SHADOW):
+                opus = await run_in_threadpool(encode_opus, tmp_path)
+                if opus:
+                    upload_bytes, upload_fmt = opus, "ogg"
+                    print(f"[stt] opus upload {len(opus)}B (from {len(audio_bytes)}B wav)")
+
+            if route == ROUTE_CLOUD:
+                # Serve the cloud now, and make sure the local model is downloading
+                # in the background so the device can cut over to on-device later.
+                try:
+                    adapter.start_download()
+                except Exception as exc:
+                    print(f"Could not start background model download: {exc}")
+                raw_text = await run_in_threadpool(
+                    transcribe_with_gateway, upload_bytes, key, upload_fmt, ""
+                )
+                used_gateway_stt = True
+                stt_source = "cloud"
+
+            elif route == ROUTE_LOCAL:
+                raw_text = _local_transcribe(tmp_path)
+
+            else:  # ROUTE_SHADOW
+                # Cloud stays authoritative during validation; local runs silently
+                # on the same audio so we can compare speed and accuracy before
+                # trusting it. The user never sees the unvalidated local result.
+                local_text, rtf = _local_transcribe_timed(tmp_path, duration)
+                cloud_text = await run_in_threadpool(
+                    transcribe_with_gateway, upload_bytes, key, upload_fmt, ""
+                )
+                used_gateway_stt = True
+                if cloud_text:
+                    warmstart.record_shadow(
+                        rtf=rtf, agreement=word_agreement(local_text, cloud_text)
+                    )
+                    raw_text = cloud_text
+                    stt_source = "cloud"
+                else:
+                    # Cloud missed this one (a lease-covered outage): fall back to
+                    # the local result we already produced rather than dropping the
+                    # dictation. No sample is recorded — there was nothing to
+                    # compare local against.
+                    raw_text = local_text
+                    stt_source = "local"
         finally:
             os.unlink(tmp_path)
 
@@ -222,7 +357,7 @@ def create_app(adapter: SttAdapter, corrections_path: str) -> FastAPI:
             relevant = corrections.relevant_for(raw_text)
             cleaned_text = await run_in_threadpool(
                 clean_with_gateway, raw_text, context, list(recent_transcripts), screen,
-                key, relevant, tone, app_id, app_site, app_detail,
+                key, relevant, tone, app_id, app_site, app_detail, stt_source,
             )
         else:
             # Cleanup off still has to prove entitlement, or switching it off
@@ -231,7 +366,12 @@ def create_app(adapter: SttAdapter, corrections_path: str) -> FastAPI:
             # voice is applied by the model, and this path makes no model call.
             # The apps are expected to gate the tone picker on cleanup being on
             # rather than leaving the key looking broken.
-            await run_in_threadpool(check_entitlement, key)
+            #
+            # Skip it when the cloud STT call already ran this dictation — that
+            # call enforced entitlement itself, so a second round trip would be
+            # redundant.
+            if not used_gateway_stt:
+                await run_in_threadpool(check_entitlement, key)
             cleaned_text = raw_text
 
         # Apply the learned corrections as the final step so they always win over
@@ -246,6 +386,96 @@ def create_app(adapter: SttAdapter, corrections_path: str) -> FastAPI:
             recent_transcripts.append(cleaned_text)
 
         return {"raw": raw_text, "cleaned": cleaned_text}
+
+    @app.post("/answer")
+    async def answer(
+        query: str = Form(...),
+        history: str = Form("[]"),
+        image: UploadFile = File(None),
+        device_key: str = Header("", alias="X-SunoFlow-Device-Key"),
+    ):
+        """Proxy one Suno Answer turn to the hosted gateway as SSE.
+
+        ``query`` is this turn's dictated question; ``history`` is a JSON array
+        of prior ``{q, a}`` pairs, oldest first, carried from the app's in-memory
+        popup session (A2: nothing persists server-side). ``image`` rides the
+        FIRST turn of a session only (F3/A9 — the screen is frozen once the
+        popup appears; the model cannot re-look, and follow-ups carry text
+        history only).
+
+        The dictionary slice is selected from the corrections file here (D8),
+        keyed on the query — same ``relevant_for`` machinery as /transcribe,
+        different key. The response is always ``text/event-stream``: the
+        gateway's SSE bytes pass through, and pre-stream failures (refusal,
+        limit, outage) are translated into that stream as a single ``error``
+        event so the app parses one shape.
+        """
+        key = device_key.removeprefix("Bearer ").strip()
+        try:
+            turns = json.loads(history) if history else []
+            if not isinstance(turns, list):
+                turns = []
+        except Exception:
+            turns = []
+
+        image_bytes = b""
+        if image is not None:
+            image_bytes = await image.read()
+
+        # Correct the dictated query against the user's dictionary BEFORE the
+        # gateway sees it: a question built from mis-heard words searches for
+        # mis-heard words. In-process regex pass — microseconds, no extra
+        # round trip (latency was the constraint). Corrections only, exactly
+        # like /transcribe: expansions need the model's judgement about
+        # whether the speaker was giving the value or just mentioning the
+        # thing, so they are never substituted blind.
+        corrected = query.strip()[:MAX_QUERY_LEN]
+        if corrected:
+            corrected = corrections.apply(corrected).strip()[:MAX_QUERY_LEN] or corrected
+
+        # The gateway refuses a disconnected device (401/402/403 with our JSON
+        # body) exactly as it does for dictation — same NotEntitled path.
+        try:
+            relevant = corrections.relevant_for(query, limit=40)
+            gen = await run_in_threadpool(
+                stream_answer, corrected or query, turns, image_bytes, key, relevant
+            )
+        except NotEntitled as exc:
+            print(f"Refusing Suno Answer — {exc}")
+            return NotEntitledResponse(str(exc), getattr(exc, "code", "not_entitled"))
+        except ValueError as exc:
+            # Bad query/image from the app itself: the app's own SSE parser
+            # still needs the event shape, so even this comes back in-stream.
+            return StreamingResponse(
+                _error_stream(str(exc), "unavailable"),
+                media_type="text/event-stream",
+            )
+
+        # Tell the app when the dictionary fixed the query: one ``query`` event
+        # ahead of the gateway's stream. The app swaps its user bubble to the
+        # corrected wording — that visible fix is the "we heard you right"
+        # feedback. Nothing is prepended when nothing changed (the common
+        # case), so the stream stays byte-for-byte gateway output.
+        if corrected and corrected != query.strip()[:MAX_QUERY_LEN]:
+            prefix = _sse_bytes("query", {"query": corrected})
+
+            def _prefixed(inner=gen):
+                yield prefix
+                for chunk in inner:
+                    yield chunk
+
+            gen = _prefixed()
+
+        return StreamingResponse(
+            gen,
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    def _error_stream(message: str, code: str):
+        yield (
+            f"event: error\ndata: {json.dumps({'error': code, 'message': message})}\n\n"
+        ).encode("utf-8")
 
     @app.post("/learn")
     async def learn(original: str = Form(...), edited: str = Form(...)):
@@ -320,6 +550,24 @@ def create_app(adapter: SttAdapter, corrections_path: str) -> FastAPI:
             "variant_label": snap.get("variant_label", ""),
             "variant_reason": snap.get("variant_reason", ""),
             "download_bytes": snap.get("download_bytes", 0),
+            # Warm-start state so the app can show a "Cloud → On-device" banner.
+            # Consent-independent fields only (cut_over, progress, gates); the app
+            # combines them with its own cloud-consent pref and model_loaded to
+            # decide what to display. Additive — older clients ignore it.
+            "warm_start": _warm_start_status(),
+        }
+
+    def _warm_start_status() -> dict:
+        snap = warmstart.snapshot(model_loaded=adapter.is_loaded())
+        return {
+            "cut_over": snap["cut_over"],
+            "enabled": snap["enabled"],
+            "samples": snap["samples"],
+            "median_rtf": snap["median_rtf"],
+            "median_agreement": snap["median_agreement"],
+            "rtf_target": snap["rtf_target"],
+            "min_agreement": snap["min_agreement"],
+            "min_samples": snap["min_samples"],
         }
 
     @app.post("/model/download")

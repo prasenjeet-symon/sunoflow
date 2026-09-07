@@ -123,6 +123,31 @@ enum BrandMark {
         return image
     }
 
+    /// The ear and its inner curl as one CGPath — the mark WITHOUT the sound
+    /// waves — scaled to fit and centred in `rect` (Quartz y-up, ready to hand a
+    /// `CAShapeLayer`). The ear's own bounding box is centred, not the 24-box
+    /// (which reserves room on the right for the waves), so the ear alone sits
+    /// dead centre. Returns the path and the stroke width that preserves the
+    /// brand's proportions at this size.
+    static func earMark(in rect: CGRect) -> (path: CGPath, lineWidth: CGFloat) {
+        // Flip SVG (y grows down) into a y-up 24-box, matching CALayer geometry.
+        let flip = CGAffineTransform(translationX: 0, y: box).scaledBy(x: 1, y: -1)
+        let raw = CGMutablePath()
+        raw.addPath(parsed[earPath] ?? parse(earPath), transform: flip)
+        raw.addPath(parsed[curlPath] ?? parse(curlPath), transform: flip)
+        let bb = raw.boundingBoxOfPath
+        guard bb.width > 0, bb.height > 0 else { return (raw, stroke) }
+        // Leave room so the round-capped stroke isn't clipped at the edges.
+        let scale = min(rect.width / bb.width, rect.height / bb.height) * 0.84
+        let place = CGAffineTransform(
+            translationX: rect.midX - scale * bb.midX,
+            y: rect.midY - scale * bb.midY
+        ).scaledBy(x: scale, y: scale)
+        let out = CGMutablePath()
+        out.addPath(raw, transform: place)
+        return (out, stroke * scale)
+    }
+
     // MARK: - SVG path reading
 
     /// Parsed once; the mark is fixed at build time.

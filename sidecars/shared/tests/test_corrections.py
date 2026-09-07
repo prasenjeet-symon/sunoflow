@@ -212,9 +212,9 @@ def test_kind_inferred_for_entries_saved_before_the_field_existed():
 
 
 def test_relevant_for_sends_nothing_when_nothing_matches():
+    """Corrections are filtered to the ones the transcript could need."""
     c, _ = _fresh()
     c.add("cavach", "Kavach")
-    c.add("my Instagram", "https://instagram.com/someone")
     assert c.relevant_for("a totally unrelated sentence") == []
 
 
@@ -228,19 +228,26 @@ def test_relevant_for_matches_correction_literally():
     assert c.relevant_for("scavacher") == []
 
 
-def test_relevant_for_matches_expansion_on_distinctive_words():
-    """The spoken lead-in varies, so an expansion matches on its content words."""
+def test_relevant_for_sends_every_expansion_unmatched():
+    """Expansions are never pre-matched — every one rides along, whether or not
+    the transcript looks like it wants the value. The trigger is hand-typed
+    spoken shorthand the user may spell wrong ("Linkdin" saved while STT writes
+    "LinkedIn"), so matching here can silently drop exactly the entry needed;
+    the model sees the whole sentence and the prompt makes it leave unused
+    entries alone."""
     c, _ = _fresh()
     c.add("my Instagram", "https://instagram.com/someone")
-    for said in [
-        "here is my instagram id",
-        "my Instagram handle is",
-        "you can find me on Instagram",
-    ]:
-        assert c.relevant_for(said) == [
-            {"from": "my Instagram", "to": "https://instagram.com/someone",
-             "kind": KIND_EXPANSION}
-        ], said
+    c.add("Linkdin", "https://www.linkedin.com/in/someone")
+    both = [
+        {"from": "Linkdin", "to": "https://www.linkedin.com/in/someone",
+         "kind": KIND_EXPANSION},
+        {"from": "my Instagram", "to": "https://instagram.com/someone",
+         "kind": KIND_EXPANSION},
+    ]  # order: the sort tie-breaks expansions on len(from)
+    assert c.relevant_for("a totally unrelated sentence") == both
+    # A transcript that clearly wants the value still gets it — now via the
+    # model's judgement, not a trigger match.
+    assert c.relevant_for("include my LinkedIn in the draft") == both
 
 
 def test_relevant_for_caps_and_prefers_most_used():
@@ -255,13 +262,14 @@ def test_relevant_for_caps_and_prefers_most_used():
 
 def test_relevant_for_keeps_expansions_when_capped():
     """Expansions are hand-typed and never learned, so their count is always 0.
-    Sorting on count alone would drop exactly the entries the user cared enough
-    to add by hand."""
+    They also ride along on every call, so when the cap bites it must shed
+    corrections, never a personal value."""
     c, _ = _fresh()
     for i in range(5):
         c.add(f"term{i}", f"Term{i}")
         c.data[f"term{i}"]["count"] = 100 + i
     c.add("my Instagram", "https://instagram.com/someone")
-    text = "my instagram " + " ".join(f"term{i}" for i in range(5))
+    text = " " + " ".join(f"term{i}" for i in range(5))  # matches corrections only
     got = c.relevant_for(text, limit=2)
     assert got[0]["kind"] == KIND_EXPANSION
+    assert got[1]["kind"] == KIND_CORRECTION

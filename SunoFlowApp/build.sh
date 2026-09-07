@@ -20,6 +20,12 @@ if [ -f Resources/AppIcon.icns ]; then
     cp Resources/AppIcon.icns "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
 fi
 
+# The Suno Answer transcript page (markdown + KaTeX + fonts) loads from the
+# bundle's AnswerWeb folder — copy it whole.
+if [ -d Resources/AnswerWeb ]; then
+    cp -R Resources/AnswerWeb "$APP_BUNDLE/Contents/Resources/AnswerWeb"
+fi
+
 # Sign with a STABLE self-signed identity so macOS keeps the Microphone and
 # Accessibility permissions across rebuilds. With ad-hoc signing (codesign -s -)
 # the code identity changes every build, so TCC treats each rebuild as a new app

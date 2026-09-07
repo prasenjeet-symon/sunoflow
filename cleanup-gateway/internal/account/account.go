@@ -77,8 +77,28 @@ type cached struct {
 // actually makes. Revokes that need to be immediate call Forget.
 const DecisionTTL = 15 * time.Minute
 
+// refreshTimeout bounds a background entitlement refresh so a hung Firestore
+// read cannot leak a goroutine forever. It is off the critical path — no
+// dictation waits on it — so it can be generous.
+const refreshTimeout = 10 * time.Second
+
 // Resolver answers "who is this and may they use the service?", caching results
-// briefly so a busy device does not cost a Firestore read per dictation.
+// so a busy device does not cost a Firestore read per dictation.
+//
+// The cache is stale-while-revalidate: a decision within DecisionTTL is served
+// as-is; a decision past it is STILL served immediately, and a single background
+// refresh is kicked off to renew it. So the only dictation that ever waits on
+// Firestore is the very first for a key after the gateway starts (nothing is
+// cached to serve). Every later one — including the first of a new session after
+// a long idle — is served from memory while Firestore is consulted behind it.
+//
+// This does not widen revocation: a device that loses entitlement is already
+// granted up to LeaseTTL (72h) on its signed offline lease, so serving one stale
+// decision while the refresh lands (which, with Firestore up, is within a single
+// dictation) changes nothing the product was actually guaranteeing. Forget still
+// makes a revoke immediate. And serving stale through a Firestore *outage* is a
+// feature: today a cache miss during an outage 503s the dictation; here it keeps
+// working, exactly as the offline lease already intends.
 type Resolver struct {
 	fs  *firestore.Client
 	ttl time.Duration
@@ -90,6 +110,14 @@ type Resolver struct {
 
 	mu    sync.RWMutex
 	cache map[string]cached
+	// refreshing dedups background refreshes so a burst of stale reads for one
+	// key fires a single Firestore lookup, not one per request. Guarded by mu.
+	refreshing map[string]bool
+
+	// spawn runs a background refresh. Production launches a goroutine; tests
+	// override it to run inline, so the async refresh is observable
+	// deterministically. Nil is treated as the goroutine default.
+	spawn func(func())
 
 	// lastSeen throttles device heartbeat writes.
 	seenMu   sync.Mutex
@@ -116,12 +144,14 @@ func New(ctx context.Context, projectID, credentialsFile string) (*Resolver, err
 
 func newWithClient(fs *firestore.Client) *Resolver {
 	r := &Resolver{
-		fs:       fs,
-		ttl:      DecisionTTL,
-		cache:    map[string]cached{},
-		lastSeen: map[string]time.Time{},
-		seenGap:  5 * time.Minute,
-		now:      time.Now,
+		fs:         fs,
+		ttl:        DecisionTTL,
+		cache:      map[string]cached{},
+		refreshing: map[string]bool{},
+		spawn:      func(f func()) { go f() },
+		lastSeen:   map[string]time.Time{},
+		seenGap:    5 * time.Minute,
+		now:        time.Now,
 	}
 	r.lookupFn = r.lookup
 	return r
@@ -136,26 +166,73 @@ func KeyID(plaintext string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// Resolve looks up a key and evaluates entitlement.
+// Resolve looks up a key and evaluates entitlement, stale-while-revalidate:
+// anything already cached is returned immediately, and a decision past the TTL
+// is renewed in the background. Only a key with nothing cached blocks on
+// Firestore — see the Resolver doc comment for why that is the right trade.
 func (r *Resolver) Resolve(ctx context.Context, plaintext string) (Resolution, error) {
 	id := KeyID(plaintext)
 
 	r.mu.RLock()
-	if c, ok := r.cache[id]; ok && r.now().Sub(c.at) < r.ttl {
-		r.mu.RUnlock()
+	c, ok := r.cache[id]
+	r.mu.RUnlock()
+	if ok {
+		if r.now().Sub(c.at) >= r.ttl {
+			// Stale: serve the last-known decision now, renew behind it.
+			r.refreshAsync(id)
+		}
 		return c.res, nil
 	}
-	r.mu.RUnlock()
 
+	// Cold: nothing to serve, so this one call must wait on Firestore.
 	res, err := r.lookupFn(ctx, id)
 	if err != nil {
 		return Resolution{}, err
 	}
+	r.store(id, res)
+	return res, nil
+}
 
+// store caches a resolution stamped at the current time.
+func (r *Resolver) store(id string, res Resolution) {
 	r.mu.Lock()
 	r.cache[id] = cached{res: res, at: r.now()}
 	r.mu.Unlock()
-	return res, nil
+}
+
+// refreshAsync renews one key's decision off the critical path. At most one
+// refresh per key runs at a time; a failed refresh (e.g. a Firestore outage)
+// leaves the last-known decision in place to be retried on the next stale read.
+func (r *Resolver) refreshAsync(id string) {
+	r.mu.Lock()
+	if r.refreshing == nil {
+		r.refreshing = map[string]bool{}
+	}
+	if r.refreshing[id] {
+		r.mu.Unlock()
+		return
+	}
+	r.refreshing[id] = true
+	r.mu.Unlock()
+
+	spawn := r.spawn
+	if spawn == nil {
+		spawn = func(f func()) { go f() }
+	}
+	spawn(func() {
+		defer func() {
+			r.mu.Lock()
+			delete(r.refreshing, id)
+			r.mu.Unlock()
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), refreshTimeout)
+		defer cancel()
+		res, err := r.lookupFn(ctx, id)
+		if err != nil {
+			return // keep the last-known decision; try again on the next stale read
+		}
+		r.store(id, res)
+	})
 }
 
 func (r *Resolver) lookup(ctx context.Context, keyID string) (Resolution, error) {

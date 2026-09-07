@@ -121,6 +121,19 @@ enum DefaultToneHotkey {
     static let fallbackModifiers: UInt32 = UInt32(cmdKey | shiftKey)
 }
 
+/// Built-in Suno Answer shortcut: ⌃⌥Space (A6). Off by default — turning the
+/// feature on in Settings is the consent step (E1/E2), and the Settings toggle
+/// moves the combination to the fallback if it is already taken.
+enum DefaultAnswerHotkey {
+    static let keyCode: UInt32 = 49
+    static let modifiers: UInt32 = UInt32(controlKey | optionKey)
+
+    /// Fallback when ⌃⌥Space is taken: ⌘⌥Space. ⌃⌘Space is deliberately not
+    /// the fallback — it is the macOS emoji picker.
+    static let fallbackKeyCode: UInt32 = 49
+    static let fallbackModifiers: UInt32 = UInt32(cmdKey | optionKey)
+}
+
 /// Formatting + conversion helpers for turning a (keyCode, Carbon modifier mask)
 /// pair into something the user can read, and mapping Cocoa event modifiers to
 /// the Carbon masks `RegisterEventHotKey` expects.

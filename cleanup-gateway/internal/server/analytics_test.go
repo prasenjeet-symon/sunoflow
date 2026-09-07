@@ -59,7 +59,7 @@ func serverWithAnalytics(t *testing.T, fb *fakeBackend) (gw *httptest.Server, ke
 		Analytics:  stats,
 	}
 	limiter := ratelimit.New(st, 1000, 100000, nil)
-	ts := httptest.NewServer(NewMux(srv, limiter, "admin-secret", nil))
+	ts := httptest.NewServer(NewMux(srv, limiter, nil, nil, "admin-secret", nil))
 	t.Cleanup(ts.Close)
 
 	return ts, plaintext, func() []string {
@@ -181,6 +181,67 @@ func TestAnalyticsRecordsTheDimensionsWeActuallyWanted(t *testing.T) {
 	}
 	if e.Properties["had_screen"] != true {
 		t.Errorf("had_screen = %v", e.Properties["had_screen"])
+	}
+}
+
+func TestNormalizeSTTSource(t *testing.T) {
+	cases := map[string]string{
+		"local": "local", "cloud": "cloud",
+		"CLOUD": "cloud", " local ": "local",
+		"": "unknown", "bogus": "unknown", "shadow": "unknown",
+	}
+	for in, want := range cases {
+		if got := normalizeSTTSource(in); got != want {
+			t.Errorf("normalizeSTTSource(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// The local-vs-cloud STT split is the whole point of the field: it must reach
+// the dictation event, and an older sidecar that omits it must read as
+// "unknown" (a distinct bucket), never silently as local or cloud.
+func TestAnalyticsRecordsSTTSource(t *testing.T) {
+	fb := &fakeBackend{resp: "Cleaned."}
+	gw, key, bodies, flush := serverWithAnalytics(t, fb)
+
+	post := func(payload map[string]any) {
+		b, _ := json.Marshal(payload)
+		req, _ := http.NewRequest(http.MethodPost, gw.URL+"/cleanup", bytes.NewReader(b))
+		req.Header.Set("Authorization", "Bearer "+key)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("cleanup: %v", err)
+		}
+		resp.Body.Close()
+	}
+	post(map[string]any{"text": "cloud one", "stt_source": "cloud"})
+	post(map[string]any{"text": "local one", "stt_source": "local"})
+	post(map[string]any{"text": "legacy one"}) // no stt_source → unknown
+	flush()
+
+	seen := map[string]bool{}
+	for _, body := range bodies() {
+		var batch struct {
+			Batch []struct {
+				Event      string         `json:"event"`
+				Properties map[string]any `json:"properties"`
+			} `json:"batch"`
+		}
+		if json.Unmarshal([]byte(body), &batch) != nil {
+			continue
+		}
+		for _, e := range batch.Batch {
+			if e.Event == "dictation" {
+				if s, ok := e.Properties["stt_source"].(string); ok {
+					seen[s] = true
+				}
+			}
+		}
+	}
+	for _, want := range []string{"cloud", "local", "unknown"} {
+		if !seen[want] {
+			t.Errorf("dictation events missing stt_source=%q; saw %v", want, seen)
+		}
 	}
 }
 

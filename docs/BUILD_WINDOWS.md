@@ -245,6 +245,13 @@ cd sidecars\windows
 PyInstaller, and runs `sidecar.spec`. Pass `-Clean:$false` to reuse the venv
 across rebuilds.
 
+**Bundled ffmpeg (LGPL):** `build.ps1` first runs `fetch-ffmpeg.ps1`, which
+downloads a self-contained **LGPL** `ffmpeg.exe` (BtbN's win64 build — no GPL
+components) into `vendor/ffmpeg.exe`; the spec bundles it under `ffmpeg/` and the
+sidecar prepends it to `PATH` at startup. This is only used by the cloud path's
+Opus upload — the ONNX STT engine needs no ffmpeg — so it's optional: if the
+fetch is skipped, Opus simply falls back to sending raw WAV.
+
 Why one-folder (not `--onefile`): `onnxruntime` discovers its execution-provider
 DLLs (`DirectML.dll`, `onnxruntime_providers_shared.dll`) by path at runtime.
 A onefile build extracts to a temp dir not on `PATH`, so provider loading fails.

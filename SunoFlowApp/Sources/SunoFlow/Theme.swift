@@ -89,6 +89,7 @@ extension NSColor {
     static let sunoBody       = NSColor(Theme.body)
     static let sunoFaint      = NSColor(Theme.faint)
     static let sunoAccent     = NSColor(Theme.accent)
+    static let sunoAccentSoft = NSColor(Theme.accentSoft)
     static let sunoSuccess    = NSColor(Theme.success)
     static let sunoWarning    = NSColor(Theme.warning)
 }
@@ -131,6 +132,13 @@ extension Theme {
         static let mass: CGFloat = 1
         static let stiffness: CGFloat = 438  // response 0.30
         static let damping: CGFloat = 40     // dampingFraction 0.95
+    }
+
+    /// The `Animation` tokens' durations for Core Animation (`Animation` in
+    /// SwiftUI carries its duration privately — mirror the numbers here).
+    enum Timing {
+        static let gentle: CFTimeInterval = 0.20
+        static let quick: CFTimeInterval = 0.13
     }
 }
 

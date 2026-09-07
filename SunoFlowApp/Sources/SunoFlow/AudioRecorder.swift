@@ -24,6 +24,12 @@ final class AudioRecorder {
     /// main queue, so a UI (the dictation overlay) can react to the voice.
     var onLevel: ((Float) -> Void)?
 
+    /// The recording's loudness envelope, oldest first — one smoothed level per
+    /// captured buffer. Suno Answer replays it as the waveform inside the
+    /// voice-message bubble, so the shown shape is the voice that was recorded,
+    /// not an ornament. Consumed after stopRecording.
+    private(set) var envelope: [Float] = []
+
     // Diagnostics: how much audio we captured and how loud it was.
     private var capturedFrames: Int = 0
     private var peakAmplitude: Int16 = 0
@@ -31,6 +37,7 @@ final class AudioRecorder {
     func startRecording() throws -> URL {
         capturedFrames = 0
         peakAmplitude = 0
+        envelope = []
 
         selectPreferredInputDevice()
         // A fresh engine so its input node binds to the (possibly just-changed)
@@ -180,6 +187,7 @@ final class AudioRecorder {
         // RMS gives a smoother, more voice-like level than raw peak.
         let rms = sqrt(sumSquares / Double(frames))
         let level = Float(min(1.0, rms * 3.2)) // gentle gain so normal speech fills the meter
+        envelope.append(level)
         if let onLevel = onLevel {
             DispatchQueue.main.async { onLevel(level) }
         }
@@ -210,9 +218,10 @@ final class AudioRecorder {
 
         let seconds = Double(capturedFrames) / 16000.0
         let peakRatio = Double(peakAmplitude) / Double(Int16.max)
+        let env = envelope.count
         AppLog.log(String(
-            format: "stopRecording: captured %d frames (%.2fs), peak amplitude %d (%.1f%% of full scale)%@",
-            capturedFrames, seconds, peakAmplitude, peakRatio * 100,
+            format: "stopRecording: captured %d frames (%.2fs), peak amplitude %d (%.1f%% of full scale), envelope %d pts%@",
+            capturedFrames, seconds, peakAmplitude, peakRatio * 100, env,
             peakAmplitude < 100 ? "  <-- NEAR SILENCE (mic likely muted or permission denied)" : ""
         ))
     }

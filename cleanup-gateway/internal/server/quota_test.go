@@ -71,7 +71,7 @@ func newQuotaFixture(t *testing.T, rpm, daily int, seed func(ctx context.Context
 		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 		LeaseSecret: "quota-test",
 	}
-	ts := httptest.NewServer(NewMux(srv, ratelimit.New(st, rpm, daily, nil), "admin", resolver))
+	ts := httptest.NewServer(NewMux(srv, ratelimit.New(st, rpm, daily, nil), nil, nil, "admin", resolver))
 	t.Cleanup(ts.Close)
 	return quotaFixture{url: ts.URL, backend: be}
 }

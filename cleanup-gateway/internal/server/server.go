@@ -32,6 +32,18 @@ type Server struct {
 	// Analytics counts dictations and users. Nil, or configured without an API
 	// key, means nothing is reported and every call here is a no-op.
 	Analytics *analytics.Client
+
+	// --- Suno Answer (separate seam, D6) ---
+	// AnswerModel names the research model for analytics only (the backend
+	// resolves the real model from its own config); "" reports "unknown".
+	AnswerModel string
+
+	// --- Cloud STT (warm-start dictation path) ---
+	// STT is the cloud speech-to-text provider, or nil when none is configured
+	// (then /stt answers 501). It is a distinct provider from Backend.
+	STT backend.STTBackend
+	// STTProvider names the provider for analytics only ("groq"/"gemini"/"").
+	STTProvider string
 }
 
 // clientHeader is how a sidecar says what it is: "<os>/<version>", e.g.
@@ -62,6 +74,21 @@ func parseClient(h string) (os, version string) {
 		verPart = "unknown"
 	}
 	return osPart, verPart
+}
+
+// normalizeSTTSource clamps the client-supplied stt_source to a known set for
+// analytics: "local", "cloud", or "unknown" for anything else (including an
+// older sidecar that sends nothing). Keeps a stray or attacker-controlled value
+// from becoming an unbounded event dimension.
+func normalizeSTTSource(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "local":
+		return "local"
+	case "cloud":
+		return "cloud"
+	default:
+		return "unknown"
+	}
 }
 
 // now is overridable for tests.
@@ -95,6 +122,12 @@ type cleanupRequest struct {
 	// that never sends the field gets. Either way the user's own wording is
 	// what survives.
 	Tone string `json:"tone"`
+	// STTSource says which engine produced the raw transcript this cleanup is
+	// polishing: "local" (on-device) or "cloud" (the warm-start /stt path). The
+	// gateway cannot infer it — only the sidecar knows the route it took — so it
+	// rides here purely for analytics (the local-vs-cloud split). Absent from a
+	// sidecar that predates it, which the gateway reports as "unknown".
+	STTSource string `json:"stt_source"`
 }
 
 // cleanupResponse is the single response shape.
@@ -110,7 +143,13 @@ type cleanupResponse struct {
 
 // NewMux builds the full router with the middleware chain applied in order:
 // request-id + logging → (per-route) auth → rate-limit → handler.
-func NewMux(s *Server, limiter *ratelimit.Limiter, adminToken string, accounts *account.Resolver) http.Handler {
+//
+// answerLimiter is the separate Suno Answer meter (nil disables /answer with
+// a 501 from its handler — the route is still registered so clients get a
+// structured error rather than a 404). sttLimiter is the equivalent meter for
+// the cloud STT warm-start path; nil skips its middleware, and /stt still
+// answers 501 from its handler when no STT provider is wired.
+func NewMux(s *Server, limiter *ratelimit.Limiter, answerLimiter *ratelimit.AnswerLimiter, sttLimiter *ratelimit.STTLimiter, adminToken string, accounts *account.Resolver) http.Handler {
 	mux := http.NewServeMux()
 
 	// Unauthenticated endpoints.
@@ -144,6 +183,25 @@ func NewMux(s *Server, limiter *ratelimit.Limiter, adminToken string, accounts *
 		http.HandlerFunc(s.handleEntitlement),
 		keyCheck,
 	))
+
+	// Suno Answer (stage 2). Same auth/verdict as /cleanup — a paid feature on
+	// the same entitlement — but its own quota meter: answer messages cost
+	// materially more than a cleanup, so the two allowances are independent.
+	// Built as one chain call so auth runs first, then the answer limiter.
+	answerMiddlewares := []func(http.Handler) http.Handler{keyCheck}
+	if answerLimiter != nil {
+		answerMiddlewares = append(answerMiddlewares, answerLimiter.Middleware)
+	}
+	mux.Handle("POST /answer", chain(http.HandlerFunc(s.handleAnswer), answerMiddlewares...))
+
+	// Cloud STT (warm-start dictation). Same auth/verdict as /cleanup — a paid
+	// feature on the same entitlement — but its own quota meter, since a burst
+	// of warm-start transcriptions must not crowd out cleanup or answer.
+	sttMiddlewares := []func(http.Handler) http.Handler{keyCheck}
+	if sttLimiter != nil {
+		sttMiddlewares = append(sttMiddlewares, sttLimiter.Middleware)
+	}
+	mux.Handle("POST /stt", chain(http.HandlerFunc(s.handleSTT), sttMiddlewares...))
 
 	// Admin endpoints (separate admin token).
 	adminAuth := auth.AdminMiddleware(adminToken)
@@ -200,6 +258,10 @@ func (s *Server) handleCleanup(w http.ResponseWriter, r *http.Request) {
 		Site:   strings.TrimSpace(req.AppSite),
 		Detail: strings.TrimSpace(req.AppDetail),
 	}
+	// Which engine produced this raw transcript (analytics only) — the sidecar's
+	// signal, clamped to a known set so a stray value cannot create an unbounded
+	// event dimension. An older sidecar that sends nothing reports "unknown".
+	sttSource := normalizeSTTSource(req.STTSource)
 
 	started := time.Now()
 	cleaned := s.runCleanup(r.Context(), text, context, recent, screen, app, dict, tone)
@@ -231,6 +293,7 @@ func (s *Server) handleCleanup(w http.ResponseWriter, r *http.Request) {
 			"app":              appName,
 			"dictionary_terms": len(dict),
 			"tone":             tone.String(),
+			"stt_source":       sttSource,
 			"latency_ms":       time.Since(started).Milliseconds(),
 		},
 		PersonProperties: map[string]any{
