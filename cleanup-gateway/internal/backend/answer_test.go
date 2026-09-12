@@ -248,6 +248,87 @@ func TestStreamAnswer_MediaResolution(t *testing.T) {
 	}
 }
 
+// The provider's token accounting rides the final candidate chunk as
+// usageMetadata; the decoder must surface it as a Usage chunk so the handler can
+// pass exact per-request usage on to analytics.
+func TestStreamAnswer_UsageMetadata(t *testing.T) {
+	body := strings.Join([]string{
+		`data: {"candidates":[{"content":{"parts":[{"text":"Partial "}]}}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":4,"thoughtsTokenCount":2,"totalTokenCount":16}}`,
+		`data: {"candidates":[{"content":{"parts":[{"text":"answer"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":8,"thoughtsTokenCount":2,"totalTokenCount":20}}`,
+		"",
+	}, "\n")
+	ts, _ := sseServer(t, body)
+
+	b := &GeminiBackend{APIKey: "k", Model: "m", BaseURL: ts.URL, Timeout: 5 * time.Second, Client: ts.Client()}
+	chunks, err := b.StreamAnswer(context.Background(), "p", nil)
+	if err != nil {
+		t.Fatalf("StreamAnswer: %v", err)
+	}
+	var usage Usage
+	for c := range chunks {
+		if c.Err != nil {
+			t.Fatalf("chunk err: %v", c.Err)
+		}
+		if c.Usage.TotalTokens > 0 {
+			usage = c.Usage
+		}
+	}
+	// The LAST reported usage wins (the final candidate chunk carries the
+	// complete accounting).
+	want := Usage{PromptTokens: 10, OutputTokens: 8, ThinkingTokens: 2, TotalTokens: 20}
+	if usage != want {
+		t.Fatalf("usage = %+v, want %+v", usage, want)
+	}
+}
+
+// A usage chunk with a zero total (provider didn't report) is never emitted —
+// nothing useful to surface downstream.
+func TestStreamAnswer_NoUsageMetadata(t *testing.T) {
+	body := `data: {"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"totalTokenCount":0}}`
+	ts, _ := sseServer(t, body)
+
+	b := &GeminiBackend{APIKey: "k", Model: "m", BaseURL: ts.URL, Timeout: 5 * time.Second, Client: ts.Client()}
+	chunks, err := b.StreamAnswer(context.Background(), "p", nil)
+	if err != nil {
+		t.Fatalf("StreamAnswer: %v", err)
+	}
+	for c := range chunks {
+		if c.Usage.TotalTokens > 0 {
+			t.Fatalf("should not report zero usage, got %+v", c.Usage)
+		}
+	}
+}
+
+// A prompt-level safety block surfaces as its own BlockReason chunk — not an
+// Err — so the handler can record a distinct "blocked" outcome in analytics
+// instead of folding it into a generic backend error.
+func TestStreamAnswer_PromptBlockReason(t *testing.T) {
+	body := `data: {"promptFeedback":{"blockReason":"SAFETY"},"candidates":[]}`
+	ts, _ := sseServer(t, body)
+
+	b := &GeminiBackend{APIKey: "k", Model: "m", BaseURL: ts.URL, Timeout: 5 * time.Second, Client: ts.Client()}
+	chunks, err := b.StreamAnswer(context.Background(), "p", nil)
+	if err != nil {
+		t.Fatalf("StreamAnswer: %v", err)
+	}
+	var got string
+	var gotErr error
+	for c := range chunks {
+		if c.Err != nil {
+			gotErr = c.Err
+		}
+		if c.BlockReason != "" {
+			got = c.BlockReason
+		}
+	}
+	if gotErr != nil {
+		t.Fatalf("block should not surface as an Err, got %v", gotErr)
+	}
+	if got != "SAFETY" {
+		t.Fatalf("BlockReason = %q, want %q", got, "SAFETY")
+	}
+}
+
 func TestDedupeDomains(t *testing.T) {
 	chunks := []geminiGroundingChunk{}
 	for _, h := range []string{"Example.com", "www.example.com", "example.org", "", "example.net"} {

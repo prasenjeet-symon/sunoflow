@@ -149,10 +149,12 @@ func (s *Server) handleAnswer(w http.ResponseWriter, r *http.Request) {
 
 	// Track what happened for the terminal event and analytics.
 	var (
-		textLen   int
-		domains   []string
-		queries   int
-		streamErr error
+		textLen     int
+		domains     []string
+		queries     int
+		streamErr   error
+		blockReason string
+		usage       backend.Usage
 	)
 	ttfb := time.Duration(0)
 
@@ -170,9 +172,16 @@ func (s *Server) handleAnswer(w http.ResponseWriter, r *http.Request) {
 				queries = chunk.SearchQueries
 			}
 		}
+		// Token accounting rides on or near the final chunk; the last reported
+		// (non-zero) usage wins, so a later candidate does not clobber it.
+		if chunk.Usage.TotalTokens > 0 {
+			usage = chunk.Usage
+		}
 		switch {
 		case chunk.Err != nil:
 			streamErr = chunk.Err
+		case chunk.BlockReason != "":
+			blockReason = chunk.BlockReason
 		case chunk.Text != "":
 			textLen += len(chunk.Text)
 			writeEvent("delta", marshalJSON(map[string]string{"text": chunk.Text}))
@@ -183,8 +192,9 @@ func (s *Server) handleAnswer(w http.ResponseWriter, r *http.Request) {
 	// to write to it any more; record the abandon point for analytics (D9).
 	aborted := r.Context().Err() != nil
 
-	// Terminal event. Stream died after the deadline → "timeout" (D3); any
-	// other backend failure → "unavailable". Never a raw fallback (D4).
+	// Terminal event. Stream died after the deadline → "timeout" (D3); a
+	// prompt-level safety block → "blocked"; any other backend failure →
+	// "unavailable". Never a raw fallback (D4).
 	code := "unavailable"
 	if streamErr != nil {
 		if errors.Is(streamErr, context.DeadlineExceeded) {
@@ -192,6 +202,11 @@ func (s *Server) handleAnswer(w http.ResponseWriter, r *http.Request) {
 		}
 		if !aborted {
 			writeEvent("error", marshalJSON(map[string]string{"error": code, "message": "The answer couldn't be generated. Try again."}))
+		}
+	} else if blockReason != "" {
+		code = "blocked"
+		if !aborted {
+			writeEvent("error", marshalJSON(map[string]string{"error": code, "message": "The question couldn't be answered. Try rephrasing."}))
 		}
 	} else if !aborted {
 		if len(domains) > 0 {
@@ -206,6 +221,8 @@ func (s *Server) handleAnswer(w http.ResponseWriter, r *http.Request) {
 	outcome := "ok"
 	if aborted {
 		outcome = "aborted"
+	} else if blockReason != "" {
+		outcome = "blocked"
 	} else if streamErr != nil {
 		outcome = "error"
 		if errors.Is(streamErr, context.DeadlineExceeded) {
@@ -219,15 +236,27 @@ func (s *Server) handleAnswer(w http.ResponseWriter, r *http.Request) {
 		"turn_index":       len(req.History),
 		"query_length":     len(query),
 		"answer_chars":     textLen,
+		"dict_entries":     len(dict),
+		"context_chars":    len(promptText),
 		"source_count":     len(domains),
 		"search_queries":   queries,
 		"outcome":          outcome,
 		"model":            s.AnswerModel,
 		"latency_ttfb_ms":  ttfb.Milliseconds(),
 		"latency_total_ms": time.Since(started).Milliseconds(),
+		// Per-request token usage from the provider (zero when unreported), so
+		// answer cost is measured, not estimated. Thinking tokens are billed as
+		// output but reported apart from the visible answer.
+		"prompt_tokens":   usage.PromptTokens,
+		"output_tokens":   usage.OutputTokens,
+		"thinking_tokens": usage.ThinkingTokens,
+		"total_tokens":    usage.TotalTokens,
 	}
-	if streamErr != nil && !aborted {
+	if (streamErr != nil || blockReason != "") && !aborted {
 		props["error_code"] = code
+	}
+	if blockReason != "" {
+		props["block_reason"] = blockReason
 	}
 	if aborted {
 		props["aborted_at_ms"] = time.Since(started).Milliseconds()
@@ -241,6 +270,20 @@ func (s *Server) handleAnswer(w http.ResponseWriter, r *http.Request) {
 			"app_version": clientVersion,
 		},
 	})
+
+	// Also to the gateway log, so token usage per answer is greppable during
+	// calibration without opening the analytics dashboard.
+	s.Logger.Info("answer",
+		"model", s.AnswerModel,
+		"outcome", outcome,
+		"answer_chars", textLen,
+		"dict_entries", len(dict),
+		"context_chars", len(promptText),
+		"prompt_tokens", usage.PromptTokens,
+		"output_tokens", usage.OutputTokens,
+		"thinking_tokens", usage.ThinkingTokens,
+		"total_tokens", usage.TotalTokens,
+		"latency_ms", time.Since(started).Milliseconds())
 }
 
 // decodeImage validates and decodes the turn-1 screenshot. Empty means "no
