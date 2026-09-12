@@ -10,6 +10,31 @@
   onScroll();
   window.addEventListener("scroll", onScroll, { passive: true });
 
+  /* ---- mobile nav toggle ----
+     The nav links leave the header below 880px and become a dropdown panel.
+     The toggle is hidden by CSS on wide screens, so this wiring is inert there. */
+  var navToggle = document.querySelector(".nav-toggle");
+  var navLinks = document.querySelector(".nav-links");
+  if (navToggle && navLinks) {
+    navToggle.addEventListener("click", function () {
+      var open = navLinks.classList.toggle("open");
+      navToggle.setAttribute("aria-expanded", open ? "true" : "false");
+    });
+    // Close the panel when a link is chosen, and when the user taps outside it.
+    navLinks.addEventListener("click", function (e) {
+      if (e.target.closest("a")) {
+        navLinks.classList.remove("open");
+        navToggle.setAttribute("aria-expanded", "false");
+      }
+    });
+    document.addEventListener("click", function (e) {
+      if (!e.target.closest(".masthead")) {
+        navLinks.classList.remove("open");
+        navToggle.setAttribute("aria-expanded", "false");
+      }
+    });
+  }
+
   /* ---- the little waveform in the listening pill ---- */
   var wave = document.querySelector(".wave");
   if (wave) {
@@ -131,11 +156,9 @@
 
   var BUILDS = {
     mac: {
-      href: "https://github.com/prasenjeet-symon/sunoflow/releases/latest",
       label: "Download for Mac"
     },
     windows: {
-      href: "https://github.com/prasenjeet-symon/sunoflow/releases/latest/download/SunoFlow-Setup.exe",
       // "PC" rather than "Windows" only because the header label has to fit
       // beside the nav at the narrowest width that still shows it.
       label: "Download for PC"
@@ -150,9 +173,9 @@
 
     // The header carries a single button rather than both, because there is
     // no room beside the nav for a choice. It only becomes specific once we
-    // know what to be specific about.
+    // know what to be specific about. The button has no href — downloads are
+    // served from the site, not GitHub.
     document.querySelectorAll("[data-dl-auto]").forEach(function (el) {
-      el.href = BUILDS[platform].href;
       el.textContent = BUILDS[platform].label;
     });
   }

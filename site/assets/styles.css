@@ -126,6 +126,7 @@ em.hl {
   align-items: center;
   justify-content: center;
   gap: 9px;
+  cursor: pointer;
   font-size: 15.5px;
   font-weight: 560;
   letter-spacing: -0.012em;
@@ -171,9 +172,53 @@ em.hl {
 
 .masthead .btn { padding: 10px 20px; font-size: 14.5px; }
 
+/* ---------- mobile nav toggle ----------
+   Below 880px the nav links leave the header and become a dropdown panel
+   under it, opened by a hamburger. The toggle takes the auto-margin that used
+   to push the CTA right, so the CTA sits beside it. */
+.nav-toggle {
+  display: none;
+  margin-left: auto;
+  width: 40px; height: 40px;
+  flex: none;
+  border-radius: 8px;
+  align-items: center; justify-content: center;
+  flex-direction: column; gap: 5px;
+  transition: background-color .16s ease;
+}
+.nav-toggle:hover { background: var(--sand); }
+.nav-toggle span {
+  display: block; width: 18px; height: 2px;
+  background: var(--ink); border-radius: 2px;
+  transition: transform .2s ease, opacity .2s ease;
+}
+.nav-toggle[aria-expanded="true"] span:nth-child(1) { transform: translateY(7px) rotate(45deg); }
+.nav-toggle[aria-expanded="true"] span:nth-child(2) { opacity: 0; }
+.nav-toggle[aria-expanded="true"] span:nth-child(3) { transform: translateY(-7px) rotate(-45deg); }
+
 @media (max-width: 880px) {
-  .nav-links { display: none; }
-  .masthead .btn { margin-left: auto; }
+  .nav-toggle { display: inline-flex; }
+  .nav-links {
+    display: none;
+    position: absolute;
+    top: 66px; left: 0; right: 0;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0;
+    margin: 0;
+    background: var(--paper);
+    border-bottom: 1px solid var(--line);
+    box-shadow: 0 24px 40px -32px rgba(20,20,26,.35);
+    padding: 6px var(--pad) 16px;
+  }
+  .nav-links.open { display: flex; }
+  .nav-links a {
+    padding: 14px 0;
+    border-bottom: 1px solid var(--line);
+    font-size: 16px;
+    white-space: normal;
+  }
+  .nav-links a:last-child { border-bottom: 0; }
 }
 
 /* ---------- hero ---------- */
@@ -713,4 +758,26 @@ footer { border-top: 1px solid var(--line); padding-block: clamp(40px, 5vw, 58px
 @media (max-width: 620px) {
   .drow { flex-wrap: wrap; }
   .drow .val, .drow .actions { margin-left: 0; width: 100%; }
+
+  /* dashboard bar: email truncates harder so the sign-out button never wraps
+     off the row on a narrow phone */
+  .dash-bar .shell { gap: 10px; }
+  .dash-who { gap: 10px; }
+  .dash-who .email { max-width: 120px; }
+
+  /* plan header: the price and the pill/button stack instead of fighting */
+  .plan-head .side { margin-left: 0; width: 100%; flex-wrap: wrap; }
+
+  /* vocabulary rows: let the tail drop to its own line rather than squeeze */
+  .vocab-row { flex-wrap: wrap; }
+  .vocab-row .tail { margin-left: 0; width: 100%; }
+
+  /* the floating pill over the app mock: keep it inside the card */
+  .pill { bottom: -20px; padding: 10px 16px 10px 12px; gap: 10px; }
+  .pill .label { font-size: 12.5px; }
+
+  /* comfortable tap targets on touch screens */
+  .btn { min-height: 44px; }
+  .nav-links a { min-height: 44px; }
+  .faq summary { padding-block: 18px; }
 }

@@ -29,7 +29,7 @@
       SunoFlow
     </a>
 
-    <nav class="nav-links" aria-label="Primary">
+    <nav class="nav-links" id="nav-links" aria-label="Primary">
       <a href="#how">How it works</a>
       <a href="use-cases.html">Use cases</a>
       <a href="pricing.html">Pricing</a>
@@ -40,7 +40,11 @@
 
     <!-- app.js names the platform and points this at the matching build; the
          plain label and the releases page are what a visitor gets without it. -->
-    <a class="btn btn-primary" data-dl-auto href="https://github.com/prasenjeet-symon/sunoflow/releases/latest">Download</a>
+    <a class="btn btn-primary" data-dl-auto>Download</a>
+
+    <button class="nav-toggle" type="button" aria-label="Menu" aria-expanded="false" aria-controls="nav-links">
+      <span></span><span></span><span></span>
+    </button>
   </div>
 </header>
 
@@ -59,18 +63,18 @@
     <!-- Both builds sit in the markup and CSS narrows the row to the one that
          will actually run, so a visitor we cannot identify still sees both. -->
     <div class="hero-cta" data-downloads>
-      <a class="btn btn-primary btn-lg" data-dl="mac" href="https://github.com/prasenjeet-symon/sunoflow/releases/latest">
+      <a class="btn btn-primary btn-lg" data-dl="mac">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5v11m0 0-4.2-4.2M12 14.5l4.2-4.2"/><path d="M4.5 17v1.6a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V17"/></svg>Download for Mac
       </a>
-      <a class="btn btn-primary btn-lg" data-dl="windows" href="https://github.com/prasenjeet-symon/sunoflow/releases/latest/download/SunoFlow-Setup.exe">
+      <a class="btn btn-primary btn-lg" data-dl="windows">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5v11m0 0-4.2-4.2M12 14.5l4.2-4.2"/><path d="M4.5 17v1.6a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V17"/></svg>Download for Windows
       </a>
       <a class="btn btn-quiet btn-lg" href="#how">See how it works</a>
     </div>
 
     <p class="dl-alt">
-      <span data-dl-alt="windows">On a PC? <a href="https://github.com/prasenjeet-symon/sunoflow/releases/latest/download/SunoFlow-Setup.exe">Download for Windows</a></span>
-      <span data-dl-alt="mac">On a Mac? <a href="https://github.com/prasenjeet-symon/sunoflow/releases/latest">Download for Mac</a></span>
+      <span data-dl-alt="windows">On a PC? <a>Download for Windows</a></span>
+      <span data-dl-alt="mac">On a Mac? <a>Download for Mac</a></span>
     </p>
 
     <p class="hero-note">
@@ -508,18 +512,18 @@
       <!-- Both builds sit in the markup and CSS narrows the row to the one that
            will actually run, so a visitor we cannot identify still sees both. -->
       <div class="hero-cta" data-downloads>
-        <a class="btn btn-primary btn-lg" data-dl="mac" href="https://github.com/prasenjeet-symon/sunoflow/releases/latest">
+        <a class="btn btn-primary btn-lg" data-dl="mac">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5v11m0 0-4.2-4.2M12 14.5l4.2-4.2"/><path d="M4.5 17v1.6a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V17"/></svg>Download for Mac
         </a>
-        <a class="btn btn-primary btn-lg" data-dl="windows" href="https://github.com/prasenjeet-symon/sunoflow/releases/latest/download/SunoFlow-Setup.exe">
+        <a class="btn btn-primary btn-lg" data-dl="windows">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5v11m0 0-4.2-4.2M12 14.5l4.2-4.2"/><path d="M4.5 17v1.6a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V17"/></svg>Download for Windows
         </a>
         <a class="btn btn-quiet btn-lg" href="pricing.html">See pricing</a>
       </div>
 
       <p class="dl-alt">
-        <span data-dl-alt="windows">On a PC? <a href="https://github.com/prasenjeet-symon/sunoflow/releases/latest/download/SunoFlow-Setup.exe">Download for Windows</a></span>
-        <span data-dl-alt="mac">On a Mac? <a href="https://github.com/prasenjeet-symon/sunoflow/releases/latest">Download for Mac</a></span>
+        <span data-dl-alt="windows">On a PC? <a>Download for Windows</a></span>
+        <span data-dl-alt="mac">On a Mac? <a>Download for Mac</a></span>
       </p>
 
       <p class="hero-note">
@@ -560,10 +564,9 @@
         </div>
         <div class="foot-col">
           <span class="h">Get it</span>
-          <a data-dl="mac" href="https://github.com/prasenjeet-symon/sunoflow/releases/latest">Download for Mac</a>
-          <a data-dl="windows" href="https://github.com/prasenjeet-symon/sunoflow/releases/latest/download/SunoFlow-Setup.exe">Download for Windows</a>
+          <a data-dl="mac">Download for Mac</a>
+          <a data-dl="windows">Download for Windows</a>
           <a href="pricing.html">Pricing &amp; trial</a>
-          <a href="https://github.com/prasenjeet-symon/sunoflow">Project on GitHub</a>
         </div>
       </div>
     </div>
