@@ -178,6 +178,9 @@ final class AnswerPanelView: NSView {
     var onRetry: (() -> Void)?
     var onInsert: (() -> Void)?
     var onCopy: (() -> Void)?
+    /// Save the try-on image (NSSavePanel) — wired by the flow, which owns
+    /// the last image.
+    var onSave: (() -> Void)?
     var onDismiss: (() -> Void)?
     var onPanelClicked: (() -> Void)?
     /// The input row's mic button was clicked (start / stop a dictated follow-up).
@@ -716,6 +719,8 @@ final class AnswerPanelView: NSView {
 
     @objc private func copyTapped() { onCopy?() }
 
+    @objc private func saveTapped() { onSave?() }
+
     @objc private func retryTapped() { retryAction?() }
 
     func focusInput() {
@@ -859,6 +864,33 @@ final class AnswerPanelView: NSView {
         setActions(.answer)
     }
 
+    // MARK: try-on card
+
+    /// The "Trying it on…" pending card in the transcript (web side renders
+    /// it; this clears stale retry wiring like every other new turn).
+    func showTryonPending() {
+        retryAction = nil
+        web.showTryonPending()
+        scrollToBottomIfNeeded(force: true)
+    }
+
+    /// The finished try-on image: a rounded card in the transcript, and the
+    /// action row flips to Copy / Save (no Insert — it's an image, not text).
+    func showTryonImage(base64: String) {
+        retryAction = nil
+        web.showTryonImage(base64: base64)
+        setActions(.tryon)
+        scrollToBottomIfNeeded(force: true)
+    }
+
+    /// Try-on asked for but no person photo on file — an informational card,
+    /// not an error; the answer itself keeps streaming.
+    func showTryonSetup() {
+        retryAction = nil
+        web.showTryonSetup()
+        scrollToBottomIfNeeded(force: true)
+    }
+
     /// True while an error card is on the transcript — its "Try again" is
     /// wired and waiting. Used to keep the status label honest when a
     /// follow-up recording is cancelled over a parked failure.
@@ -866,7 +898,7 @@ final class AnswerPanelView: NSView {
 
     // MARK: action row
 
-    private enum ActionSet { case none, answer, error }
+    private enum ActionSet { case none, answer, error, tryon }
 
     private func setActions(_ set: ActionSet) {
         actionRow.views.forEach { $0.removeFromSuperview() }
@@ -878,6 +910,10 @@ final class AnswerPanelView: NSView {
         case .answer:
             actionRow.addArrangedSubview(actionButton("Insert", #selector(insertTapped)))
             actionRow.addArrangedSubview(actionButton("Copy", #selector(copyTapped)))
+        case .tryon:
+            // No Insert: an image is not text to paste at the cursor.
+            actionRow.addArrangedSubview(actionButton("Copy", #selector(copyTapped)))
+            actionRow.addArrangedSubview(actionButton("Save", #selector(saveTapped)))
         }
         // The action row arrives with its turn, not before it.
         actionRow.alphaValue = 0

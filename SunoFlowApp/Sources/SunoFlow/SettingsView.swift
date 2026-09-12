@@ -1,6 +1,7 @@
 import AVFoundation
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 // MARK: - Hotkey recorder
 
@@ -477,7 +478,7 @@ private struct CorrectionsManager: View {
 
 /// Sidebar tabs for the dashboard.
 private enum Tab: String, CaseIterable, Identifiable {
-    case overview, account, general, microphone, model, corrections, about
+    case overview, account, general, microphone, model, corrections, tryon, about
 
     var id: String { rawValue }
 
@@ -489,6 +490,7 @@ private enum Tab: String, CaseIterable, Identifiable {
         case .microphone: return "Microphone"
         case .model: return "Speech Model"
         case .corrections: return "Dictionary"
+        case .tryon: return "Try-on"
         case .about: return "About"
         }
     }
@@ -501,6 +503,7 @@ private enum Tab: String, CaseIterable, Identifiable {
         case .microphone: return "mic.fill"
         case .model: return "waveform.badge.magnifyingglass"
         case .corrections: return "text.badge.checkmark"
+        case .tryon: return "person.crop.square"
         case .about: return "info.circle.fill"
         }
     }
@@ -513,6 +516,7 @@ private enum Tab: String, CaseIterable, Identifiable {
         case .microphone: return "Choose which input SunoFlow listens to"
         case .model: return "The speech-to-text model"
         case .corrections: return "Spellings it has learned, and shorthand you add"
+        case .tryon: return "See an item on your screen worn by you"
         case .about: return "Version and resources"
         }
     }
@@ -563,6 +567,9 @@ struct SettingsView: View {
     @State private var modelStatus: ModelStatus?
     @State private var modelDownloadStarting = false
     @State private var modelPollTimer: Timer?
+
+    // Whether a personal photo is on file for Suno Try-on — drives the Try-on tab UI.
+    @State private var photoExists = PersonPhoto.exists
 
     private var appVersion: String {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
@@ -700,24 +707,31 @@ struct SettingsView: View {
 
     // MARK: Content
 
+    // The tab switch lives here, not inline in `content`'s Group — with eight
+    // branches the inline switch blew the type-checker's expression budget and
+    // Group lost its inferred type.
+    @ViewBuilder
+    private var selectedSection: some View {
+        switch selectedTab {
+        case .overview: overviewSection
+        case .account: accountSection
+        case .general: generalSection
+        case .microphone: microphoneSection
+        case .model: modelSection
+        case .corrections: correctionsSection
+        case .tryon: tryonSection
+        case .about: aboutSection
+        }
+    }
+
     private var content: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
                 header
 
-                Group {
-                    switch selectedTab {
-                    case .overview: overviewSection
-                    case .account: accountSection
-                    case .general: generalSection
-                    case .microphone: microphoneSection
-                    case .model: modelSection
-                    case .corrections: correctionsSection
-                    case .about: aboutSection
-                    }
-                }
-                .id(selectedTab)
-                .transition(.opacity)
+                selectedSection
+                    .id(selectedTab)
+                    .transition(.opacity)
             }
             .padding(.horizontal, Theme.Space.page)
             .padding(.bottom, 56)
@@ -1682,6 +1696,61 @@ struct SettingsView: View {
 
     // MARK: About
 
+    @ViewBuilder
+    private var tryonSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SectionLabel(text: "Photo")
+            Rule(strong: true)
+            tryonPhotoRow
+            Rule(strong: true)
+
+            SectionLabel(text: "How it works")
+            Rule(strong: true)
+            SunoNotice(
+                text: "Try-on rides a Suno Answer question — with a photo on file, ask how an item on your screen would look on you.",
+                systemImage: "sparkles",
+                color: Theme.accent
+            )
+        }
+    }
+
+    // The row is split on photoExists so each branch is a plain SunoRow —
+    // ternaries over the title/icon/trailing together blow the type-checker's
+    // expression budget and the enclosing Group loses its inferred type.
+    @ViewBuilder
+    private var tryonPhotoRow: some View {
+        if photoExists {
+            SunoRow(
+                title: "Ready — photo on file",
+                subtitle: "Your photo stays on this Mac and is sent only to generate try-ons. It is never added to your dictionary or logs.",
+                systemImage: "person.crop.square",
+                iconColor: Theme.success,
+                divider: false
+            ) {
+                HStack(spacing: 12) {
+                    Button("Choose Photo…") { pickPersonPhoto() }
+                        .buttonStyle(.sunoPrimary)
+                    Button("Remove") {
+                        PersonPhoto.wipe()
+                        photoExists = false
+                    }
+                    .buttonStyle(.sunoSecondary)
+                }
+            }
+        } else {
+            SunoRow(
+                title: "Add a photo to enable try-on",
+                subtitle: "Your photo stays on this Mac and is sent only to generate try-ons. It is never added to your dictionary or logs.",
+                systemImage: "person.crop.square",
+                iconColor: Theme.warning,
+                divider: false
+            ) {
+                Button("Choose Photo…") { pickPersonPhoto() }
+                    .buttonStyle(.sunoPrimary)
+            }
+        }
+    }
+
     private var aboutSection: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 14) {
@@ -1725,6 +1794,23 @@ struct SettingsView: View {
     }
 
     // MARK: Loading & saving
+
+    private func pickPersonPhoto() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.image]
+        panel.message = "Choose a photo of yourself — your face is enough; the item comes from the try-on request."
+        panel.begin { response in
+            guard response == .OK, let url = panel.url,
+                  let image = NSImage(contentsOf: url) else { return }
+            let saved = PersonPhoto.save(image)
+            DispatchQueue.main.async {
+                photoExists = saved && PersonPhoto.exists
+            }
+        }
+    }
 
     private func load() {
         inputDevices = AudioDevices.inputDevices()

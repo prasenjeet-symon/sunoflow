@@ -147,7 +147,9 @@ enum ForegroundApp {
 
     // MARK: - AX plumbing
 
-    private static func focusedWindow(of appElement: AXUIElement) -> AXUIElement? {
+    /// The app's focused window, falling back to its main window. Shared with
+    /// AnswerFlow's try-on context, which reads the same title.
+    static func focusedWindow(of appElement: AXUIElement) -> AXUIElement? {
         for attribute in [kAXFocusedWindowAttribute, kAXMainWindowAttribute] {
             if let w = copyAttribute(appElement, attribute) {
                 return (w as! AXUIElement)
@@ -186,7 +188,7 @@ enum ForegroundApp {
         return ""
     }
 
-    private static func copyAttribute(_ element: AXUIElement, _ attribute: String) -> CFTypeRef? {
+    static func copyAttribute(_ element: AXUIElement, _ attribute: String) -> CFTypeRef? {
         var value: CFTypeRef?
         let err = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
         return err == .success ? value : nil

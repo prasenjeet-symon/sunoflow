@@ -9,6 +9,7 @@
 // the single seam the real client replaces.
 
 import AppKit
+import UniformTypeIdentifiers
 
 /// Raw display capture for a question (F3/A9: the image rides turn 1 only).
 ///
@@ -102,6 +103,11 @@ final class AnswerFlow: NSObject {
     private var dictatedSeconds: Double = 0
     private var streamText = ""
     private var lastAnswer: String?
+    /// The last try-on image — Copy and Save act on it while the session lives.
+    private var lastImage: NSImage?
+    /// The try-on generation riding the current turn's stream, and the
+    /// item name the answer surfaced. The garment is this turn's `screenshot`.
+    private var tryonTask: URLSessionDataTask?
 
     /// This session's prior turns, oldest first — the only memory the gateway
     /// gets (it is stateless; F3/A9). Turn 1 is empty; every answer that
@@ -133,11 +139,19 @@ final class AnswerFlow: NSObject {
         popup.panelView?.onRetry = { [weak self] in self?.retry() }
         popup.panelView?.onInsert = { [weak self] in self?.insertLast() }
         popup.panelView?.onCopy = { [weak self] in
-            guard let self, let text = self.lastAnswer, !text.isEmpty else { return }
+            guard let self else { return }
+            if let image = self.lastImage {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setData(image.tiffRepresentation, forType: .tiff)
+                AppLog.log("tryon: copied image")
+                return
+            }
+            guard let text = self.lastAnswer, !text.isEmpty else { return }
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(text, forType: .string)
             AppLog.log("answer: copied \(text.count) chars")
         }
+        popup.panelView?.onSave = { [weak self] in self?.saveTryonImage() }
         popup.panelView?.onDismiss = { [weak self] in self?.dismiss() }
         popup.panelView?.onPanelClicked = { [weak self] in self?.panelClicked() }
         // The input row's mic = the hotkey while the popup is open: same
@@ -515,7 +529,8 @@ final class AnswerFlow: NSObject {
             AnswerClient.Request(
                 query: query,
                 history: history,
-                imageJPEG: screenshot.flatMap { ScreenShot.jpegData($0) }
+                imageJPEG: screenshot.flatMap { ScreenShot.jpegData($0) },
+                tryonAvailable: PersonPhoto.exists
             ),
             onEvent: { [weak self] event in
                 guard let self, self.generation == gen else { return }
@@ -552,6 +567,8 @@ final class AnswerFlow: NSObject {
             popup.panelView?.appendAnswer(text)
         case .sources:
             break // cited-source chips are not shown; the event is ignored
+        case .tryon(let item):
+            handleTryon(item: item, gen: gen)
         case .done:
             finishStream()
         case .error:
@@ -592,6 +609,108 @@ final class AnswerFlow: NSObject {
         default:          flowError = .unavailable
         }
         showError(flowError)
+    }
+
+    // MARK: try-on (the `tryon` event rides the answer stream)
+
+    /// The answer surfaced a try-on request for `item`. With a person photo on
+    /// file the generation runs right beside the still-streaming answer — the
+    /// pending card lands first, the image replaces it when it lands. Without
+    /// one, an informational card points at Settings; the answer keeps
+    /// streaming either way. The garment is this turn's screenshot (the capture
+    /// the answer turn already paid for — no recapture).
+    private func handleTryon(item: String, gen: Int) {
+        guard PersonPhoto.exists, let garmentJPEG = screenshot.flatMap({ ScreenShot.jpegData($0) }),
+              let personJPEG = PersonPhoto.loadJPEG() else {
+            AppLog.log("answer: tryon requested (\(item)) but no person photo on file")
+            popup.panelView?.showTryonSetup()
+            return
+        }
+        AppLog.log("tryon: requested item=\(item) gen=\(gen) garment=\(garmentJPEG.count)B")
+        popup.panelView?.showTryonPending()
+        tryonTask = TryonClient.generate(
+            item: item,
+            query: query,
+            personJPEG: personJPEG,
+            garmentJPEG: garmentJPEG,
+            context: tryonContext()
+        ) { [weak self] result in
+            guard let self, self.generation == gen else { return }
+            DispatchQueue.main.async {
+                guard self.generation == gen else { return }
+                switch result {
+                case .success(let image):
+                    guard let data = PersonPhoto.jpegData(image, quality: 0.9) else {
+                        self.showTryonFailure(TryonClientError.unavailable)
+                        return
+                    }
+                    AppLog.log("tryon: done item=\(item) (\(data.count)B)")
+                    self.lastImage = image
+                    self.popup.panelView?.showTryonImage(base64: data.base64EncodedString())
+                case .failure(let error):
+                    self.showTryonFailure(error)
+                }
+            }
+        }
+    }
+
+    /// A failed generation clears the pending card and shows its message as an
+    /// error card. A 402 refusal is NOT here: it opens the account sheet, like
+    /// every other entitlement refusal, and the session goes with it.
+    private func showTryonFailure(_ error: TryonClientError) {
+        if case .notEntitled(let code, let message) = error {
+            AppLog.log("tryon: not entitled (\(code))")
+            dismiss()
+            NotificationCenter.default.post(
+                name: .sunoAnswerNotEntitled, object: nil,
+                userInfo: ["message": message, "code": code]
+            )
+            return
+        }
+        AppLog.log("tryon: failed (\(error))")
+        popup.panelView?.showErrorCard(message: error.message) { [weak self] in self?.retry() }
+    }
+
+    /// Save the last try-on image through NSSavePanel. The panel is a sheet on
+    /// the popup, so the conversation stays put.
+    private func saveTryonImage() {
+        guard let image = lastImage else { return }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "Suno Try-on"
+        panel.allowedContentTypes = [.png]
+        guard let win = popup.panelView?.window else { return }
+        panel.beginSheetModal(for: win) { [weak self] response in
+            guard response == .OK, let url = panel.url,
+                  let data = PersonPhoto.jpegData(image, quality: 0.95) else { return }
+            do {
+                try data.write(to: url, options: .atomic)
+                AppLog.log("tryon: saved \(url.lastPathComponent)")
+            } catch {
+                NSSound.beep()
+                AppLog.log("tryon: save failed: \(error)")
+            }
+        }
+    }
+
+    /// Observed context for the generation: frontmost app name and window
+    /// title, read live at call time (the try-on fires mid-turn, so the target
+    /// app is still frontmost). Best-effort; empty strings are fine.
+    private func tryonContext() -> [String: String] {
+        guard let front = NSWorkspace.shared.frontmostApplication,
+              front.processIdentifier != ProcessInfo.processInfo.processIdentifier else {
+            return [:]
+        }
+        var app = front.localizedName ?? ""
+        var window = ""
+        // NSRunningApplication has no window access; the focused window's title
+        // comes through the same Accessibility read ForegroundApp uses.
+        let appElement = AXUIElementCreateApplication(front.processIdentifier)
+        if let focused = ForegroundApp.focusedWindow(of: appElement) {
+            window = (ForegroundApp.copyAttribute(focused, kAXTitleAttribute) as? String) ?? ""
+        }
+        if app.count > 80 { app = String(app.prefix(80)) }
+        if window.count > 200 { window = String(window.prefix(200)) }
+        return ["app": app, "window": window]
     }
 
     private func finishStream() {
@@ -700,6 +819,7 @@ final class AnswerFlow: NSObject {
         dictatedEnvelope = nil
         dictatedSeconds = 0
         lastAnswer = nil
+        lastImage = nil
         screenshot = nil
         history = []
         preFollowUpState = .showing
@@ -711,6 +831,8 @@ final class AnswerFlow: NSObject {
         tokenTimer = nil
         streamTask?.cancel()
         streamTask = nil
+        tryonTask?.cancel()
+        tryonTask = nil
     }
 
     private func panelClicked() {

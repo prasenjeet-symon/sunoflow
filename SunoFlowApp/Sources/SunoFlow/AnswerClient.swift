@@ -7,6 +7,7 @@
 //
 // Wire contract (sidecar → app, byte-for-byte from the gateway):
 //   meta    {"lease": "..."}           first event, always
+//   tryon   {"item": "..."}            a try-on request surfaced by the answer
 //   delta   {"text": "..."}            one fragment of the answer
 //   sources {"domains":[...],"queries":N}
 //   done    {}
@@ -63,6 +64,9 @@ enum AnswerClient {
         var query: String
         var history: [(q: String, a: String)]
         var imageJPEG: Data?
+        /// True when a person photo is on file: the sidecar forwards the flag
+        /// so the gateway may emit a tryon event at all. Absent ⇒ "false".
+        var tryonAvailable: Bool
     }
 
     /// Events an answer stream yields, in order.
@@ -72,6 +76,10 @@ enum AnswerClient {
         /// dictionary before forwarding it. Carries the corrected wording —
         /// arrives before any delta, turn 1 or follow-up.
         case query(String)
+        /// The answer's text asked to try the named item on the user — the
+        /// gateway holds the marker back from the deltas and sends it as its
+        /// own event. The flow runs the generation and shows the image.
+        case tryon(item: String)
         case delta(String)
         case sources(domains: [String], queries: Int)
         case done
@@ -113,6 +121,9 @@ enum AnswerClient {
             body.append("\r\n".data(using: .utf8)!)
         }
         field("query", request.query)
+        if request.tryonAvailable {
+            field("tryon", "true")
+        }
         let historyJSON: String = {
             // JSONSerialization, not hand-rolled escaping — a dictated quote
             // inside a question must not break the array.
@@ -166,7 +177,7 @@ enum AnswerClient {
             var sawError = false
             for event in parseSSE(data) {
                 switch event {
-                case .query, .delta, .sources, .meta:
+                case .query, .delta, .sources, .meta, .tryon:
                     onEvent(event)
                 case .done:
                     sawDone = true
@@ -210,6 +221,11 @@ enum AnswerClient {
                 if let obj = try? JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any],
                    let text = obj["query"] as? String, !text.isEmpty {
                     events.append(.query(text))
+                }
+            case "tryon":
+                if let obj = try? JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any],
+                   let item = obj["item"] as? String, !item.isEmpty {
+                    events.append(.tryon(item: item))
                 }
             case "delta":
                 if let obj = try? JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any],

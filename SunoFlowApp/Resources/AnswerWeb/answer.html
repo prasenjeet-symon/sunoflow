@@ -97,6 +97,19 @@
     animation: rise 0.22s cubic-bezier(0.2, 0.7, 0.3, 1) both;
   }
 
+  /* ---- try-on: the user's photo wearing an item from the screen -------- */
+  /* The pending card borrows the marker look (transient, cleared by the next
+     turn or an error card); the image is a settled turn of its own — the
+     newest thing in the transcript, so the minimized peek shows it. */
+  .tryon { margin: 2px 0 14px 0; }
+  .tryon img {
+    display: block;
+    max-width: 240px;
+    width: 100%;
+    border-radius: 10px;
+    border: 1px solid var(--rule);
+  }
+
   /* New turns settle up into place — a shorter, gentler version of the
      panel's own spring drop, so the motion idea stays one idea. */
   @keyframes rise {
@@ -104,7 +117,7 @@
     to   { opacity: 1; transform: translateY(0); }
   }
   @media (prefers-reduced-motion: reduce) {
-    .voice, .typed, .answer, .marker, .thinking-dot { animation: none; }
+    .voice, .typed, .answer, .marker, .thinking-dot, .tryon { animation: none; }
   }
 
   /* ---- answer ---------------------------------------------------------- */
@@ -586,6 +599,43 @@
     liveAnswer = null;
   }
 
+  // ---------------------------------------------------------------- try-on
+  //
+  // A `tryon` event asks to try the named item on the user's own photo. The
+  // pending card breathes like the thinking line and rides as a marker, so a
+  // new turn's removeMarker clears a stale one; the image replaces it as a
+  // settled turn the minimized peek can show.
+
+  var liveTryon = null;
+
+  function removeTryonPending() {
+    if (liveTryon && liveTryon.parentNode) liveTryon.remove();
+    liveTryon = null;
+  }
+
+  function showTryonPending() {
+    removeTryonPending();
+    liveTryon = addMarker("tryon", "");
+    liveTryon.classList.add("tryon");
+    var row = el("div", "thinking");
+    row.appendChild(el("span", "thinking-dot"));
+    row.appendChild(el("span", "thinking-dot"));
+    row.appendChild(el("span", "thinking-dot"));
+    row.appendChild(el("span", null, "Trying it on…"));
+    liveTryon.appendChild(row);
+  }
+
+  function showTryonImage(base64) {
+    removeTryonPending();
+    var box = el("div", "tryon");
+    var img = document.createElement("img");
+    img.alt = "Try-on";
+    img.src = "data:image/png;base64," + base64;
+    box.appendChild(img);
+    root.appendChild(box);
+    markLatest(box);              // the newest turn is the peek's target
+  }
+
   // ------------------------------------------------------------ session ops
 
   function removeMarker() {
@@ -597,6 +647,7 @@
     root.textContent = "";
     turnCount = 0;
     liveAnswer = null;
+    liveTryon = null;
   }
 
   // ------------------------------------------------------------ JS bridge
@@ -613,12 +664,16 @@
     commitListening: commitListening,
     cancelListening: cancelListening,
     showThinking: function () { addMarker("thinking", "Thinking…"); },
-    showError: function (message) { addMarker("error", message); },
+    showError: function (message) { removeTryonPending(); addMarker("error", message); },
     removeMarker: removeMarker,
     beginAnswer: beginAnswer,
     appendAnswer: appendAnswer,
     endAnswer: endAnswer,
-    setCompact: setCompact
+    setCompact: setCompact,
+    showTryonPending: showTryonPending,
+    showTryonImage: showTryonImage,
+    showTryonSetup: function () { addMarker("info", "Add a photo of yourself in Settings → Try-on, then ask again."); },
+    removeTryonPending: removeTryonPending
   };
   window.__sunoReady = true;
 })();

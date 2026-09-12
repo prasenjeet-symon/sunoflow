@@ -274,6 +274,43 @@ final class AnswerWebBridge: NSObject, WKNavigationDelegate {
         }
     }
 
+    // MARK: try-on
+
+    /// The "Trying it on…" pending card — the generation runs beside the
+    /// answer stream, so the card lands while the prose continues.
+    func showTryonPending() {
+        whenReady { bridge in
+            bridge.webView.evaluateJavaScript("window.sunoflow.showTryonPending()") { _, _ in
+                bridge.measure()
+            }
+        }
+    }
+
+    /// The finished try-on image, as base64 PNG (the alphabet is JS-string
+    /// safe, so the literal needs no escaping).
+    func showTryonImage(base64: String) {
+        whenReady { bridge in
+            bridge.webView.evaluateJavaScript(
+                "window.sunoflow.showTryonImage(\"\(base64)\")"
+            ) { _, _ in bridge.measure() }
+        }
+    }
+
+    /// Try-on needs a person photo and none is on file — an informational
+    /// card, not an error; the answer itself keeps streaming.
+    func showTryonSetup() {
+        whenReady { bridge in
+            bridge.webView.evaluateJavaScript("window.sunoflow.showTryonSetup()") { _, _ in
+                bridge.measure()
+            }
+        }
+    }
+
+    /// Clears a stale pending card without replacing it.
+    func removeTryonPending() {
+        whenReady { $0.webView.evaluateJavaScript("window.sunoflow.removeTryonPending()") }
+    }
+
     // MARK: JSON strings for JS literals
 
     private static func jsonString(_ text: String) -> String {
