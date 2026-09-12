@@ -91,6 +91,13 @@ def keepalive_gateway() -> None:
             _answer.warm()
         except Exception:
             pass
+        # Suno Try-on does the same one-shot paid POST (and so the same idle
+        # re-handshake), on its own pool. Same lazy import, same reason.
+        try:
+            from . import tryon as _tryon
+            _tryon.warm()
+        except Exception:
+            pass
 
 # No default. A key used to ship here, identical in every install, so anyone who
 # downloaded SunoFlow could use the gateway for free and it could not be revoked

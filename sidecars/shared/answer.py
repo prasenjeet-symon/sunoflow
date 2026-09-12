@@ -89,7 +89,7 @@ MAX_DICT_ENTRIES = 64
 MAX_IMAGE_BYTES = 3 << 20
 
 
-def stream_answer(query, history=None, image_bytes=None, key="", dictionary=None):
+def stream_answer(query, history=None, image_bytes=None, key="", dictionary=None, tryon=False):
     """Generator of raw SSE byte chunks from the gateway.
 
     Raises NotEntitled when the gateway refuses the device (the caller turns
@@ -97,6 +97,11 @@ def stream_answer(query, history=None, image_bytes=None, key="", dictionary=None
     failure returns an error-event generator — the HTTP response the app sees
     is still 200, carrying exactly one ``error`` event, because a streaming
     response has already been committed by the time a caller can tell.
+
+    ``tryon`` is the app's "a person photo is on file and this turn asked to
+    try something on" flag: it only loosens what the gateway's answer model may
+    put in the stream. Any ``tryon`` event it emits passes through ``_pump``
+    untouched, like every other event.
     """
     if not key:
         raise NotEntitled(
@@ -122,6 +127,8 @@ def stream_answer(query, history=None, image_bytes=None, key="", dictionary=None
     payload = {"query": query, "history": turns}
     if dictionary:
         payload["dictionary"] = dictionary
+    if tryon:
+        payload["tryon"] = True
     if image_bytes:
         if len(image_bytes) > MAX_IMAGE_BYTES:
             raise ValueError("image too large")

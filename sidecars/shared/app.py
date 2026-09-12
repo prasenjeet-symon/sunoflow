@@ -23,6 +23,7 @@ from starlette.concurrency import run_in_threadpool
 
 from sidecars.shared.answer import MAX_QUERY_LEN, _sse_bytes, stream_answer
 from sidecars.shared.control import MAX_GOAL_LEN, plan_action
+from sidecars.shared.tryon import MAX_ITEM_LEN, generate_tryon
 from sidecars.shared.audio import MIN_AUDIO_SECONDS, encode_opus, wav_duration_seconds
 from sidecars.shared.cleanup import (
     NotEntitled,
@@ -393,6 +394,10 @@ def create_app(adapter: SttAdapter, corrections_path: str) -> FastAPI:
         query: str = Form(...),
         history: str = Form("[]"),
         image: UploadFile = File(None),
+        # Set by the app when the user asks to try something on: the gateway's
+        # answer model turns the reply into a [[TRYON]] directive the app acts
+        # on. Only rides a turn when a person photo is on file.
+        tryon: bool = Form(False),
         device_key: str = Header("", alias="X-SunoFlow-Device-Key"),
     ):
         """Proxy one Suno Answer turn to the hosted gateway as SSE.
@@ -439,7 +444,7 @@ def create_app(adapter: SttAdapter, corrections_path: str) -> FastAPI:
         try:
             relevant = corrections.relevant_for(query, limit=40)
             gen = await run_in_threadpool(
-                stream_answer, corrected or query, turns, image_bytes, key, relevant
+                stream_answer, corrected or query, turns, image_bytes, key, relevant, tryon
             )
         except NotEntitled as exc:
             print(f"Refusing Suno Answer — {exc}")
@@ -538,6 +543,68 @@ def create_app(adapter: SttAdapter, corrections_path: str) -> FastAPI:
             return NotEntitledResponse(str(exc), getattr(exc, "code", "not_entitled"))
         except ValueError as exc:
             # Bad goal/image from the app itself.
+            return JSONResponse(
+                status_code=400,
+                content={"error": "malformed request", "message": str(exc)},
+            )
+
+        return JSONResponse(status_code=200, content=result)
+
+    @app.post("/tryon")
+    async def tryon_route(
+        item: str = Form(...),
+        query: str = Form(""),
+        person: UploadFile = File(...),
+        garment: UploadFile = File(...),
+        context: str = Form("{}"),
+        device_key: str = Header("", alias="X-SunoFlow-Device-Key"),
+    ):
+        """Proxy one Suno Try-on generation to the hosted gateway.
+
+        ``item`` is the dictated thing to try on ("the green linen shirt");
+        ``query`` is this turn's full dictated sentence, for wording the reply;
+        ``person`` is the user's on-file photo and ``garment`` is this turn's
+        screenshot, both JPEG; ``context`` is a JSON object of observed state
+        (app, window). The gateway answers with ``{"image": b64,
+        "mime_type": ...}`` — passed through verbatim (plus a lease field when
+        the account middleware minted one).
+
+        Failures come back as 200 JSON {"error": ...} (limit, outage, safety)
+        so the app's UI stops on one shape; a disconnected device raises
+        NotEntitled → the same 402 /transcribe returns.
+        """
+        key = device_key.removeprefix("Bearer ").strip()
+        try:
+            ctx = json.loads(context) if context else {}
+            if not isinstance(ctx, dict):
+                ctx = {}
+        except Exception:
+            ctx = {}
+
+        person_bytes = await person.read()
+        garment_bytes = await garment.read()
+
+        # Correct the dictated item against the user's dictionary BEFORE the
+        # gateway sees it: an item built from mis-heard words renders a garment
+        # the user never said. Corrections only, exactly like /transcribe and
+        # /control — expansions are never substituted blind.
+        corrected = item.strip()[:MAX_ITEM_LEN]
+        if corrected:
+            corrected = corrections.apply(corrected).strip()[:MAX_ITEM_LEN] or corrected
+
+        # Dictionary entries relevant to the item (same relevant_for machinery
+        # as /transcribe and /control).
+        try:
+            relevant = corrections.relevant_for(item, limit=40)
+            result = await run_in_threadpool(
+                generate_tryon, corrected or item, query,
+                person_bytes, garment_bytes, ctx, key, relevant,
+            )
+        except NotEntitled as exc:
+            print(f"Refusing Suno Try-on — {exc}")
+            return NotEntitledResponse(str(exc), getattr(exc, "code", "not_entitled"))
+        except ValueError as exc:
+            # Bad item/images from the app itself.
             return JSONResponse(
                 status_code=400,
                 content={"error": "malformed request", "message": str(exc)},

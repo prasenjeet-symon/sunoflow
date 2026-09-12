@@ -139,6 +139,10 @@ def _keepalive_gateway_connection() -> None:
             _control_session.get(GATEWAY_HEALTH_URL, timeout=5)
         except Exception:
             pass
+        try:
+            _tryon_session.get(GATEWAY_HEALTH_URL, timeout=5)
+        except Exception:
+            pass
 
 
 def ensure_ffmpeg_on_path() -> str:
@@ -1498,6 +1502,216 @@ async def control(
     return JSONResponse(status_code=200, content=result)
 
 
+# --- Suno Try-on (the paid virtual try-on) ---
+# Same-host /tryon endpoint, mirroring ANSWER_URL. Override with
+# SUNOFLOW_TRYON_URL for dev.
+TRYON_URL = os.environ.get(
+    "SUNOFLOW_TRYON_URL", CLEANUP_URL.rsplit("/", 1)[0] + "/tryon"
+)
+# Total ceiling on one generation: the gateway's own deadline is 50s
+# (TRYON_TIMEOUT); the proxy waits slightly longer so the gateway's own error
+# body — which says something kinder than a socket error would — is what arrives.
+TRYON_TIMEOUT = 55.0
+
+# The try-on path gets its OWN pool and its own keepalive warm-up, same posture
+# as answer and control. Its adapter carries NO retry (contrast the dictation
+# session's single retry): a retried generation would double-spend quota — and
+# the daily allowance is tiny by design.
+_TRYON_ADAPTER = HTTPAdapter(max_retries=Retry(
+    total=0, connect=0, read=0, status=0, backoff_factor=0,
+))
+_tryon_session = requests.Session()
+_tryon_session.mount("https://", _TRYON_ADAPTER)
+_tryon_session.mount("http://", _TRYON_ADAPTER)
+
+MAX_ITEM_LEN = 500
+MAX_TRYON_QUERY_LEN = 2000
+MAX_TRYON_APP_LEN = 120
+MAX_TRYON_WINDOW_LEN = 300
+
+_TRYON_SAFETY_BLOCK_MESSAGE = (
+    "Suno Try-on declined this request. Try phrasing it differently."
+)
+
+
+def _tryon_error(resp):
+    """Map a gateway 502/4xx image-model failure to the sidecar's error envelope.
+
+    A `safety_block` passes through verbatim — the model declined THIS request,
+    not the service, so the app can say "rephrase" instead of "outage".
+    Everything else is a generic unavailable.
+    """
+    try:
+        body = resp.json()
+    except ValueError:
+        body = {}
+    if isinstance(body, dict) and body.get("error") == "safety_block":
+        return {
+            "error": "safety_block",
+            "message": str(body.get("message") or _TRYON_SAFETY_BLOCK_MESSAGE),
+        }
+    if resp.status_code == 502:
+        return {"error": "unavailable", "message": "Suno Try-on couldn't generate that. Try again shortly."}
+    return {"error": "unavailable", "message": "Suno Try-on is unavailable right now. Try again shortly."}
+
+
+def generate_tryon(item, query="", person_bytes=None, garment_bytes=None,
+                   context=None, key="", dictionary=None):
+    """One Suno Try-on generation: POST to the gateway, return its JSON.
+
+    Raises NotEntitled when the gateway refuses the device (the route turns
+    that into the same 402 /transcribe returns). Raises ValueError on a bad
+    item/images from the app itself. On a limit, outage, or gateway 502/4xx it
+    returns {"error": ...} — the app's UI stops on anything that is not an
+    image.
+    """
+    if not key:
+        raise NotEntitled(_NOT_CONNECTED, code="not_connected")
+
+    item = (item or "").strip()[:MAX_ITEM_LEN]
+    if not item:
+        raise ValueError("empty item")
+    if not person_bytes:
+        raise ValueError("missing person photo")
+    if not garment_bytes:
+        raise ValueError("missing garment image")
+    if len(person_bytes) > MAX_IMAGE_BYTES or len(garment_bytes) > MAX_IMAGE_BYTES:
+        raise ValueError("image too large")
+
+    dictionary = list(dictionary or [])[:MAX_DICT_ENTRIES]
+
+    context = context or {}
+    payload = {
+        "item": item,
+        "query": (query or "").strip()[:MAX_TRYON_QUERY_LEN],
+        "context": {
+            "app": str(context.get("app") or "").strip()[:MAX_TRYON_APP_LEN],
+            "window": str(context.get("window") or "").strip()[:MAX_TRYON_WINDOW_LEN],
+        },
+        "person": base64.b64encode(person_bytes).decode("ascii"),
+        "garment": base64.b64encode(garment_bytes).decode("ascii"),
+    }
+    if dictionary:
+        payload["dictionary"] = dictionary
+
+    # Deliberately NO retry here (contrast the dictation session's single
+    # retry): a retried generation would double-spend quota.
+    try:
+        resp = _tryon_session.post(
+            TRYON_URL,
+            headers=_headers(key),
+            json=payload,
+            timeout=(10, TRYON_TIMEOUT),
+        )
+    except Exception:
+        # Network-level failure before any byte: not an entitlement question —
+        # the request may never have arrived. The UI gets a structured error
+        # rather than an exception, so its path is one code.
+        return {"error": "unavailable", "message": "Suno Try-on is unavailable right now. Try again shortly."}
+
+    refusal, code = _refusal(resp)
+    if refusal:
+        raise NotEntitled(refusal, code=code or "not_entitled")
+
+    if resp.status_code == 429:
+        retry_after = resp.headers.get("Retry-After", "60")
+        if retry_after.strip() == "1":
+            return {
+                "error": "limit",
+                "message": "Suno Try-on is working as fast as it can — wait a few seconds and try again.",
+                "retry_after": 1,
+            }
+        return {
+            "error": "limit",
+            "message": "You've used all your Suno Try-ons for today. They reset tomorrow.",
+            "retry_after": 60,
+        }
+
+    if resp.status_code == 502:
+        # A safety block is distinct — the model declined THIS request, not the
+        # service — so its code and message pass through verbatim and the app
+        # can say "rephrase" instead of "outage".
+        return _tryon_error(resp)
+
+    if not resp.ok:
+        return _tryon_error(resp)
+
+    try:
+        result = resp.json()
+    except ValueError:
+        return {"error": "unavailable", "message": "Suno Try-on is unavailable right now. Try again shortly."}
+
+    # The gateway's success body is {"image": b64, "mime_type": ...} (plus a
+    # lease field when the account middleware minted one). Anything without an
+    # image is not a success — pass through the gateway's own body when it is
+    # already an error envelope, else the generic unavailable.
+    if not isinstance(result, dict) or not result.get("image"):
+        if isinstance(result, dict) and result.get("error"):
+            return result
+        return {"error": "unavailable", "message": "Suno Try-on is unavailable right now. Try again shortly."}
+
+    return result
+
+
+@app.post("/tryon")
+async def tryon_route(
+    item: str = Form(...),
+    query: str = Form(""),
+    person: UploadFile = File(...),
+    garment: UploadFile = File(...),
+    context: str = Form("{}"),
+    device_key: str = Header("", alias="X-SunoFlow-Device-Key"),
+):
+    """Proxy one Suno Try-on generation to the hosted gateway.
+
+    ``item`` is the dictated thing to try on; ``query`` is this turn's full
+    dictated sentence; ``person`` is the user's on-file photo and ``garment``
+    is this turn's screenshot, both JPEG; ``context`` is a JSON object of
+    observed state (app, window). The gateway answers with ``{"image": b64,
+    "mime_type": ...}`` — passed through verbatim.
+
+    Failures come back as 200 JSON {"error": ...} (limit, outage, safety) so
+    the app's UI stops on one shape; a disconnected device raises NotEntitled
+    → the same 402 /transcribe returns.
+    """
+    key = device_key.removeprefix("Bearer ").strip()
+    try:
+        ctx = json.loads(context) if context else {}
+        if not isinstance(ctx, dict):
+            ctx = {}
+    except Exception:
+        ctx = {}
+
+    person_bytes = await person.read()
+    garment_bytes = await garment.read()
+
+    # Correct the dictated item against the user's dictionary BEFORE the
+    # gateway sees it: an item built from mis-heard words renders a garment
+    # the user never said. Corrections only, exactly like /transcribe and
+    # /control — expansions are never substituted blind.
+    corrected = item.strip()[:MAX_ITEM_LEN]
+    if corrected:
+        corrected = apply_corrections(corrected).strip()[:MAX_ITEM_LEN] or corrected
+
+    try:
+        relevant = await run_in_threadpool(relevant_corrections, item, 40)
+        result = await run_in_threadpool(
+            generate_tryon, corrected or item, query,
+            person_bytes, garment_bytes, ctx, key, relevant,
+        )
+    except NotEntitled as exc:
+        # Same refusal shape as /transcribe: the app's account sheet renders it.
+        print(f"Refusing Suno Try-on — {exc}")
+        return NotEntitledResponse(str(exc), getattr(exc, "code", "not_entitled"))
+    except ValueError as exc:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "malformed request", "message": str(exc)},
+        )
+
+    return JSONResponse(status_code=200, content=result)
+
+
 def _sse_bytes(event: str, payload: dict) -> bytes:
     """One SSE event frame, matching the gateway's framing."""
     return f"event: {event}\ndata: {json.dumps(payload)}\n\n".encode("utf-8")
@@ -1507,12 +1721,17 @@ def _answer_error_stream(code: str, message: str):
     yield _sse_bytes("error", {"error": code, "message": message})
 
 
-def stream_answer(query, history=None, image_bytes=None, key="", dictionary=None):
+def stream_answer(query, history=None, image_bytes=None, key="", dictionary=None, tryon=False):
     """Generator of raw SSE byte chunks from the gateway.
 
     Raises NotEntitled when the gateway refuses the device (the caller turns
     that into the same 402 response /transcribe returns). Any other pre-stream
     failure returns a generator carrying exactly one ``error`` event.
+
+    ``tryon`` is the app's "a person photo is on file and this turn asked to
+    try something on" flag: it only loosens what the gateway's answer model may
+    put in the stream. Any ``tryon`` event it emits passes through the
+    passthrough generator untouched, like every other event.
     """
     if not key:
         raise NotEntitled(_NOT_CONNECTED, code="not_connected")
@@ -1536,6 +1755,8 @@ def stream_answer(query, history=None, image_bytes=None, key="", dictionary=None
     payload = {"query": query, "history": turns}
     if dictionary:
         payload["dictionary"] = dictionary
+    if tryon:
+        payload["tryon"] = True
     if image_bytes:
         if len(image_bytes) > MAX_IMAGE_BYTES:
             raise ValueError("image too large")
@@ -1599,6 +1820,10 @@ async def answer(
     query: str = Form(...),
     history: str = Form("[]"),
     image: UploadFile = File(None),
+    # Set by the app when the user asks to try something on: the gateway's
+    # answer model turns the reply into a [[TRYON]] directive the app acts
+    # on. Only rides a turn when a person photo is on file.
+    tryon: bool = Form(False),
     device_key: str = Header("", alias="X-SunoFlow-Device-Key"),
 ):
     """Proxy one Suno Answer turn to the hosted gateway as SSE.
@@ -1633,7 +1858,7 @@ async def answer(
     try:
         relevant = await run_in_threadpool(relevant_corrections, query, 40)
         gen = await run_in_threadpool(
-            stream_answer, corrected or query, turns, image_bytes, key, relevant
+            stream_answer, corrected or query, turns, image_bytes, key, relevant, tryon
         )
     except NotEntitled as exc:
         # Same refusal shape as /transcribe: the app's account sheet renders it.
