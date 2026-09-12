@@ -18,36 +18,40 @@ enum Theme {
     // MARK: Surfaces
 
     /// The content sheet.
-    static let paper = Color.white
+    static let paper = Color(nsColor: .sunoPaper)
     /// The navigation column — a half-step warmer so the eye can tell them
     /// apart without needing a border between them.
-    static let shell = Color(red: 0.973, green: 0.969, blue: 0.957)   // #F8F7F4
+    static let shell = Color(nsColor: .sunoShell)
     /// A barely-there fill for inputs and pressed states.
-    static let wash  = Color(red: 0.965, green: 0.961, blue: 0.949)   // #F6F5F2
+    static let wash  = Color(nsColor: .sunoWash)
 
     /// The hairline between rows.
-    static let rule       = Color(red: 0.925, green: 0.918, blue: 0.902)  // #ECEAE6
+    static let rule       = Color(nsColor: .sunoRule)
     /// The heavier hairline that closes a section or the page header.
-    static let ruleStrong = Color(red: 0.886, green: 0.875, blue: 0.855)  // #E2DFDA
+    static let ruleStrong = Color(nsColor: .sunoRuleStrong)
 
     // MARK: Ink
 
-    static let ink   = Color(red: 0.090, green: 0.090, blue: 0.106)   // #17171B
+    static let ink   = Color(nsColor: .sunoInk)
     /// Ink, one step lighter — the hover state of the single filled action.
-    static let inkRaised = Color(red: 0.160, green: 0.160, blue: 0.190) // #29292F
-    static let body  = Color(red: 0.353, green: 0.353, blue: 0.396)   // #5A5A65
-    static let faint = Color(red: 0.549, green: 0.549, blue: 0.588)   // #8C8C96
+    static let inkRaised = Color(nsColor: .sunoInkRaised)
+    /// Surface-fill ink (the filled primary action, the recording disc): stays
+    /// near-black in both modes. See `NSColor.sunoInkFill`.
+    static let inkFill       = Color(nsColor: .sunoInkFill)
+    static let inkFillRaised = Color(nsColor: .sunoInkFillRaised)
+    static let body  = Color(nsColor: .sunoBody)
+    static let faint = Color(nsColor: .sunoFaint)
 
     // MARK: Accent
 
-    static let accent     = Color(red: 0.310, green: 0.286, blue: 0.710)  // #4F49B5
-    static let accentSoft = Color(red: 0.945, green: 0.941, blue: 0.980)  // #F1F0FA
+    static let accent     = Color(nsColor: .sunoAccent)
+    static let accentSoft = Color(nsColor: .sunoAccentSoft)
 
     // MARK: Semantic status
 
-    static let success = Color(red: 0.086, green: 0.478, blue: 0.329)  // #167A54
-    static let warning = Color(red: 0.612, green: 0.392, blue: 0.063)  // #9C6410
-    static let danger  = Color(red: 0.659, green: 0.227, blue: 0.188)  // #A83A30
+    static let success = Color(nsColor: .sunoSuccess)
+    static let warning = Color(nsColor: .sunoWarning)
+    static let danger  = Color(nsColor: .sunoDanger)
 
     static func status(_ ok: Bool) -> Color { ok ? success : danger }
 
@@ -80,18 +84,48 @@ enum Theme {
 /// from the `Theme` value above rather than re-typed from the hex, so the sheet
 /// and the panels can never drift apart.
 extension NSColor {
-    static let sunoPaper      = NSColor(Theme.paper)
-    static let sunoWash       = NSColor(Theme.wash)
-    static let sunoRule       = NSColor(Theme.rule)
-    static let sunoRuleStrong = NSColor(Theme.ruleStrong)
-    static let sunoInk        = NSColor(Theme.ink)
-    static let sunoInkRaised  = NSColor(Theme.inkRaised)
-    static let sunoBody       = NSColor(Theme.body)
-    static let sunoFaint      = NSColor(Theme.faint)
-    static let sunoAccent     = NSColor(Theme.accent)
-    static let sunoAccentSoft = NSColor(Theme.accentSoft)
-    static let sunoSuccess    = NSColor(Theme.success)
-    static let sunoWarning    = NSColor(Theme.warning)
+    /// Builds an `NSColor` that resolves to `light` in light mode and `dark`
+    /// in dark mode, following the window's effective appearance. Stored as a
+    /// _dynamic_ color (not a fixed value), so AppKit resolves the right
+    /// variant automatically for text, layers, and `applySunoPaper` alike.
+    static func sunoDynamic(light: UInt32, dark: UInt32) -> NSColor {
+        NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+                ? NSColor(sunoHex: dark) : NSColor(sunoHex: light)
+        }
+    }
+
+    /// The single source of truth for the palette. Each token is declared once
+    /// here as a light/dark hex pair; the SwiftUI `Theme` values above and every
+    /// AppKit surface resolve through them, so the sheet and the panels can
+    /// never drift apart or forget to cover a mode.
+    convenience init(sunoHex: UInt32) {
+        let r = CGFloat((sunoHex >> 16) & 0xFF) / 255
+        let g = CGFloat((sunoHex >> 8) & 0xFF) / 255
+        let b = CGFloat(sunoHex & 0xFF) / 255
+        self.init(srgbRed: r, green: g, blue: b, alpha: 1)
+    }
+
+    static let sunoPaper      = sunoDynamic(light: 0xFFFFFF, dark: 0x1C1C1E)
+    static let sunoShell      = sunoDynamic(light: 0xF8F7F4, dark: 0x232326)
+    static let sunoWash       = sunoDynamic(light: 0xF6F5F2, dark: 0x26262A)
+    static let sunoRule       = sunoDynamic(light: 0xECEAE6, dark: 0x333338)
+    static let sunoRuleStrong = sunoDynamic(light: 0xE2DFDA, dark: 0x3F3F46)
+    static let sunoInk        = sunoDynamic(light: 0x17171B, dark: 0xF2F2F4)
+    static let sunoInkRaised  = sunoDynamic(light: 0x29292F, dark: 0xE6E6EA)
+    static let sunoBody        = sunoDynamic(light: 0x5A5A65, dark: 0xAFAFB8)
+    static let sunoFaint       = sunoDynamic(light: 0x8C8C96, dark: 0x8A8A94)
+    static let sunoAccent      = sunoDynamic(light: 0x4F49B5, dark: 0x7B75D8)
+    static let sunoAccentSoft  = sunoDynamic(light: 0xF1F0FA, dark: 0x2A2640)
+    static let sunoSuccess     = sunoDynamic(light: 0x167A54, dark: 0x42A57C)
+    static let sunoWarning     = sunoDynamic(light: 0x9C6410, dark: 0xD9A455)
+    static let sunoDanger      = sunoDynamic(light: 0xA83A30, dark: 0xE06B5C)
+
+    /// Surface-fill ink (the filled primary button, the recording disc): stays
+    /// near-black in BOTH modes so a dark shape against dark paper never loses
+    /// its silhouette. Not dynamic by design.
+    static let sunoInkFill       = NSColor(sunoHex: 0x17171B)
+    static let sunoInkFillRaised = NSColor(sunoHex: 0x29292F)
 }
 
 extension NSView {
@@ -116,7 +150,7 @@ extension NSView {
         layer.cornerRadius = cornerRadius
         layer.borderWidth = 1
         layer.borderColor = NSColor.sunoRuleStrong.cgColor
-        layer.shadowColor = NSColor.sunoInk.cgColor
+        layer.shadowColor = NSColor.sunoInkFill.cgColor
         layer.shadowOpacity = 0.13
         layer.shadowRadius = lift
         layer.shadowOffset = CGSize(width: 0, height: -lift / 3.5)
@@ -374,7 +408,7 @@ struct SunoPrimaryButtonStyle: ButtonStyle {
             .padding(.horizontal, 15)
             .padding(.vertical, 7)
             .background(
-                Capsule().fill(hovering ? Theme.inkRaised : Theme.ink)
+                Capsule().fill(hovering ? Theme.inkFillRaised : Theme.inkFill)
             )
             .opacity(isEnabled ? (configuration.isPressed ? 0.9 : 1) : 0.32)
             .animation(Theme.quick, value: configuration.isPressed)

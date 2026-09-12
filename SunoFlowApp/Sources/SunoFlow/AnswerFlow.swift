@@ -108,8 +108,6 @@ final class AnswerFlow: NSObject {
     /// finishes appends here so follow-ups carry context. A2 ephemeral: the
     /// array dies with the popup.
     private var history: [(q: String, a: String)] = []
-    /// The sources the last completed answer cited, for the chips + Insert.
-    private var pendingSources: [String] = []
 
     /// Every piece of deferred work carries the generation it started under;
     /// anything that fires late finds the counter moved and dies quietly.
@@ -464,11 +462,11 @@ final class AnswerFlow: NSObject {
         // Follow the SAME cloud-STT route dictation uses: with the local model
         // slow or not yet resident (a machine the warm-start controller keeps on
         // cloud), forcing local here would make Answer sluggish — or fail with an
-        // empty transcript — while dictation is happily on cloud. Passing the
-        // user's consent routes the question audio the same way (cloud until the
-        // device cuts over to on-device), so Answer never becomes the exception.
-        TranscriptionClient.transcribe(fileURL: file, cleanup: false,
-                                       allowCloud: Preferences.shared.cloudWarmStartEnabled) { result in
+        // empty transcript — while dictation is happily on cloud. The route is
+        // always consented (the first-run disclosure covers it) and only applies
+        // until the device cuts over to on-device, so Answer never becomes the
+        // exception.
+        TranscriptionClient.transcribe(fileURL: file, cleanup: false) { result in
             DispatchQueue.main.async {
                 switch result {
                 case .success(let transcription):
@@ -552,8 +550,8 @@ final class AnswerFlow: NSObject {
         case .delta(let text):
             streamText += text
             popup.panelView?.appendAnswer(text)
-        case .sources(let domains, _):
-            pendingSources = domains
+        case .sources:
+            break // cited-source chips are not shown; the event is ignored
         case .done:
             finishStream()
         case .error:
@@ -609,11 +607,10 @@ final class AnswerFlow: NSObject {
         popup.panelView?.endAnswer()
         if !recordingFollowUp {
             popup.panelView?.setStatus("Ready")
-            // Sources ride the stream before `done`; hand them to the panel so
-            // the Insert/Copy row + source chips appear with the answer.
-            popup.panelView?.showAnswerActions(sources: pendingSources)
+            // The Insert/Copy row appears with the answer. The gateway's
+            // cited-source domains ride the stream but are not shown.
+            popup.panelView?.showAnswerActions()
         }
-        pendingSources = []
         AppLog.log("answer: stream done (\(streamText.count) chars)")
     }
 
@@ -705,7 +702,6 @@ final class AnswerFlow: NSObject {
         lastAnswer = nil
         screenshot = nil
         history = []
-        pendingSources = []
         preFollowUpState = .showing
         AppLog.log("answer: dismissed (abort) gen=\(generation)")
     }

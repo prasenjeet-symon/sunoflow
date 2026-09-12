@@ -22,6 +22,19 @@
     --rule: #ECEAE6;
     --danger: #A83A30;
   }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ink: #F2F2F4;
+      --body: #AFAFB8;
+      --faint: #8A8A94;
+      --accent: #7B75D8;
+      --accent-soft: #2A2640;
+      --wash: #26262A;
+      --rule: #333338;
+      --danger: #E06B5C;
+      --scroll-hover: #3F3F46;
+    }
+  }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body {
     background: transparent;
@@ -33,7 +46,7 @@
   body { padding: 2px 6px 8px 6px; }
   ::-webkit-scrollbar { width: 8px; }
   ::-webkit-scrollbar-thumb { background: var(--rule); border-radius: 4px; }
-  ::-webkit-scrollbar-thumb:hover { background: #DDDAD4; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--scroll-hover, #DDDAD4); }
 
   /* ---- user turn: voice-message bubble -------------------------------- */
   .voice {
@@ -376,7 +389,7 @@
       r.setAttribute("width", bw.toFixed(1));
       r.setAttribute("height", h.toFixed(1));
       r.setAttribute("rx", Math.min(1.5, bw / 2));
-      r.setAttribute("fill", i / n <= played ? "#4F49B5" : "#4F49B5");
+      r.style.fill = "var(--accent)";
       r.setAttribute("fill-opacity", i / n <= played ? "1" : "0.42");
       svg.appendChild(r);
     }

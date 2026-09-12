@@ -1,4 +1,5 @@
 import Carbon
+import AppKit
 import Foundation
 
 extension Notification.Name {
@@ -10,6 +11,9 @@ extension Notification.Name {
     /// Posted when the Suno Answer hotkey or its combination changes, so the
     /// AppDelegate can register or re-register it.
     static let sunoAnswerHotkeyChanged = Notification.Name("suno.answerHotkeyChanged")
+    /// Posted when the Suno Control hotkey or its combination changes, so the
+    /// AppDelegate can register or re-register it.
+    static let sunoControlHotkeyChanged = Notification.Name("suno.controlHotkeyChanged")
     /// Posted when the gateway refuses Suno Answer (not entitled). The
     /// AppDelegate opens the account sheet — the same surface a dictation 402
     /// lands on — carrying `message` and `code` in userInfo.
@@ -48,11 +52,25 @@ final class Preferences: ObservableObject {
         static let answerHotkeyEnabled = "answerHotkeyEnabled"
         static let answerHotkeyKeyCode = "answerHotkeyKeyCode"
         static let answerHotkeyModifiers = "answerHotkeyModifiers"
-        static let screenContextEnabled = "screenContextEnabled"
+        static let controlHotkeyEnabled = "controlHotkeyEnabled"
+        static let controlHotkeyKeyCode = "controlHotkeyKeyCode"
+        static let controlHotkeyModifiers = "controlHotkeyModifiers"
         static let offerCopyWhenUnfocused = "offerCopyWhenUnfocused"
         static let onboardingCompleted = "onboardingCompleted"
-        static let cloudWarmStartEnabled = "cloudWarmStartEnabled"
-        static let cloudWarmStartDisclosed = "cloudWarmStartDisclosed"
+        static let appearance = "appearance"
+    }
+
+    /// Which appearance the app forces, independent of the system setting.
+    enum AppearancePreference: String, CaseIterable, Identifiable {
+        case system, light, dark
+        var id: Self { self }
+        var label: String {
+            switch self {
+            case .system: return "Match system"
+            case .light:  return "Always light"
+            case .dark:   return "Always dark"
+            }
+        }
     }
 
     /// Core Audio device UID to record from. Empty means "system default input".
@@ -144,12 +162,24 @@ final class Preferences: ObservableObject {
         didSet { persistAnswerHotkey() }
     }
 
-    /// Capture the screen and run on-device OCR when dictation stops, so the
-    /// cleanup LLM gets heuristic context about the app/field being typed
-    /// into. Requires the Screen Recording permission. Off by default because
-    /// it needs an extra permission the user must grant explicitly.
-    @Published var screenContextEnabled: Bool {
-        didSet { defaults.set(screenContextEnabled, forKey: Key.screenContextEnabled) }
+    /// Run the Suno Control agent loop (⌃⌥⇧Space by default). Off by default
+    /// because turning it on is the consent step: the feature looks at the
+    /// screen and moves the cursor, so nothing is captured while it is off.
+    @Published var controlHotkeyEnabled: Bool {
+        didSet {
+            defaults.set(controlHotkeyEnabled, forKey: Key.controlHotkeyEnabled)
+            NotificationCenter.default.post(name: .sunoControlHotkeyChanged, object: nil)
+        }
+    }
+
+    /// Carbon virtual key code for the Suno Control hotkey.
+    @Published var controlHotkeyKeyCode: UInt32 {
+        didSet { persistControlHotkey() }
+    }
+
+    /// Carbon modifier mask (cmdKey / optionKey / …) for the Suno Control hotkey.
+    @Published var controlHotkeyModifiers: UInt32 {
+        didSet { persistControlHotkey() }
     }
 
     /// When a finished dictation has nowhere to paste — no text field focused,
@@ -167,27 +197,25 @@ final class Preferences: ObservableObject {
         didSet { defaults.set(onboardingCompleted, forKey: Key.onboardingCompleted) }
     }
 
-    /// Let a new install dictate immediately over the cloud while the on-device
-    /// model (~2 GB) downloads in the background, then hand transcription back to
-    /// the local model once it is ready and proven. Sent to the sidecar as
-    /// `allow_cloud` on every `/transcribe`.
-    ///
-    /// On by default — the whole point is that a new user can dictate on first
-    /// launch instead of waiting for a multi-gigabyte download. When it is on,
-    /// the raw audio of a dictation is processed in the cloud *only* until the
-    /// device cuts over to on-device; the first-run disclosure (see
-    /// `cloudWarmStartDisclosed`) says so before the first word is captured, and
-    /// this switch turns it off — dictation then waits for the local model, the
-    /// on-device-only behaviour SunoFlow otherwise ships with.
-    @Published var cloudWarmStartEnabled: Bool {
-        didSet { defaults.set(cloudWarmStartEnabled, forKey: Key.cloudWarmStartEnabled) }
+    /// The app's forced appearance (independent of the system's). `nil` follows
+    /// the system; the other two pin `NSApp.appearance` accordingly.
+    @Published var appearance: AppearancePreference {
+        didSet {
+            defaults.set(appearance.rawValue, forKey: Key.appearance)
+            applyAppearance()
+        }
     }
 
-    /// Whether the one-time cloud warm-start disclosure has been shown. Gates the
-    /// first-run notice so it appears once (not the whole reversal of the setting
-    /// — a user who turns cloud STT back on later has already seen it).
-    @Published var cloudWarmStartDisclosed: Bool {
-        didSet { defaults.set(cloudWarmStartDisclosed, forKey: Key.cloudWarmStartDisclosed) }
+    /// Applies the chosen appearance to the whole app. The panels are AppKit
+    /// views with dynamic colors plus a `viewDidChangeEffectiveAppearance`
+    /// re-paint, and the settings window is SwiftUI — both re-resolve
+    /// automatically when `NSApp.appearance` changes.
+    private func applyAppearance() {
+        switch appearance {
+        case .system: NSApp.appearance = nil
+        case .light:  NSApp.appearance = NSAppearance(named: .aqua)
+        case .dark:   NSApp.appearance = NSAppearance(named: .darkAqua)
+        }
     }
 
     private init() {
@@ -196,7 +224,7 @@ final class Preferences: ObservableObject {
             Key.protectBluetoothAudio: true,
             Key.hotkeyKeyCode: Int(DefaultHotkey.keyCode),
             Key.hotkeyModifiers: Int(DefaultHotkey.modifiers),
-            Key.maxRecordingSeconds: 60,
+            Key.maxRecordingSeconds: 300,
             Key.cleanupEnabled: true,
             Key.tone: Tone.faithful.rawValue,
             Key.toneHotkeyEnabled: false,
@@ -205,11 +233,12 @@ final class Preferences: ObservableObject {
             Key.answerHotkeyEnabled: false,
             Key.answerHotkeyKeyCode: Int(DefaultAnswerHotkey.keyCode),
             Key.answerHotkeyModifiers: Int(DefaultAnswerHotkey.modifiers),
-            Key.screenContextEnabled: false,
+            Key.controlHotkeyEnabled: false,
+            Key.controlHotkeyKeyCode: Int(DefaultControlHotkey.keyCode),
+            Key.controlHotkeyModifiers: Int(DefaultControlHotkey.modifiers),
             Key.offerCopyWhenUnfocused: true,
             Key.onboardingCompleted: false,
-            Key.cloudWarmStartEnabled: true,
-            Key.cloudWarmStartDisclosed: false,
+            Key.appearance: AppearancePreference.system.rawValue,
         ])
         // didSet does not fire for assignments inside init, so these load the
         // stored values without redundantly writing them back.
@@ -226,11 +255,15 @@ final class Preferences: ObservableObject {
         answerHotkeyEnabled = defaults.bool(forKey: Key.answerHotkeyEnabled)
         answerHotkeyKeyCode = UInt32(defaults.integer(forKey: Key.answerHotkeyKeyCode))
         answerHotkeyModifiers = UInt32(defaults.integer(forKey: Key.answerHotkeyModifiers))
-        screenContextEnabled = defaults.bool(forKey: Key.screenContextEnabled)
+        controlHotkeyEnabled = defaults.bool(forKey: Key.controlHotkeyEnabled)
+        controlHotkeyKeyCode = UInt32(defaults.integer(forKey: Key.controlHotkeyKeyCode))
+        controlHotkeyModifiers = UInt32(defaults.integer(forKey: Key.controlHotkeyModifiers))
         offerCopyWhenUnfocused = defaults.bool(forKey: Key.offerCopyWhenUnfocused)
         onboardingCompleted = defaults.bool(forKey: Key.onboardingCompleted)
-        cloudWarmStartEnabled = defaults.bool(forKey: Key.cloudWarmStartEnabled)
-        cloudWarmStartDisclosed = defaults.bool(forKey: Key.cloudWarmStartDisclosed)
+        appearance = AppearancePreference(rawValue: defaults.string(forKey: Key.appearance) ?? "")
+            ?? .system
+        // didSet never fires during init, so apply the persisted choice now.
+        applyAppearance()
     }
 
     private func persistHotkey() {
@@ -251,6 +284,12 @@ final class Preferences: ObservableObject {
         NotificationCenter.default.post(name: .sunoAnswerHotkeyChanged, object: nil)
     }
 
+    private func persistControlHotkey() {
+        defaults.set(Int(controlHotkeyKeyCode), forKey: Key.controlHotkeyKeyCode)
+        defaults.set(Int(controlHotkeyModifiers), forKey: Key.controlHotkeyModifiers)
+        NotificationCenter.default.post(name: .sunoControlHotkeyChanged, object: nil)
+    }
+
     /// Restore the built-in ⌥Space shortcut.
     func resetHotkeyToDefault() {
         hotkeyKeyCode = DefaultHotkey.keyCode
@@ -267,6 +306,12 @@ final class Preferences: ObservableObject {
     func resetAnswerHotkeyToDefault() {
         answerHotkeyKeyCode = DefaultAnswerHotkey.keyCode
         answerHotkeyModifiers = DefaultAnswerHotkey.modifiers
+    }
+
+    /// Restore the built-in ⌃⌥⇧Space Suno Control shortcut.
+    func resetControlHotkeyToDefault() {
+        controlHotkeyKeyCode = DefaultControlHotkey.keyCode
+        controlHotkeyModifiers = DefaultControlHotkey.modifiers
     }
 }
 

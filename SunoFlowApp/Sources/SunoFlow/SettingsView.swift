@@ -572,26 +572,15 @@ struct SettingsView: View {
         Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1"
     }
 
-    /// Total subsystems tracked in the overview status list. Screen context
-    /// only counts when the user has turned it on — it's an opt-in accuracy
-    /// aid, not a baseline requirement, so an intentionally-off feature must
-    /// not make "All systems ready" unreachable.
-    private var subsystemCount: Int { 4 + (prefs.screenContextEnabled ? 1 : 0) }
+    /// Total subsystems tracked in the overview status list. Screen context is
+    /// deliberately not counted: it is an accuracy aid, not a baseline
+    /// requirement — dictation works fully without it — so a user who declines
+    /// the Screen Recording permission must still reach "All systems ready".
+    private var subsystemCount: Int { 4 }
 
     /// Number of subsystems that are healthy (for the overview header).
     private var healthyCount: Int {
-        var count = [sidecarOnline, micPermission, accessibilityPermission, polishOnline].filter { $0 }.count
-        if prefs.screenContextEnabled {
-            count += screenRecordingPermission ? 1 : 0
-        }
-        return count
-    }
-
-    /// True when on-screen OCR is actually contributing context. Only
-    /// meaningful while the feature is enabled; when it's off there's nothing
-    /// to check.
-    private var screenContextHealthy: Bool {
-        prefs.screenContextEnabled && screenRecordingPermission
+        [sidecarOnline, micPermission, accessibilityPermission, polishOnline].filter { $0 }.count
     }
 
     private var allReady: Bool { healthyCount == subsystemCount }
@@ -768,7 +757,6 @@ struct SettingsView: View {
     private var overviewSection: some View {
         VStack(alignment: .leading, spacing: 0) {
             overviewLead
-            statusGroup
             setupGroup
             actionNeededGroup
         }
@@ -796,104 +784,6 @@ struct SettingsView: View {
         .padding(.top, 28)
     }
 
-    private var statusGroup: some View {
-        VStack(spacing: 0) {
-            SectionLabel(text: "Status", trailing: "\(healthyCount) of \(subsystemCount) ready")
-            Rule(strong: true)
-            statusRow(
-                title: "Transcription engine",
-                systemImage: "cpu",
-                ok: sidecarOnline,
-                okText: "Online",
-                failText: "Offline",
-                hint: sidecarOnline
-                    ? "Speech is transcribed entirely on this Mac."
-                    : "Start the engine to enable dictation.",
-                action: sidecarOnline ? nil : startEngine,
-                actionLabel: startingEngine ? "Starting…" : "Start engine"
-            )
-            statusRow(
-                title: "Microphone",
-                systemImage: "mic",
-                ok: micPermission,
-                okText: "Allowed",
-                failText: "Not allowed",
-                hint: micPermission
-                    ? micDisplayName
-                    : "Grant access in System Settings → Privacy & Security."
-            )
-            statusRow(
-                title: "Accessibility",
-                systemImage: "keyboard",
-                ok: accessibilityPermission,
-                okText: "Allowed",
-                failText: "Not allowed",
-                hint: "Required so SunoFlow can type into other apps."
-            )
-            statusRow(
-                title: "Text polish",
-                systemImage: "sparkles",
-                ok: polishOnline,
-                okText: "Online",
-                failText: "Offline",
-                hint: polishOnline
-                    ? "Dictation is tidied up before it's typed out."
-                    : "Dictation still works, but arrives unpolished until this reconnects.",
-                divider: prefs.screenContextEnabled
-            )
-            if prefs.screenContextEnabled {
-                statusRow(
-                    title: "Screen context",
-                    systemImage: "rectangle.on.rectangle",
-                    ok: screenContextHealthy,
-                    okText: "Reading",
-                    failText: "Blocked",
-                    hint: screenContextHealthy
-                        ? "On-screen words are read with OCR so names and terminology match what you're looking at."
-                        : "Grant Screen Recording access in System Settings so SunoFlow can read the screen for context.",
-                    action: ScreenContext.openSystemSettings,
-                    actionLabel: "Open System Settings",
-                    divider: false
-                )
-            }
-            Rule(strong: true)
-        }
-    }
-
-    private func statusRow(
-        title: String,
-        systemImage: String,
-        ok: Bool,
-        okText: String,
-        failText: String,
-        hint: String,
-        action: (() -> Void)? = nil,
-        actionLabel: String = "",
-        divider: Bool = true
-    ) -> some View {
-        SunoRow(
-            title: title,
-            subtitle: hint,
-            systemImage: systemImage,
-            iconColor: ok ? Theme.success : Theme.warning,
-            divider: divider
-        ) {
-            HStack(spacing: 14) {
-                if let action, !ok {
-                    Button(action: action) {
-                        Text(actionLabel)
-                    }
-                    .buttonStyle(.sunoPrimary)
-                    .disabled(startingEngine)
-                }
-                StatusText(
-                    text: ok ? okText : failText,
-                    color: ok ? Theme.success : Theme.warning
-                )
-            }
-        }
-    }
-
     private var setupGroup: some View {
         VStack(spacing: 0) {
             SectionLabel(text: "Current setup")
@@ -905,12 +795,6 @@ struct SettingsView: View {
             )
             ValueRow(label: "Microphone", value: micDisplayName, systemImage: "mic")
             ValueRow(label: "Auto-stop recording", value: "\(prefs.maxRecordingSeconds) seconds", systemImage: "timer")
-            ValueRow(
-                label: "Screen context",
-                value: prefs.screenContextEnabled ? "On" : "Off",
-                systemImage: "rectangle.on.rectangle",
-                valueColor: prefs.screenContextEnabled ? Theme.success : Theme.faint
-            )
             ValueRow(
                 label: "Launch at login",
                 value: launchAtLogin ? "Enabled" : "Disabled",
@@ -931,7 +815,7 @@ struct SettingsView: View {
     private var actionNeededGroup: some View {
         let needsMic = !micPermission
         let needsAX = !accessibilityPermission
-        let needsScreen = prefs.screenContextEnabled && !screenRecordingPermission
+        let needsScreen = !screenRecordingPermission
 
         if needsMic || needsAX || needsScreen {
             VStack(alignment: .leading, spacing: 0) {
@@ -945,7 +829,15 @@ struct SettingsView: View {
                         SunoNotice(text: "Grant Accessibility access in System Settings → Privacy & Security → Accessibility so SunoFlow can insert text.")
                     }
                     if needsScreen {
-                        SunoNotice(text: "Grant Screen Recording access in System Settings → Privacy & Security → Screen Recording for screen context to work.")
+                        // Screen Recording never prompts on its own (a capture
+                        // without the permission is silently black), so the
+                        // notice carries the button that registers the app with
+                        // TCC and opens the pane.
+                        VStack(alignment: .leading, spacing: 10) {
+                            SunoNotice(text: "Grant Screen Recording access in System Settings → Privacy & Security → Screen Recording for screen context to work.")
+                            Button("Open System Settings") { ScreenContext.openSystemSettings() }
+                                .buttonStyle(.sunoSecondary)
+                        }
                     }
                 }
                 .padding(.vertical, 16)
@@ -1197,13 +1089,37 @@ struct SettingsView: View {
 
     private var generalSection: some View {
         VStack(alignment: .leading, spacing: 0) {
+            appearanceGroup
             startupGroup
             hotkeyGroup
             toneGroup
             answerGroup
+            // Suno Control is hidden from the UI until it ships; the feature
+            // and its settings group remain in the codebase for re-enabling.
+            // controlGroup
             recordingGroup
             unfocusedGroup
-            screenContextGroup
+        }
+    }
+
+    /// The app's forced light/dark appearance, independent of the system.
+    private var appearanceGroup: some View {
+        VStack(spacing: 0) {
+            SectionLabel(text: "Appearance")
+            Rule(strong: true)
+            settingRow(
+                "Theme",
+                "SunoFlow follows your system by default; choose a fixed light or dark look to override it."
+            ) {
+                Picker("", selection: $prefs.appearance) {
+                    ForEach(Preferences.AppearancePreference.allCases) { pref in
+                        Text(pref.label).tag(pref)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 170)
+            }
+            Rule(strong: true)
         }
     }
 
@@ -1299,6 +1215,58 @@ struct SettingsView: View {
                             conflict: (prefs.hotkeyKeyCode, prefs.hotkeyModifiers)
                         )
                         .frame(width: 150, height: 30)
+                    }
+                }
+                .padding(.vertical, Theme.Space.row)
+            }
+            Rule(strong: true)
+        }
+    }
+
+    /// Suno Control: state a goal by voice, the agent loop drives the Mac.
+    ///
+    /// Same consent model as Answer (the toggle is the consent step — this
+    /// feature drives the mouse and keyboard, so it stays off until asked
+    /// for): off means no hotkey, no loop, no accessibility prompts.
+    private var controlGroup: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SectionLabel(text: "Suno Control")
+            Rule(strong: true)
+            settingRow(
+                "Do things on this Mac for you",
+                "Press a shortcut, say a goal out loud — “open Calculator and multiply 7 by 8” — and SunoFlow takes one step at a time (clicks, typing, shortcuts) until the goal is done or you click the capsule to stop. It sees the screen with each step. Off means it never runs.",
+                divider: prefs.controlHotkeyEnabled
+            ) {
+                brandToggle($prefs.controlHotkeyEnabled)
+                    .onChange(of: prefs.controlHotkeyEnabled) { newValue in
+                        // Same collision move as Answer's toggle: if a
+                        // customised dictation shortcut already owns the
+                        // control combination, the newcomer moves to the
+                        // fallback rather than two hotkeys fighting.
+                        if newValue,
+                           prefs.controlHotkeyKeyCode == prefs.hotkeyKeyCode,
+                           prefs.controlHotkeyModifiers == prefs.hotkeyModifiers {
+                            prefs.controlHotkeyKeyCode = DefaultControlHotkey.fallbackKeyCode
+                            prefs.controlHotkeyModifiers = DefaultControlHotkey.fallbackModifiers
+                        }
+                    }
+            }
+            if prefs.controlHotkeyEnabled {
+                VStack(spacing: 12) {
+                    HStack(spacing: 12) {
+                        Button("Reset") { prefs.resetControlHotkeyToDefault() }
+                            .buttonStyle(.sunoGhost)
+                        HotkeyRecorder(
+                            keyCode: $prefs.controlHotkeyKeyCode,
+                            modifiers: $prefs.controlHotkeyModifiers,
+                            conflict: (prefs.hotkeyKeyCode, prefs.hotkeyModifiers)
+                        )
+                        .frame(width: 150, height: 30)
+                        Spacer()
+                        // Every run and every step it takes is written to a
+                        // dedicated log; this is the fastest way to that file.
+                        Button("Reveal log") { revealControlLog() }
+                            .buttonStyle(.sunoGhost)
                     }
                 }
                 .padding(.vertical, Theme.Space.row)
@@ -1403,35 +1371,6 @@ struct SettingsView: View {
                 divider: false
             ) {
                 brandToggle($prefs.offerCopyWhenUnfocused)
-            }
-            Rule(strong: true)
-        }
-    }
-
-    private var screenContextGroup: some View {
-        let needsPermission = prefs.screenContextEnabled && !screenRecordingPermission
-        return VStack(alignment: .leading, spacing: 0) {
-            SectionLabel(text: "Screen context")
-            Rule(strong: true)
-            settingRow(
-                "Read what's on screen",
-                "When dictation stops, SunoFlow reads the words visible on screen so it can match names, terminology and phrasing. Nothing is stored, and only the vocabulary is used.",
-                divider: needsPermission
-            ) {
-                brandToggle($prefs.screenContextEnabled)
-                    .onChange(of: prefs.screenContextEnabled) { newValue in
-                        if newValue, !ScreenContext.hasPermission {
-                            ScreenContext.openSystemSettings()
-                        }
-                    }
-            }
-            if needsPermission {
-                VStack(alignment: .leading, spacing: 12) {
-                    SunoNotice(text: "Screen Recording access is required. Grant it in System Settings, then restart SunoFlow.")
-                    Button("Open System Settings") { ScreenContext.openSystemSettings() }
-                        .buttonStyle(.sunoSecondary)
-                }
-                .padding(.vertical, 14)
             }
             Rule(strong: true)
         }
@@ -1561,8 +1500,6 @@ struct SettingsView: View {
 
             Rule(strong: true)
 
-            warmStartGroup
-
             SectionLabel(text: "Where it runs")
             Rule(strong: true)
             SunoRow(
@@ -1581,68 +1518,6 @@ struct SettingsView: View {
         .rowIconColumn()
         .onAppear { startModelPolling() }
         .onDisappear { stopModelPolling() }
-    }
-
-    /// The cloud warm-start control and its live state.
-    ///
-    /// On by default (the disclosure said so at first run): until the on-device
-    /// model has downloaded, dictation is transcribed in the cloud so a new user
-    /// can start immediately, then it cuts over to on-device automatically. The
-    /// toggle turns that off — dictation then waits for the local model, the
-    /// on-device-only behaviour the section below describes.
-    private var warmStartGroup: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            SectionLabel(text: "While the model downloads")
-            Rule(strong: true)
-            settingRow(
-                "Dictate right away using the cloud",
-                "Until the on-device model finishes downloading, your speech — both dictation and Suno Answer questions — is transcribed in the cloud so you can start right away. SunoFlow switches to on-device automatically once the local model is ready and stops sending audio. Off keeps everything on this Mac — dictation and Suno Answer wait until the download finishes.",
-                divider: true
-            ) {
-                brandToggle($prefs.cloudWarmStartEnabled)
-            }
-            if let st = modelStatus {
-                warmStartStatusRow(st)
-            }
-            Rule(strong: true)
-        }
-    }
-
-    @ViewBuilder
-    private func warmStartStatusRow(_ st: ModelStatus) -> some View {
-        if st.model_loaded, st.warm_start?.cut_over ?? true {
-            SunoRow(title: "Transcribing on this Mac", divider: false) {
-                StatusText(text: "On-device", color: Theme.success)
-            }
-        } else if st.model_loaded, prefs.cloudWarmStartEnabled {
-            // Model is ready but still being validated against the cloud.
-            let ws = st.warm_start
-            SunoRow(
-                title: "Checking the on-device model",
-                subtitle: "Comparing it against the cloud on your next few dictations before switching over.",
-                divider: false
-            ) {
-                if let ws {
-                    Text("\(ws.samples)/\(ws.min_samples)")
-                        .font(.sunoValue).monospacedDigit()
-                        .foregroundStyle(Theme.body)
-                }
-            }
-        } else if prefs.cloudWarmStartEnabled {
-            SunoRow(
-                title: "Using the cloud for now",
-                subtitle: "Your on-device model is still downloading. Dictation works in the meantime.",
-                divider: false
-            ) {
-                StatusText(text: "Cloud", color: Theme.body)
-            }
-        } else {
-            SunoRow(
-                title: "Waiting for the on-device model",
-                subtitle: "Cloud dictation is off, so dictation is unavailable until the download finishes.",
-                divider: false
-            )
-        }
     }
 
     @ViewBuilder
@@ -1810,10 +1685,11 @@ struct SettingsView: View {
     private var aboutSection: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 14) {
-                Image(systemName: "ear")
-                    .font(.system(size: 26, weight: .medium))
+                // The brand mark, not an SF Symbol stand-in — the same ear as
+                // the menu bar, the app icon and the website.
+                Image(nsImage: BrandMark.image(size: 34))
+                    .renderingMode(.template)
                     .foregroundStyle(Theme.accent)
-                    .frame(width: 34)
                 VStack(alignment: .leading, spacing: 3) {
                     Text("SunoFlow")
                         .font(.system(size: 19, weight: .semibold))
@@ -1926,6 +1802,16 @@ struct SettingsView: View {
             NSWorkspace.shared.activateFileViewerSelecting([logURL])
         } else {
             // Reveal the directory at least.
+            NSWorkspace.shared.open(logURL.deletingLastPathComponent())
+        }
+    }
+
+    private func revealControlLog() {
+        let logURL = ControlLog.fileURL
+        if FileManager.default.fileExists(atPath: logURL.path) {
+            NSWorkspace.shared.activateFileViewerSelecting([logURL])
+        } else {
+            // No run has been logged yet — reveal the Logs folder instead.
             NSWorkspace.shared.open(logURL.deletingLastPathComponent())
         }
     }

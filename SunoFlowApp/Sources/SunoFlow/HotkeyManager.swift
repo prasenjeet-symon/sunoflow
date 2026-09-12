@@ -134,6 +134,19 @@ enum DefaultAnswerHotkey {
     static let fallbackModifiers: UInt32 = UInt32(cmdKey | optionKey)
 }
 
+/// Built-in Suno Control shortcut: ⌃⌥⇧Space. Off by default — turning the
+/// feature on in Settings is the consent step, and the Settings toggle moves
+/// the combination to the fallback if it is already taken. Distinct from both
+/// Answer (⌃⌥Space) and tone (⌥⇧Space) by Control.
+enum DefaultControlHotkey {
+    static let keyCode: UInt32 = 49
+    static let modifiers: UInt32 = UInt32(controlKey | optionKey | shiftKey)
+
+    /// Fallback when ⌃⌥⇧Space is taken: ⌘⌥⇧Space.
+    static let fallbackKeyCode: UInt32 = 49
+    static let fallbackModifiers: UInt32 = UInt32(cmdKey | optionKey | shiftKey)
+}
+
 /// Formatting + conversion helpers for turning a (keyCode, Carbon modifier mask)
 /// pair into something the user can read, and mapping Cocoa event modifiers to
 /// the Carbon masks `RegisterEventHotKey` expects.

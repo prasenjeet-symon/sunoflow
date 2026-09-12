@@ -30,6 +30,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// turned on in Settings (the toggle is the consent step).
     private let answerHotkeyManager = HotkeyManager(id: 3)
     private let answerFlow = AnswerFlow()
+    /// Fourth Carbon hotkey: Suno Control. Same consent model as Answer — the
+    /// Settings toggle registers it; off means the combination is never ours.
+    private let controlHotkeyManager = HotkeyManager(id: 4)
+    private let controlFlow = ControlFlow()
     private let audioRecorder = AudioRecorder()
     private let overlay = DictationOverlay()
     private let transcriptCard = TranscriptCard()
@@ -57,6 +61,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var toneMenuItem: NSMenuItem!
     private let toneMenu = NSMenu()
     private var answerMenuItem: NSMenuItem!
+    private var controlMenuItem: NSMenuItem!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
@@ -111,7 +116,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         answerFlow.install(isDictationBusy: { [weak self] in
             guard let self else { return false }
             return self.state == .recording || self.state == .processing
+                || self.controlFlow.state != .idle
         })
+        // Suno Control: same opt-in hotkey shape as Answer. The flow runs the
+        // agent loop; AppDelegate owns the Carbon hotkey. The exclusivity rule
+        // runs both ways — two drivers of the mouse at once is not a feature.
+        controlFlow.install(isBusy: { [weak self] in
+            guard let self else { return false }
+            return self.state == .recording || self.state == .processing
+                || self.answerFlow.state != .idle
+        })
+        controlHotkeyManager.onHotkey = { [weak self] in self?.controlFlow.toggle() }
+        syncControlHotkey()
+        NotificationCenter.default.addObserver(
+            forName: .sunoControlHotkeyChanged, object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.syncControlHotkey()
+        }
         answerHotkeyManager.onHotkey = { [weak self] in self?.answerFlow.toggle() }
         syncAnswerHotkey()
         NotificationCenter.default.addObserver(
@@ -156,7 +177,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hotkeyManager.unregister()
         toneHotkeyManager.unregister()
         answerHotkeyManager.unregister()
+        controlHotkeyManager.unregister()
         answerFlow.dismiss()
+        controlFlow.stop()
         if audioRecorder.isRecording {
             audioRecorder.stopRecording()
         }
@@ -171,6 +194,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let menu = NSMenu()
 
         let titleItem = NSMenuItem(title: "SunoFlow", action: nil, keyEquivalent: "")
+        titleItem.image = BrandMark.image(size: 16)
         titleItem.isEnabled = false
         menu.addItem(titleItem)
 
@@ -196,6 +220,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         answerMenuItem.target = self
         answerMenuItem.isHidden = !Preferences.shared.answerHotkeyEnabled
         menu.addItem(answerMenuItem)
+
+        // Suno Control is hidden from the menu bar until it ships; the
+        // feature and its menu item remain in the codebase for re-enabling.
+        // controlMenuItem = NSMenuItem(title: "Suno Control", action: #selector(menuControlToggle), keyEquivalent: "")
+        // controlMenuItem.target = self
+        // controlMenuItem.isHidden = !Preferences.shared.controlHotkeyEnabled
+        // menu.addItem(controlMenuItem)
 
         menu.addItem(NSMenuItem.separator())
         // The current voice always has somewhere to be read. A colour on the
@@ -262,6 +293,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             modifiers: prefs.answerHotkeyModifiers
         )
         AppLog.log("Answer hotkey \(answerHotkeyManager.isRegistered ? "registered" : "FAILED to register"): \(KeyCombo.display(keyCode: prefs.answerHotkeyKeyCode, modifiers: prefs.answerHotkeyModifiers))")
+    }
+
+    /// Register or re-register the Suno Control hotkey to match the setting.
+    /// Identical shape to the Answer one: off means unregistered, on means a
+    /// plain Carbon hotkey with no permission to wait for.
+    private func syncControlHotkey() {
+        let prefs = Preferences.shared
+        guard prefs.controlHotkeyEnabled else {
+            controlHotkeyManager.unregister()
+            return
+        }
+        controlHotkeyManager.reregister(
+            keyCode: prefs.controlHotkeyKeyCode,
+            modifiers: prefs.controlHotkeyModifiers
+        )
+        AppLog.log("Control hotkey \(controlHotkeyManager.isRegistered ? "registered" : "FAILED to register"): \(KeyCombo.display(keyCode: prefs.controlHotkeyKeyCode, modifiers: prefs.controlHotkeyModifiers))")
     }
 
     /// Advance to the next voice and show it. The tone hotkey calls exactly
@@ -378,6 +425,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         answerFlow.toggle()
     }
 
+    /// The menu-bar route to the control hotkey's action — same shape as the
+    /// Answer one.
+    @objc private func menuControlToggle() {
+        controlFlow.toggle()
+    }
+
     @objc private func openSettings() {
         SettingsWindowController.shared.show()
     }
@@ -478,6 +531,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // wins — an answer session (even a paid in-flight request) is aborted
         // when the user starts dictating.
         answerFlow.dismiss()
+        // Suno Control drives the mouse and keyboard; two input drivers at once
+        // is exactly what the exclusivity rule forbids. The Control hotkey
+        // already refuses to start while dictation is busy, but the reverse
+        // press must also resolve — dictation wins, so it stops a live loop
+        // rather than type into whatever Control is mid-way through doing.
+        controlFlow.stop()
 
         // Before recording the next utterance, learn from any edits the user made
         // to the previously pasted text.
@@ -566,8 +625,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// makes the earlier snapshot just as good a reference for the cleanup
     /// model.
     ///
-    /// Needs the Screen Recording permission and is gated by a user toggle;
-    /// leaving `screenContextCapture` nil means this dictation carries cursor
+    /// Needs the Screen Recording permission; screen context is always on, so a
+    /// user who has not granted it simply gets dictation without the accuracy
+    /// aid (a warning surfaces on the dashboard's Action-needed list).
+    /// Leaving `screenContextCapture` nil means this dictation carries cursor
     /// context only.
     /// Starts the frontmost-app reading for the dictation just beginning.
     ///
@@ -582,10 +643,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func beginScreenContextCapture() {
         screenContextCapture = nil
-        guard Preferences.shared.cleanupEnabled,
-              Preferences.shared.screenContextEnabled else { return }
+        guard Preferences.shared.cleanupEnabled else { return }
         guard ScreenContext.hasPermission else {
-            AppLog.log("Screen context enabled but Screen Recording permission missing — skipping")
+            AppLog.log("Screen Recording permission missing — dictating without screen context")
             return
         }
         let capture = ScreenContextCapture()
@@ -605,8 +665,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             screenContext: screenContext,
             app: app,
             cleanup: Preferences.shared.cleanupEnabled,
-            tone: Preferences.shared.tone.rawValue,
-            allowCloud: Preferences.shared.cloudWarmStartEnabled
+            tone: Preferences.shared.tone.rawValue
         ) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self = self else { return }
@@ -767,6 +826,18 @@ extension AppDelegate: NSMenuDelegate {
             if prefs.answerHotkeyEnabled {
                 item.title = "Suno Answer (\(KeyCombo.display(keyCode: prefs.answerHotkeyKeyCode, modifiers: prefs.answerHotkeyModifiers)))"
             }
+        }
+        // The Control entry mirrors it: hidden while off, and while the loop
+        // is live the menu says so (it only refreshes on open, which is how
+        // the Answer label already behaves mid-recording).
+        if let item = controlMenuItem {
+            let prefs = Preferences.shared
+            item.isHidden = !prefs.controlHotkeyEnabled
+            guard prefs.controlHotkeyEnabled else { return }
+            let combo = KeyCombo.display(keyCode: prefs.controlHotkeyKeyCode, modifiers: prefs.controlHotkeyModifiers)
+            item.title = controlFlow.state == .idle
+                ? "Suno Control (\(combo))"
+                : "Stop Suno Control…"
         }
     }
 }

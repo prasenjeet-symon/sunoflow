@@ -80,17 +80,21 @@ enum Tone: String, CaseIterable, Identifiable {
 /// learnable on their own, which is why a non-default voice also names itself
 /// in a chip below the pill for as long as it is up. See `BubbleView.setTone`.
 extension Tone {
-    var tint: Color {
+    var tint: Color { Color(nsColor: nsTint) }
+
+    /// Each voice carries its own hue. In light mode the chips sit on white
+    /// paper; in dark mode the same hues go a shade paler so they still hold
+    /// against near-black paper. `faithful` follows the app accent, which is
+    /// itself dynamic.
+    var nsTint: NSColor {
         switch self {
-        case .faithful:     return Theme.accent
-        case .professional: return Color(red: 0.165, green: 0.435, blue: 0.690)  // #2A6FB0
-        case .formal:       return Color(red: 0.208, green: 0.337, blue: 0.420)  // #35566B
-        case .casual:       return Color(red: 0.753, green: 0.486, blue: 0.173)  // #C07C2C
-        case .friendly:     return Color(red: 0.722, green: 0.322, blue: 0.498)  // #B8527F
-        case .concise:      return Color(red: 0.118, green: 0.478, blue: 0.333)  // #1E7A55
-        case .confident:    return Color(red: 0.698, green: 0.290, blue: 0.200)  // #B24A33
+        case .faithful:     return .sunoAccent
+        case .professional: return .sunoDynamic(light: 0x2A6FB0, dark: 0x4F96D6)
+        case .formal:       return .sunoDynamic(light: 0x35566B, dark: 0x5A7C96)
+        case .casual:       return .sunoDynamic(light: 0xC07C2C, dark: 0xD9A05A)
+        case .friendly:     return .sunoDynamic(light: 0xB8527F, dark: 0xDB7AA9)
+        case .concise:      return .sunoDynamic(light: 0x1E7A55, dark: 0x45A879)
+        case .confident:    return .sunoDynamic(light: 0xB24A33, dark: 0xDB8A70)
         }
     }
-
-    var nsTint: NSColor { NSColor(tint) }
 }

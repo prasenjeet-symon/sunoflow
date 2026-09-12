@@ -186,9 +186,8 @@ final class TranscriptCard {
         // the card so that shadow has somewhere to fall.
         panel.hasShadow = false
         panel.isMovable = false
-        // Same reasoning as the settings window: this palette was drawn light,
-        // so pin the appearance instead of letting macOS invent a dark variant.
-        panel.appearance = NSAppearance(named: .aqua)
+        // The palette now has a dark variant, and the card re-paints on
+        // appearance change, so the panel simply follows the app appearance.
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
 
         let card = CardView(frame: panel.contentLayoutRect)
@@ -364,9 +363,22 @@ private final class CardView: NSView {
         copyButton.onClick = { [weak self] in self?.onCopy?() }
         footerRow.addSubview(copyButton)
 
-        fade.colors = [NSColor.white.cgColor, NSColor.clear.cgColor]
+        fade.colors = [NSColor.sunoPaper.cgColor, NSColor.clear.cgColor]
         fade.startPoint = CGPoint(x: 0.5, y: 0.18)
         fade.endPoint = CGPoint(x: 0.5, y: 0)
+    }
+
+    /// Layers bake their colors as `CGColor` at setup time. When the effective
+    /// appearance flips — dark mode, or the app's forced appearance — re-paint
+    /// every cached surface. Text colors resolve live from the dynamic
+    /// `NSColor`, so they need no re-apply. The copy button repaints itself.
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        paper.applySunoPaper(cornerRadius: cornerRadius, lift: 14)
+        headerRule.layer?.backgroundColor = NSColor.sunoRuleStrong.cgColor
+        countdownTrack.layer?.backgroundColor = NSColor.sunoRule.cgColor
+        countdownFill.backgroundColor = NSColor.sunoAccent.cgColor
+        fade.colors = [NSColor.sunoPaper.cgColor, NSColor.clear.cgColor]
     }
 
     // MARK: - Content
@@ -398,7 +410,7 @@ private final class CardView: NSView {
             ])
         )
         transcript.scroll(NSPoint(x: 0, y: 0))
-        copyButton.reset(title: "Copy text", symbol: nil, fill: .sunoInk)
+        copyButton.reset(title: "Copy text", symbol: nil, fill: .sunoInkFill)
         needsLayout = true
     }
 
@@ -661,7 +673,7 @@ private final class PillButton: NSView {
 
     private let label = NSTextField(labelWithString: "")
     private let icon = NSImageView()
-    private var fill: NSColor = .sunoInk
+    private var fill: NSColor = .sunoInkFill
     private var hovering = false
     private var pressed = false
     private var trackingArea: NSTrackingArea?
@@ -727,7 +739,7 @@ private final class PillButton: NSView {
 
     private func applyFill(animated: Bool) {
         // Ink, raised on hover, dimmed on press — SunoPrimaryButtonStyle exactly.
-        let base = hovering && fill == .sunoInk ? NSColor.sunoInkRaised : fill
+        let base = hovering && fill == .sunoInkFill ? NSColor.sunoInkFillRaised : fill
         let target = base.withAlphaComponent(pressed ? 0.9 : 1).cgColor
         guard animated else {
             CATransaction.begin()

@@ -87,6 +87,33 @@ final class AnswerWebBridge: NSObject, WKNavigationDelegate {
         }
     }
 
+    // MARK: external links
+
+    // Links in an answer must open in the user's default browser, never in
+    // this view — the transcript is a frameless local page with no way back.
+    // The page itself loads only file URLs (answer.html sets html:false and
+    // linkify:false, so no remote subresources either), so any non-file
+    // navigation is a link the user clicked; hand it to the system.
+    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
+                 decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        if let url = navigationAction.request.url, !url.isFileURL {
+            NSWorkspace.shared.open(url)
+            decisionHandler(.cancel)
+        } else {
+            decisionHandler(.allow)
+        }
+    }
+
+    // target=_blank links ask for a new web view; the system browser already
+    // has tabs, so hand those off the same way.
+    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
+                 for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+        if let url = navigationAction.request.url {
+            NSWorkspace.shared.open(url)
+        }
+        return nil
+    }
+
     private func flushPending() {
         let calls = pending
         pending = []

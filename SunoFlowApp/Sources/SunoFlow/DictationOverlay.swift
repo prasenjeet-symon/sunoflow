@@ -192,9 +192,8 @@ final class DictationOverlay {
         // it so that shadow has somewhere to fall.
         panel.hasShadow = false
         panel.ignoresMouseEvents = true
-        // Same reasoning as the settings window: this palette was drawn light,
-        // so pin the appearance instead of letting macOS invent a dark variant.
-        panel.appearance = NSAppearance(named: .aqua)
+        // The palette now has a dark variant, and the pill re-paints on
+        // appearance change, so the panel simply follows the app appearance.
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
 
         let bubble = BubbleView(frame: NSRect(origin: .zero, size: panelSize))
@@ -314,7 +313,7 @@ private final class BubbleView: NSView {
         // into `chipSpace`. Nothing clips sublayers here, which is the same
         // arrangement the rings rely on. The label is a child of the chip, so
         // one opacity fades the whole thing.
-        chipLayer.shadowColor = NSColor.sunoInk.cgColor
+        chipLayer.shadowColor = NSColor.sunoInkFill.cgColor
         chipLayer.shadowOpacity = 0.12
         chipLayer.shadowRadius = 4
         chipLayer.shadowOffset = CGSize(width: 0, height: -1.5)
@@ -606,5 +605,19 @@ private final class BubbleView: NSView {
             heights[i] += (target - heights[i]) * 0.35
         }
         layoutBars()
+    }
+
+    /// The dynamic colors (paper, rule, voice tint) resolve live, but the
+    /// layers bake their `CGColor` once. When the effective appearance flips,
+    /// re-paint everything that cached a resolved color.
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        pill.applySunoPaper(cornerRadius: pill.bounds.height / 2, lift: 10)
+        chipLayer.backgroundColor = NSColor.sunoPaper.cgColor
+        chipLayer.borderColor = NSColor.sunoRule.cgColor
+        chipLayer.shadowColor = NSColor.sunoInkFill.cgColor
+        chipLabel.foregroundColor = tone.nsTint.cgColor
+        for ring in rings { ring.strokeColor = tone.nsTint.cgColor }
+        for bar in bars { bar.backgroundColor = tone.nsTint.cgColor }
     }
 }

@@ -20,10 +20,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         // `SettingsView` reserves the top-left space for them.
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
-        // The dashboard is designed light-only, like the website. Pinning the
-        // appearance keeps it identical on every Mac instead of handing macOS a
-        // dark variant the palette was never drawn for.
-        window.appearance = NSAppearance(named: .aqua)
+        // The palette now has a dark variant, so the window follows the app appearance.
         window.setContentSize(NSSize(width: 980, height: 700))
         window.minSize = NSSize(width: 880, height: 620)
         window.isReleasedWhenClosed = false

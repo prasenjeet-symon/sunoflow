@@ -88,21 +88,6 @@ private struct ReadyResponse: Decodable {
     let backend_ok: Bool
 }
 
-/// Warm-start (cloud STT) state, nested under `/model/status` → `warm_start`.
-/// Consent-independent — the app combines it with `cloudWarmStartEnabled` and
-/// `model_loaded` to decide what the status row shows. Optional throughout so an
-/// older sidecar that predates the field (or a field it omits) decodes cleanly.
-struct WarmStartStatus: Decodable {
-    let cut_over: Bool
-    let enabled: Bool
-    let samples: Int
-    let median_rtf: Double?
-    let median_agreement: Double?
-    let rtf_target: Double
-    let min_agreement: Double
-    let min_samples: Int
-}
-
 /// Progress/state of the STT model, reported by the sidecar's `/model/status`.
 struct ModelStatus: Decodable {
     let model_present: Bool
@@ -117,9 +102,6 @@ struct ModelStatus: Decodable {
     let error: String
     let model_dir: String
     let model_id: String
-    /// Absent from a sidecar that predates the warm-start feature — optional so
-    /// its omission never fails decoding of the rest of the status.
-    let warm_start: WarmStartStatus?
 }
 
 private struct DownloadStartResponse: Decodable {
@@ -173,7 +155,6 @@ enum TranscriptionClient {
         app: ForegroundApp.Snapshot = ForegroundApp.Snapshot(),
         cleanup: Bool = true,
         tone: String = "",
-        allowCloud: Bool = false,
         completion: @escaping (Result<TranscriptionResult, Error>) -> Void
     ) {
         guard var components = URLComponents(url: baseURL.appendingPathComponent("transcribe"), resolvingAgainstBaseURL: false) else {
@@ -235,12 +216,13 @@ enum TranscriptionClient {
         body.append("Content-Disposition: form-data; name=\"tone\"\r\n\r\n".data(using: .utf8)!)
         body.append(tone.data(using: .utf8) ?? Data())
         body.append("\r\n".data(using: .utf8)!)
-        // The user's consent to the cloud warm-start path. The sidecar routes to
-        // the cloud only while the on-device model is still downloading, and only
-        // when this is true; false keeps every dictation on-device (or waiting).
+        // Cloud warm-start consent. The sidecar routes to the cloud only while
+        // the on-device model is still downloading or being validated; every
+        // request consents — the first-run disclosure covers it, and there is
+        // no separate switch to revoke it.
         body.append("--\(boundary)\r\n".data(using: .utf8)!)
         body.append("Content-Disposition: form-data; name=\"allow_cloud\"\r\n\r\n".data(using: .utf8)!)
-        body.append((allowCloud ? "true" : "false").data(using: .utf8)!)
+        body.append("true".data(using: .utf8)!)
         body.append("\r\n".data(using: .utf8)!)
         body.append("--\(boundary)--\r\n".data(using: .utf8)!)
         request.httpBody = body

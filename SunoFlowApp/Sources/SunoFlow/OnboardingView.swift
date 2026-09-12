@@ -27,10 +27,11 @@ import SwiftUI
 /// gateway and the Cmd+V paste, landing in a text field on this window. If that
 /// field fills in, the product works on this Mac.
 ///
-/// Screen Recording is deliberately *not* asked for here. Screen context is off
-/// by default and only sharpens cleanup; asking for a scary permission during
-/// first run, for a feature the user has not switched on, trades trust for
-/// nothing. It stays in Settings, where turning it on is what asks.
+/// Screen Recording is deliberately *not* asked for here. Screen context runs
+/// whenever cleanup does, but it only sharpens cleanup and soft-fails without
+/// the permission; asking for a scary permission during first run, before the
+/// user has seen the product work, trades trust for nothing. The dashboard's
+/// Action-needed list is where the grant is offered instead.
 struct OnboardingView: View {
     enum Step: Int, CaseIterable {
         case welcome, account, microphone, accessibility, shortcut, setup, tryIt, done
@@ -93,6 +94,13 @@ struct OnboardingView: View {
                     .font(.sunoKicker)
                     .tracking(0.8)
                     .foregroundStyle(Theme.faint)
+                    .padding(.top, 34)
+            } else if step == .welcome {
+                // First run opens on the brand, the way the dashboard's sidebar
+                // and the About page do — the mark, then the words.
+                Image(nsImage: BrandMark.image(size: 34))
+                    .renderingMode(.template)
+                    .foregroundStyle(Theme.accent)
                     .padding(.top, 34)
             } else {
                 Color.clear.frame(height: 34)
@@ -338,29 +346,17 @@ struct OnboardingView: View {
         VStack(alignment: .leading, spacing: 0) {
             SectionLabel(text: "Speech recognition")
             Rule(strong: true)
-            if prefs.cloudWarmStartEnabled {
-                // Disclosure for the default-on cloud warm-start: say plainly
-                // that speech is processed in the cloud until the on-device model
-                // is ready, before the user dictates their first word. This
-                // covers both dictation and Suno Answer questions — they share
-                // the same speech-to-text route.
-                SunoRow(title: "Start dictating right away",
-                        subtitle: "Until the on-device model finishes downloading, your speech — both dictation and Suno Answer questions — is transcribed securely in the cloud so you don't have to wait. SunoFlow switches to on-device automatically once the model is ready, and then nothing leaves this Mac.",
-                        systemImage: "bolt.horizontal.circle") { EmptyView() }
-                SunoRow(title: "Downloading in the background",
-                        subtitle: "About 2.5 GB, once. You can start using SunoFlow now — prefer to keep everything on-device from the first word? Turn off cloud dictation in Settings → Speech Model.",
-                        systemImage: "arrow.down.circle", divider: false) {
-                    StatusText(text: setupStatusText, color: setupStatusColor)
-                }
-            } else {
-                SunoRow(title: "Runs on this Mac",
-                        subtitle: "Your voice is turned into text by this machine. Recordings are never uploaded.",
-                        systemImage: "desktopcomputer") { EmptyView() }
-                SunoRow(title: "One-time download",
-                        subtitle: "About 2.5 GB. It only happens once, and it keeps working afterwards with no internet connection. Dictation is unavailable until it finishes.",
-                        systemImage: "arrow.down.circle", divider: false) {
-                    StatusText(text: setupStatusText, color: setupStatusColor)
-                }
+            // Cloud warm-start disclosure: say plainly that speech is processed
+            // in the cloud until the on-device model is ready, before the user
+            // dictates their first word. This covers both dictation and Suno
+            // Answer questions — they share the same speech-to-text route.
+            SunoRow(title: "Start dictating right away",
+                    subtitle: "Until the on-device model finishes downloading, your speech — both dictation and Suno Answer questions — is transcribed securely in the cloud so you don't have to wait. SunoFlow switches to on-device automatically once the model is ready, and then nothing leaves this Mac.",
+                    systemImage: "bolt.horizontal.circle") { EmptyView() }
+            SunoRow(title: "Downloading in the background",
+                    subtitle: "About 2.5 GB, once. You can start using SunoFlow right away — dictation moves on-device automatically as soon as the download finishes.",
+                    systemImage: "arrow.down.circle", divider: false) {
+                StatusText(text: setupStatusText, color: setupStatusColor)
             }
             SunoProgressBar(value: Double(modelStatus?.downloaded ?? 0),
                             total: Double(max(modelStatus?.file_total ?? 1, 1)))
@@ -372,14 +368,12 @@ struct OnboardingView: View {
                 .padding(.top, 8)
                 .padding(.bottom, 12)
             Rule(strong: true)
-            // With cloud warm-start on, dictation works immediately, so the user
-            // is not held on this step waiting for a multi-gigabyte download.
+            // Cloud warm-start means dictation works immediately, so the user is
+            // not held on this step waiting for a multi-gigabyte download.
             footer(primary: "Continue", action: { go(.tryIt) },
-                   secondary: "Finish later", secondaryAction: finishLater,
-                   primaryEnabled: modelLoaded || prefs.cloudWarmStartEnabled)
+                   secondary: "Finish later", secondaryAction: finishLater)
         }
         .environment(\.sunoRowIconColumn, true)
-        .onAppear { prefs.cloudWarmStartDisclosed = true }
     }
 
     private var tryItStep: some View {

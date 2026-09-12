@@ -4,7 +4,7 @@
 //     focus the moment it appears, so a typed follow-up works immediately.
 //   - A10: dismissal = Esc / ✕ / click-outside / hotkey re-press, aborting work.
 //   - A5: Insert hides the popup and pastes into the previously focused app.
-//   - C6: source chips under the answer; D4: inline error card + Try again.
+//   - D4: inline error card + Try again.
 
 import AppKit
 import WebKit
@@ -225,7 +225,6 @@ final class AnswerPanelView: NSView {
     private var minimizedBottomConstraint: NSLayoutConstraint!
 
     private var retryAction: (() -> Void)?
-    private var chipURLs: [URL] = []
     private var sendHovering = false
 
     /// The height the page currently wants (set by the bridge as the DOM
@@ -257,8 +256,9 @@ final class AnswerPanelView: NSView {
         ])
 
         let glyph = NSImageView()
-        glyph.image = NSImage(systemSymbolName: "sparkles", accessibilityDescription: nil)?
-            .withSymbolConfiguration(.init(pointSize: 13, weight: .medium))
+        // The brand mark, not an SF Symbol stand-in — the same ear as the menu
+        // bar and the app icon. Template, so contentTintColor brands it.
+        glyph.image = BrandMark.image(size: 15)
         glyph.contentTintColor = .sunoAccent
 
         let close = NSButton(image: NSImage(systemSymbolName: "xmark", accessibilityDescription: nil)!,
@@ -379,6 +379,21 @@ final class AnswerPanelView: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError("no nib") }
+
+    /// Layers bake their `CGColor` at build time. When the effective
+    /// appearance flips, re-paint every cached surface. Text resolves live from
+    /// the dynamic `NSColor`, so it needs no re-apply; the send capsule
+    /// re-enters its current state so its fill stays right.
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applySunoPaper(cornerRadius: 14, lift: 10)
+        hairline.layer?.backgroundColor = NSColor.sunoRule.cgColor
+        headerRule.layer?.backgroundColor = NSColor.sunoRule.cgColor
+        input.layer?.backgroundColor = NSColor.sunoWash.cgColor
+        statusDot.layer?.backgroundColor = NSColor.sunoAccent.cgColor
+        let has = !input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        styleSend(active: has, hover: sendHovering)
+    }
 
     private func buildChat() {
         chatScroll.hasVerticalScroller = true
@@ -619,10 +634,10 @@ final class AnswerPanelView: NSView {
         CATransaction.begin()
         CATransaction.setAnimationDuration(Theme.Timing.gentle)
         if active {
-            layer.backgroundColor = (hover ? NSColor.sunoInkRaised : NSColor.sunoInk).cgColor
+            layer.backgroundColor = (hover ? NSColor.sunoInkFillRaised : NSColor.sunoInkFill).cgColor
             sendButton.contentTintColor = .white
         } else {
-            layer.backgroundColor = NSColor.sunoInk.withAlphaComponent(0.32).cgColor
+            layer.backgroundColor = NSColor.sunoInkFill.withAlphaComponent(0.32).cgColor
             sendButton.contentTintColor = NSColor.white.withAlphaComponent(0.85)
         }
         CATransaction.commit()
@@ -703,12 +718,6 @@ final class AnswerPanelView: NSView {
 
     @objc private func retryTapped() { retryAction?() }
 
-    @objc private func chipTapped(_ sender: NSButton) {
-        let index = sender.tag
-        guard index >= 0, index < chipURLs.count else { return }
-        NSWorkspace.shared.open(chipURLs[index])
-    }
-
     func focusInput() {
         window?.makeFirstResponder(input)
     }
@@ -725,7 +734,6 @@ final class AnswerPanelView: NSView {
     func reset() {
         web.reset()
         retryAction = nil
-        chipURLs = []
         setActions(.none)
         setStatus("")
     }
@@ -846,9 +854,9 @@ final class AnswerPanelView: NSView {
         scrollToBottomIfNeeded(force: false)
     }
 
-    /// The finished answer's row: Insert / Copy plus the cited-source chips.
-    func showAnswerActions(sources: [String]) {
-        setActions(.answer(sources))
+    /// The finished answer's row: Insert / Copy.
+    func showAnswerActions() {
+        setActions(.answer)
     }
 
     /// True while an error card is on the transcript — its "Try again" is
@@ -858,37 +866,18 @@ final class AnswerPanelView: NSView {
 
     // MARK: action row
 
-    private enum ActionSet { case none, answer([String]), error }
+    private enum ActionSet { case none, answer, error }
 
     private func setActions(_ set: ActionSet) {
         actionRow.views.forEach { $0.removeFromSuperview() }
-        chipURLs = []
         switch set {
         case .none:
             break
         case .error:
             actionRow.addArrangedSubview(actionButton("Try again", #selector(retryTapped)))
-        case .answer(let sources):
+        case .answer:
             actionRow.addArrangedSubview(actionButton("Insert", #selector(insertTapped)))
             actionRow.addArrangedSubview(actionButton("Copy", #selector(copyTapped)))
-            for (i, domain) in sources.enumerated() {
-                let chip = actionButton(domain, #selector(chipTapped(_:)))
-                chip.tag = i
-                // Faint accent dot instead of a text glyph — colour marks the
-                // chip as an outbound link, the same rationing the site uses.
-                let dot = NSMutableAttributedString(string: "●  ", attributes: [
-                    .font: NSFont.systemFont(ofSize: 7, weight: .semibold),
-                    .foregroundColor: NSColor.sunoAccent.withAlphaComponent(0.65),
-                    .baselineOffset: 1,
-                ])
-                dot.append(NSAttributedString(string: domain, attributes: [
-                    .font: NSFont.systemFont(ofSize: 11.5, weight: .medium),
-                    .foregroundColor: NSColor.sunoInk,
-                ]))
-                chip.attributedTitle = dot
-                chipURLs.append(URL(string: "https://" + domain)!)
-                actionRow.addArrangedSubview(chip)
-            }
         }
         // The action row arrives with its turn, not before it.
         actionRow.alphaValue = 0
@@ -1033,7 +1022,7 @@ final class NSHoverPad: NSView {
 
     override func mouseEntered(with event: NSEvent) {
         // Hand the event to the panel view, which owns one hover handler for
-        // every capsule on the sheet (send CTA + wash actions + chips).
+        // every capsule on the sheet (send CTA + wash actions).
         var view: NSView? = superview
         while let v = view, !(v is AnswerPanelView) { view = v.superview }
         (view as? AnswerPanelView)?.mouseEntered(with: event)
@@ -1171,10 +1160,10 @@ final class RecordingBubbleView: NSView {
         // The disc.
         discLayer.frame = discFrame
         discLayer.cornerRadius = Self.disc / 2
-        discLayer.backgroundColor = NSColor.sunoInk.withAlphaComponent(0.94).cgColor
+        discLayer.backgroundColor = NSColor.sunoInkFill.withAlphaComponent(0.94).cgColor
         discLayer.borderWidth = 1
         discLayer.borderColor = NSColor.sunoRuleStrong.cgColor
-        discLayer.shadowColor = NSColor.sunoInk.cgColor
+        discLayer.shadowColor = NSColor.sunoInkFill.cgColor
         discLayer.shadowOpacity = 0.22
         discLayer.shadowRadius = 12
         discLayer.shadowOffset = CGSize(width: 0, height: -3)
@@ -1202,6 +1191,19 @@ final class RecordingBubbleView: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError("no nib") }
+
+    /// The disc and rings bake their colors as `CGColor`. When the effective
+    /// appearance flips, re-paint them. The ear's white stroke is constant;
+    /// its breathing animation re-binds to the accent next time it runs.
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        discLayer.backgroundColor = NSColor.sunoInkFill.withAlphaComponent(0.94).cgColor
+        discLayer.borderColor = NSColor.sunoRuleStrong.cgColor
+        discLayer.shadowColor = NSColor.sunoInkFill.cgColor
+        levelRing.borderColor = NSColor.sunoAccent.cgColor
+        pulseA.backgroundColor = NSColor.sunoAccent.cgColor
+        pulseB.backgroundColor = NSColor.sunoAccent.cgColor
+    }
 
     /// A gentle spring scale-in as the bubble fades up — the same settle idea
     /// the dictation pill and the answer sheet arrive on, so every floating
@@ -1355,6 +1357,20 @@ final class MicBadgeView: NSControl {
 
     required init?(coder: NSCoder) { fatalError("no nib") }
 
+    /// The badge bakes its layer colors. When the effective appearance flips,
+    /// re-paint to match the current state (the mic icon's tint resolves live).
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        if isRecording {
+            layer?.backgroundColor = NSColor.sunoInkFill.cgColor
+        } else {
+            layer?.backgroundColor = restBadgeColor.cgColor
+        }
+        levelRing.borderColor = NSColor.sunoAccent.cgColor
+        pulseA.backgroundColor = NSColor.sunoAccent.cgColor
+        pulseB.backgroundColor = NSColor.sunoAccent.cgColor
+    }
+
     /// Fixed 24×24 badge — NSControl without cell content reports
     /// noIntrinsicMetric, and without this Auto Layout stretches the badge
     /// between its leading anchor and the field.
@@ -1396,7 +1412,7 @@ final class MicBadgeView: NSControl {
         CATransaction.begin()
         CATransaction.setAnimationDuration(Theme.Timing.quick)
         if recording {
-            layer.backgroundColor = NSColor.sunoInk.cgColor
+            layer.backgroundColor = NSColor.sunoInkFill.cgColor
             micView.contentTintColor = NSColor.sunoAccent
             attachPulsesIfNeeded()
             startMicHeartbeat()

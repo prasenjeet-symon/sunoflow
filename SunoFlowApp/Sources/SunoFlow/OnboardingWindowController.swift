@@ -24,9 +24,7 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
         window.styleMask = [.titled, .closable, .fullSizeContentView]
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
-        // Light-only, like the dashboard and the website: the palette was never
-        // drawn for a dark variant, and macOS would happily hand us one.
-        window.appearance = NSAppearance(named: .aqua)
+        // The palette now has a dark variant, so the window follows the app appearance.
         window.setContentSize(NSSize(width: 720, height: 620))
         window.minSize = NSSize(width: 660, height: 560)
         window.isReleasedWhenClosed = false
