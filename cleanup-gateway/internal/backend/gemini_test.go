@@ -3,6 +3,7 @@ package backend
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -214,6 +215,109 @@ func TestGeminiName(t *testing.T) {
 	be := &GeminiBackend{}
 	if be.Name() != "gemini" {
 		t.Errorf("Name() = %q", be.Name())
+	}
+}
+
+// TestGeminiPlanActionSafetySettings pins the control-only safety thresholds:
+// PlanAction must attach BLOCK_ONLY_HIGH on all four harm categories (the
+// default filter blocked ordinary desktop goals step 0 — live 2026-09-08),
+// and Cleanup must keep sending none.
+func TestGeminiPlanActionSafetySettings(t *testing.T) {
+	var got map[string]any
+	be, _ := newTestGemini(t, func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &got)
+		io.WriteString(w, `{"candidates":[{"content":{"parts":[{"text":"{\"action\":\"done\",\"note\":\"ok\"}"}]}}]}`)
+	})
+	be.ControlUseTool = true
+	be.ControlModel = ""
+	if _, _, err := be.PlanAction(context.Background(), "the prompt", []byte("\xff\xd8jpeg")); err != nil {
+		t.Fatalf("PlanAction: %v", err)
+	}
+	settings, ok := got["safetySettings"].([]any)
+	if !ok || len(settings) != 4 {
+		t.Fatalf("safetySettings = %v, want 4 entries", got["safetySettings"])
+	}
+	for _, s := range settings {
+		m, _ := s.(map[string]any)
+		if m["threshold"] != "BLOCK_ONLY_HIGH" {
+			t.Errorf("category %v threshold = %v, want BLOCK_ONLY_HIGH", m["category"], m["threshold"])
+		}
+		switch m["category"] {
+		case "HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH",
+			"HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT":
+		default:
+			t.Errorf("unexpected category %v", m["category"])
+		}
+	}
+
+	// Cleanup: the dictation prompt is the user's own words — no overrides.
+	got = nil
+	if _, err := be.Cleanup(context.Background(), "p"); err != nil {
+		t.Fatalf("Cleanup: %v", err)
+	}
+	if _, present := got["safetySettings"]; present {
+		t.Errorf("Cleanup sent safetySettings: %v", got["safetySettings"])
+	}
+}
+
+// TestGeminiPlanActionRetriesSafetyBlock pins the one planner retry on a
+// prompt-level safety block: a blocked attempt is retried immediately (the
+// filter is nondeterministic per screenshot and a blocked call produces
+// nothing that could double-execute), then surfaces as ErrSafetyBlock. A
+// non-safety failure is never retried.
+func TestGeminiPlanActionRetriesSafetyBlock(t *testing.T) {
+	tests := []struct {
+		name      string
+		bodies    []string
+		wantCalls int
+		wantErr   bool
+	}{
+		{
+			name:      "block then block",
+			bodies:    []string{`{"promptFeedback":{"blockReason":"SAFETY"}}`, `{"promptFeedback":{"blockReason":"SAFETY"}}`},
+			wantCalls: 2,
+			wantErr:   true,
+		},
+		{
+			name:      "block then success",
+			bodies:    []string{`{"promptFeedback":{"blockReason":"SAFETY"}}`, `{"candidates":[{"content":{"parts":[{"text":"{\"action\":\"click\",\"x\":1,\"y\":2}"}]}}]}`},
+			wantCalls: 2,
+		},
+		{
+			name:      "non-safety failure is NOT retried",
+			bodies:    []string{`{"error":{"code":429}}`},
+			wantCalls: 1,
+			wantErr:   true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			be, _ := newTestGemini(t, func(w http.ResponseWriter, r *http.Request) {
+				n := calls
+				calls++
+				if n >= len(tc.bodies) {
+					t.Errorf("unexpected extra call %d", n)
+					n = len(tc.bodies) - 1
+				}
+				io.WriteString(w, tc.bodies[n])
+			})
+			be.ControlUseTool = true
+			_, _, err := be.PlanAction(context.Background(), "the prompt", []byte("\xff\xd8jpeg"))
+			if calls != tc.wantCalls {
+				t.Fatalf("calls = %d, want %d", calls, tc.wantCalls)
+			}
+			if tc.wantErr {
+				if errors.Is(err, ErrSafetyBlock) != (len(tc.bodies) == 2) {
+					t.Fatalf("err = %v, safety-wrapped = %v, want %v", err, errors.Is(err, ErrSafetyBlock), len(tc.bodies) == 2)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("PlanAction: %v", err)
+			}
+		})
 	}
 }
 

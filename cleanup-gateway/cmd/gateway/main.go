@@ -60,6 +60,15 @@ func main() {
 			AnswerModel:           cfg.ResearchModel,
 			AnswerMediaResolution: cfg.AnswerMediaResolution,
 			AnswerTimeout:         cfg.AnswerTimeout,
+
+			// Suno Control: separate model + deadline, same seam pattern.
+			ControlModel:              cfg.ControlModel,
+			ControlMediaResolution:    cfg.ControlMediaResolution,
+			ControlTimeout:            cfg.ControlTimeout,
+			ControlUseTool:            cfg.ControlUseTool,
+			ControlEnvironment:        cfg.ControlEnvironment,
+			ControlAutoProceedGuarded: cfg.ControlAutoProceedGuarded,
+			ControlThinkingLevel:      cfg.ControlThinking,
 		}
 	default:
 		logger.Error("unsupported backend", "backend", cfg.Backend)
@@ -78,19 +87,24 @@ func main() {
 	}
 
 	srv := &server.Server{
-		Backend:     be,
-		Store:       st,
-		Logger:      logger,
-		QuotaRPM:    cfg.QuotaRPM,
-		QuotaDaily:  cfg.QuotaDaily,
-		LeaseSecret: cfg.LeaseSecret,
-		Analytics:   stats,
-		AnswerModel: cfg.ResearchModel,
-		STTProvider: cfg.STTProvider,
+		Backend:           be,
+		Store:             st,
+		Logger:            logger,
+		QuotaRPM:          cfg.QuotaRPM,
+		QuotaDaily:        cfg.QuotaDaily,
+		LeaseSecret:       cfg.LeaseSecret,
+		Analytics:         stats,
+		AnswerModel:       cfg.ResearchModel,
+		STTProvider:       cfg.STTProvider,
+		ControlModel:      cfg.ControlModel,
+		ControlCoordSpace: cfg.ControlCoordSpace,
+		ControlUseTool:    cfg.ControlUseTool,
 	}
 	limiter := ratelimit.New(st, cfg.QuotaRPM, cfg.QuotaDaily, logger)
 	// Suno Answer has its own meter: separate ledger, separate allowances (D5).
 	answerLimiter := ratelimit.NewAnswer(st, cfg.AnswerQuotaRPM, cfg.AnswerQuotaDaily, cfg.AnswerHardDaily, logger)
+	// Suno Control has its own meter too: one run is a burst of planning calls.
+	controlLimiter := ratelimit.NewControl(st, cfg.ControlQuotaRPM, cfg.ControlQuotaDaily, cfg.ControlHardDaily, logger)
 
 	// Cloud STT (the warm-start dictation path). Defaults to "groq"; config.Load
 	// has validated the provider name. A groq/openrouter provider with no
@@ -183,7 +197,7 @@ func main() {
 		logger.Warn("FIREBASE_PROJECT not set — subscriptions are NOT enforced")
 	}
 
-	handler := server.NewMux(srv, limiter, answerLimiter, sttLimiter, cfg.AdminToken, accounts)
+	handler := server.NewMux(srv, limiter, answerLimiter, sttLimiter, controlLimiter, cfg.AdminToken, accounts)
 
 	httpServer := &http.Server{
 		Addr:              cfg.GatewayAddr,

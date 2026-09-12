@@ -44,6 +44,20 @@ type Server struct {
 	STT backend.STTBackend
 	// STTProvider names the provider for analytics only ("groq"/"gemini"/"").
 	STTProvider string
+
+	// --- Suno Control (separate seam) ---
+	// ControlModel names the control model for analytics only (the backend
+	// resolves the real model from its own config); "" reports "unknown".
+	ControlModel string
+	// ControlCoordSpace is the coordinate dialect the control model speaks:
+	// "normalized" means it answers 0-1000 per axis (Gemini's spatial /
+	// computer-use models) and the handler converts back to image pixels;
+	// anything else (default "pixel") means it already answers in image pixels.
+	ControlCoordSpace string
+	// ControlUseTool selects the native computer_use tool path: the handler
+	// sends the tool-mode prompt and the backend answers with function_call
+	// actions. Tool coordinates are always 0-999, so this implies normalized.
+	ControlUseTool bool
 }
 
 // clientHeader is how a sidecar says what it is: "<os>/<version>", e.g.
@@ -148,8 +162,10 @@ type cleanupResponse struct {
 // a 501 from its handler — the route is still registered so clients get a
 // structured error rather than a 404). sttLimiter is the equivalent meter for
 // the cloud STT warm-start path; nil skips its middleware, and /stt still
-// answers 501 from its handler when no STT provider is wired.
-func NewMux(s *Server, limiter *ratelimit.Limiter, answerLimiter *ratelimit.AnswerLimiter, sttLimiter *ratelimit.STTLimiter, adminToken string, accounts *account.Resolver) http.Handler {
+// answers 501 from its handler when no STT provider is wired. controlLimiter
+// meters Suno Control the same way; nil skips its middleware, and /control
+// still answers 501 from its handler when no control-capable backend is wired.
+func NewMux(s *Server, limiter *ratelimit.Limiter, answerLimiter *ratelimit.AnswerLimiter, sttLimiter *ratelimit.STTLimiter, controlLimiter *ratelimit.ControlLimiter, adminToken string, accounts *account.Resolver) http.Handler {
 	mux := http.NewServeMux()
 
 	// Unauthenticated endpoints.
@@ -202,6 +218,15 @@ func NewMux(s *Server, limiter *ratelimit.Limiter, answerLimiter *ratelimit.Answ
 		sttMiddlewares = append(sttMiddlewares, sttLimiter.Middleware)
 	}
 	mux.Handle("POST /stt", chain(http.HandlerFunc(s.handleSTT), sttMiddlewares...))
+
+	// Suno Control (the agent loop). Same auth/verdict as /cleanup — a paid
+	// feature on the same entitlement — but its own quota meter: one run is a
+	// burst of planning calls, so control's allowances are independent.
+	controlMiddlewares := []func(http.Handler) http.Handler{keyCheck}
+	if controlLimiter != nil {
+		controlMiddlewares = append(controlMiddlewares, controlLimiter.Middleware)
+	}
+	mux.Handle("POST /control", chain(http.HandlerFunc(s.handleControl), controlMiddlewares...))
 
 	// Admin endpoints (separate admin token).
 	adminAuth := auth.AdminMiddleware(adminToken)

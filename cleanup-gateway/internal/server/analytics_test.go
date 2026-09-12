@@ -59,7 +59,7 @@ func serverWithAnalytics(t *testing.T, fb *fakeBackend) (gw *httptest.Server, ke
 		Analytics:  stats,
 	}
 	limiter := ratelimit.New(st, 1000, 100000, nil)
-	ts := httptest.NewServer(NewMux(srv, limiter, nil, nil, "admin-secret", nil))
+	ts := httptest.NewServer(NewMux(srv, limiter, nil, nil, nil, "admin-secret", nil))
 	t.Cleanup(ts.Close)
 
 	return ts, plaintext, func() []string {

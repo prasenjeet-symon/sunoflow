@@ -22,6 +22,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
 from sidecars.shared.answer import MAX_QUERY_LEN, _sse_bytes, stream_answer
+from sidecars.shared.control import MAX_GOAL_LEN, plan_action
 from sidecars.shared.audio import MIN_AUDIO_SECONDS, encode_opus, wav_duration_seconds
 from sidecars.shared.cleanup import (
     NotEntitled,
@@ -476,6 +477,73 @@ def create_app(adapter: SttAdapter, corrections_path: str) -> FastAPI:
         yield (
             f"event: error\ndata: {json.dumps({'error': code, 'message': message})}\n\n"
         ).encode("utf-8")
+
+    @app.post("/control")
+    async def control(
+        goal: str = Form(...),
+        steps: str = Form("[]"),
+        image: UploadFile = File(None),
+        context: str = Form("{}"),
+        device_key: str = Header("", alias="X-SunoFlow-Device-Key"),
+    ):
+        """Proxy one Suno Control planning step to the hosted gateway.
+
+        ``goal`` is the dictated goal for the run; ``steps`` is a JSON array of
+        prior ``{action, note}`` objects, oldest first; ``image`` is the current
+        screen as JPEG; ``context`` is a JSON object of observed state (app,
+        window, cursor_x, cursor_y, image_width, image_height). The gateway
+        answers with exactly one action, flat JSON — passed through verbatim
+        (plus a lease field when the account middleware minted one).
+
+        Failures come back as 200 JSON {"error": ...} (limit, outage) so the
+        app's loop stops on one shape; a disconnected device raises NotEntitled
+        → the same 402 /transcribe returns.
+        """
+        key = device_key.removeprefix("Bearer ").strip()
+        try:
+            prior = json.loads(steps) if steps else []
+            if not isinstance(prior, list):
+                prior = []
+        except Exception:
+            prior = []
+        try:
+            ctx = json.loads(context) if context else {}
+            if not isinstance(ctx, dict):
+                ctx = {}
+        except Exception:
+            ctx = {}
+
+        image_bytes = b""
+        if image is not None:
+            image_bytes = await image.read()
+
+        # Correct the dictated goal against the user's dictionary BEFORE the
+        # gateway sees it: a goal built from mis-heard words drives a mis-heard
+        # plan. Corrections only, exactly like /transcribe and /answer —
+        # expansions are never substituted blind.
+        corrected = goal.strip()[:MAX_GOAL_LEN]
+        if corrected:
+            corrected = corrections.apply(corrected).strip()[:MAX_GOAL_LEN] or corrected
+
+        # Dictionary entries relevant to the goal: the planner reads them to
+        # make sense of garbled words (same relevant_for machinery as
+        # /transcribe and /answer).
+        try:
+            relevant = corrections.relevant_for(goal, limit=40)
+            result = await run_in_threadpool(
+                plan_action, corrected or goal, prior, image_bytes, ctx, key, relevant
+            )
+        except NotEntitled as exc:
+            print(f"Refusing Suno Control — {exc}")
+            return NotEntitledResponse(str(exc), getattr(exc, "code", "not_entitled"))
+        except ValueError as exc:
+            # Bad goal/image from the app itself.
+            return JSONResponse(
+                status_code=400,
+                content={"error": "malformed request", "message": str(exc)},
+            )
+
+        return JSONResponse(status_code=200, content=result)
 
     @app.post("/learn")
     async def learn(original: str = Form(...), edited: str = Form(...)):

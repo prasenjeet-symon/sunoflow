@@ -63,6 +63,51 @@ type Config struct {
 	AnswerQuotaDaily      int           // default per-account answer messages/day
 	AnswerHardDaily       int           // gateway-side hard ceiling on messages/day
 
+	// Suno Control (the agent-loop computer-control feature). Like answer, its
+	// own model + deadline + quota: a run is a burst of paid planning calls
+	// (the client runs up to 100 steps, one call each), and each call carries a
+	// screenshot. ControlModel defaults to the same flash-lite class as
+	// cleanup.
+	ControlModel           string
+	ControlMediaResolution string        // Gemini 3 media-resolution bucket for the control screenshot
+	ControlTimeout         time.Duration // total deadline per plan call
+	ControlQuotaRPM        int           // default per-account control steps/minute
+	ControlQuotaDaily      int           // default per-account control steps/day
+	ControlHardDaily       int           // gateway-side hard ceiling on steps/day
+	// ControlCoordSpace is how the control model expresses click coordinates:
+	// "pixel" (answers in image pixels — the default, right for a general
+	// model) or "normalized" (answers 0-1000 on each axis, what Gemini's
+	// purpose-built spatial / computer-use models emit). The gateway converts
+	// normalized coords back to image pixels before replying, so the sidecar
+	// and the app's executor are identical either way — this is purely which
+	// model dialect the gateway speaks.
+	ControlCoordSpace string
+	// ControlUseTool switches Suno Control from the free-form JSON-prompt path
+	// to Gemini's native computer_use tool: the gateway declares the tool, the
+	// model answers with function_call actions (0-999 coords), and the gateway
+	// maps those to the same action schema the client already executes. Implies
+	// normalized coordinates. Default off (the JSON-prompt path).
+	ControlUseTool bool
+	// ControlEnvironment is the computer_use environment when ControlUseTool is
+	// on: ENVIRONMENT_DESKTOP (default — driving the whole Mac), _BROWSER or
+	// _MOBILE.
+	ControlEnvironment string
+	// ControlAutoProceedGuarded lets Suno Control carry out a step the tool
+	// flags for confirmation (send a message, purchase, delete, sign-in) when
+	// the spoken goal asked for it, instead of stopping. The prompt framing only
+	// lets the model reach such a step when the goal explicitly and
+	// unambiguously requested it, and prompt-injection detection stays on — so
+	// an action induced by on-screen content is still refused. OFF by default:
+	// enabling it means the agent will send/buy/delete without a separate
+	// confirmation, so it is a deliberate per-deployment choice.
+	ControlAutoProceedGuarded bool
+	// ControlThinking is a planner-specific thinking-level override
+	// (CONTROL_THINKING_LEVEL: minimal|low|medium|high). Empty falls back to the
+	// shared GEMINI_THINKING_LEVEL — control is a different workload from
+	// cleanup, and in JSON-prompt mode (ControlUseTool=false) the model's
+	// reasoning IS the dominant per-call cost, so it can want a different floor.
+	ControlThinking string
+
 	// Cloud STT (the warm-start dictation path): a new install can dictate
 	// immediately over the cloud while its local model downloads in the
 	// background, then the sidecar cuts over to on-device and stops calling here.
@@ -133,6 +178,18 @@ func Load() (Config, error) {
 		AnswerQuotaDaily:      envInt("ANSWER_QUOTA_DAILY", 50),
 		AnswerHardDaily:       envInt("ANSWER_HARD_DAILY", 100),
 
+		ControlModel:              envStr("CONTROL_MODEL", "gemini-3.5-flash-lite"),
+		ControlMediaResolution:    envStr("CONTROL_MEDIA_RESOLUTION", "MEDIA_RESOLUTION_MEDIUM"),
+		ControlTimeout:            envDuration("CONTROL_TIMEOUT", 30*time.Second),
+		ControlQuotaRPM:           envInt("CONTROL_QUOTA_RPM", 20),
+		ControlQuotaDaily:         envInt("CONTROL_QUOTA_DAILY", 200),
+		ControlHardDaily:          envInt("CONTROL_HARD_DAILY", 300),
+		ControlCoordSpace:         envStr("CONTROL_COORD_SPACE", "pixel"),
+		ControlUseTool:            envBool("CONTROL_USE_TOOL", false),
+		ControlEnvironment:        envStr("CONTROL_ENVIRONMENT", "ENVIRONMENT_DESKTOP"),
+		ControlAutoProceedGuarded: envBool("CONTROL_AUTOPROCEED_GUARDED", false),
+		ControlThinking:           envStr("CONTROL_THINKING_LEVEL", ""),
+
 		STTProvider:   envStr("STT_PROVIDER", "groq"),
 		STTAPIKey:     envStr("STT_API_KEY", ""),
 		STTModel:      envStr("STT_MODEL", ""),
@@ -194,6 +251,18 @@ func envDuration(key string, def time.Duration) time.Duration {
 	if v, ok := os.LookupEnv(key); ok && v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			return d
+		}
+	}
+	return def
+}
+
+func envBool(key string, def bool) bool {
+	if v, ok := os.LookupEnv(key); ok && v != "" {
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "1", "true", "yes", "on":
+			return true
+		case "0", "false", "no", "off":
+			return false
 		}
 	}
 	return def

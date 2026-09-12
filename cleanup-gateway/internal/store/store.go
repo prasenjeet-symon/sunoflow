@@ -13,12 +13,12 @@ import (
 
 // Key is a stored API key. The plaintext is never persisted; only the SHA-256 hash.
 type Key struct {
-	ID        string
-	KeyHash   string
-	Label     string
-	CreatedAt int64
-	RevokedAt sql.NullInt64
-	QuotaRPM  int
+	ID         string
+	KeyHash    string
+	Label      string
+	CreatedAt  int64
+	RevokedAt  sql.NullInt64
+	QuotaRPM   int
 	QuotaDaily int
 }
 
@@ -70,6 +70,12 @@ CREATE TABLE IF NOT EXISTS answer_usage (
   PRIMARY KEY (key_id, day)
 );
 CREATE TABLE IF NOT EXISTS stt_usage (
+  key_id      TEXT NOT NULL,
+  day         TEXT NOT NULL,
+  count       INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (key_id, day)
+);
+CREATE TABLE IF NOT EXISTS control_usage (
   key_id      TEXT NOT NULL,
   day         TEXT NOT NULL,
   count       INTEGER NOT NULL DEFAULT 0,
@@ -245,6 +251,41 @@ func (s *Store) IncrementSTTUsage(ctx context.Context, keyID string) error {
 	return nil
 }
 
+// ControlUsageForToday returns how many Suno Control planning steps the given
+// meter key has started today (UTC), over the control ledger. A control run
+// is a burst of paid calls (up to 100 steps, one gateway call each), so it is
+// metered separately from dictation and answer.
+func (s *Store) ControlUsageForToday(ctx context.Context, keyID string) (int, error) {
+	day := time.Now().UTC().Format("2006-01-02")
+	var count int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT count FROM control_usage WHERE key_id = ? AND day = ?`,
+		keyID, day,
+	).Scan(&count)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("control usage lookup: %w", err)
+	}
+	return count, nil
+}
+
+// IncrementControlUsage bumps the per-key per-day control counter. Best-effort
+// at the call site: a failed write must not fail a request the backend is
+// about to plan.
+func (s *Store) IncrementControlUsage(ctx context.Context, keyID string) error {
+	day := time.Now().UTC().Format("2006-01-02")
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO control_usage (key_id, day, count) VALUES (?, ?, 1)
+		 ON CONFLICT(key_id, day) DO UPDATE SET count = count + 1`,
+		keyID, day)
+	if err != nil {
+		return fmt.Errorf("increment control usage: %w", err)
+	}
+	return nil
+}
+
 // Close closes the underlying database.
 func (s *Store) Close() error { return s.db.Close() }
 
@@ -253,10 +294,10 @@ var ErrNotFound = errors.New("key not found")
 
 // KeyMeta is the metadata view returned to admin listings (no hash).
 type KeyMeta struct {
-	ID        string `json:"id"`
-	Label     string `json:"label"`
-	CreatedAt int64  `json:"created_at"`
-	Revoked   bool   `json:"revoked"`
-	QuotaRPM  int    `json:"quota_rpm"`
-	QuotaDaily int   `json:"quota_daily"`
+	ID         string `json:"id"`
+	Label      string `json:"label"`
+	CreatedAt  int64  `json:"created_at"`
+	Revoked    bool   `json:"revoked"`
+	QuotaRPM   int    `json:"quota_rpm"`
+	QuotaDaily int    `json:"quota_daily"`
 }

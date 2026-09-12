@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -53,6 +54,41 @@ type GeminiBackend struct {
 	// Zero falls back to Timeout.
 	AnswerTimeout time.Duration
 
+	// --- Suno Control (separate seam) ---
+	// ControlModel is the model control requests go to (CONTROL_MODEL). Empty
+	// falls back to Model, so a deployment that never sets it still works.
+	// Choosing the next action is vision + judgement; same flash-lite class,
+	// independently tunable.
+	ControlModel string
+	// ControlMediaResolution is the Gemini 3 media-resolution bucket for the
+	// control screenshot (CONTROL_MEDIA_RESOLUTION). Same lever as the answer
+	// one; empty leaves it to the model default (high).
+	ControlMediaResolution string
+	// ControlTimeout is the total deadline for one plan call. Zero falls back
+	// to Timeout.
+	ControlTimeout time.Duration
+	// ControlUseTool switches PlanAction to Gemini's native computer_use tool:
+	// the request declares the tool and the reply is a function_call action
+	// (0-999 coords), which PlanAction maps into the same flat action JSON the
+	// JSON-prompt path returns — so the gateway handler and the client are
+	// unchanged. Default false (the free-form JSON-prompt path).
+	ControlUseTool bool
+	// ControlEnvironment is the computer_use environment when ControlUseTool is
+	// on: ENVIRONMENT_DESKTOP (default), ENVIRONMENT_BROWSER or _MOBILE.
+	ControlEnvironment string
+	// ControlAutoProceedGuarded carries CONTROL_AUTOPROCEED_GUARDED into the
+	// action mapping: when true, a require_confirmation safety_decision on a
+	// guarded action (send/purchase/delete/sign-in) is performed rather than
+	// refused — the spoken goal authorized it. Other decisions (a hard block, a
+	// prompt-injection flag) still stop, and injection detection stays on.
+	ControlAutoProceedGuarded bool
+	// ControlThinkingLevel overrides ThinkingLevel for PlanAction only
+	// (CONTROL_THINKING_LEVEL): control is a different workload from cleanup,
+	// and in JSON-prompt mode (ControlUseTool=false) reasoning IS the dominant
+	// per-call cost, so the planner can want a different floor than dictation.
+	// Empty falls back to ThinkingLevel.
+	ControlThinkingLevel string
+
 	// answerClient wraps b.Client's transport (built once) for the streaming
 	// answer path — see answerHTTPClient.
 	answerClientOnce sync.Once
@@ -79,8 +115,49 @@ func (b *GeminiBackend) answerHTTPClient() *http.Client {
 // --- request shapes ---
 
 type geminiRequest struct {
-	Contents         []geminiContent `json:"contents"`
-	GenerationConfig geminiGenConfig `json:"generationConfig"`
+	Contents         []geminiContent  `json:"contents"`
+	GenerationConfig geminiGenConfig  `json:"generationConfig"`
+	Tools            []geminiToolDecl `json:"tools,omitempty"`
+	// SafetySettings relax Gemini's default block thresholds for the control
+	// planner. Legitimate desktop automation reads to the filter like social
+	// messaging/purchasing automation (seen live 2026-09-08: an Instagram goal
+	// blocked step 0, PromptFeedback.BlockReason SAFETY), and defaults apply
+	// whenever the request carries no safetySettings. BLOCK_ONLY_HIGH keeps the
+	// true hard blocks while letting ordinary automation through.
+	SafetySettings []geminiSafetySetting `json:"safetySettings,omitempty"`
+}
+
+// geminiSafetySetting sets the block threshold for one harm category. Threshold
+// strings are the API's enum literals (BLOCK_NONE is allowed only for approved
+// accounts, so BLOCK_ONLY_HIGH is the loosest we can ask for).
+type geminiSafetySetting struct {
+	Category  string `json:"category"`
+	Threshold string `json:"threshold"`
+}
+
+// controlSafetySettings is the safetySettings block PlanAction attaches — all
+// four categories at BLOCK_ONLY_HIGH. Cleanup keeps Gemini's defaults: its
+// prompts are the user's own dictation, which the filter does not object to.
+var controlSafetySettings = []geminiSafetySetting{
+	{Category: "HARM_CATEGORY_HARASSMENT", Threshold: "BLOCK_ONLY_HIGH"},
+	{Category: "HARM_CATEGORY_HATE_SPEECH", Threshold: "BLOCK_ONLY_HIGH"},
+	{Category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", Threshold: "BLOCK_ONLY_HIGH"},
+	{Category: "HARM_CATEGORY_DANGEROUS_CONTENT", Threshold: "BLOCK_ONLY_HIGH"},
+}
+
+// geminiToolDecl is a built-in tool declaration on a generateContent request.
+// Only the computer_use seam is modeled here; nil fields are omitted, so an
+// empty declaration is never sent.
+type geminiToolDecl struct {
+	ComputerUse *geminiComputerUse `json:"computer_use,omitempty"`
+}
+
+// geminiComputerUse configures the native computer-use tool (Suno Control tool
+// mode). Environment scopes the action space (ENVIRONMENT_DESKTOP for the Mac);
+// prompt-injection detection is Google's own guard on top of our framing.
+type geminiComputerUse struct {
+	Environment                    string `json:"environment"`
+	EnablePromptInjectionDetection bool   `json:"enable_prompt_injection_detection,omitempty"`
 }
 
 type geminiContent struct {
@@ -132,6 +209,17 @@ type geminiRespPart struct {
 	Metadata struct {
 		IsThinking bool `json:"isThinking"`
 	} `json:"metadata"`
+	// FunctionCall is present on a part when the model invoked a tool — the
+	// computer_use tool answers here (Suno Control tool mode) rather than in
+	// Text. Nil on ordinary text/reasoning parts.
+	FunctionCall *geminiFunctionCall `json:"functionCall,omitempty"`
+}
+
+// geminiFunctionCall is one tool invocation. Args stays raw so the caller
+// decodes only the fields the specific action carries.
+type geminiFunctionCall struct {
+	Name string          `json:"name"`
+	Args json.RawMessage `json:"args"`
 }
 
 type geminiResponse struct {
@@ -149,6 +237,16 @@ type geminiResponse struct {
 		Status  string `json:"status"`
 		Message string `json:"message"`
 	} `json:"error"`
+	// UsageMetadata is the token accounting for the call. thoughtsTokenCount is
+	// the reasoning (thinking) tokens, reported apart from candidatesTokenCount
+	// (the visible answer); both bill at the output rate. Absent on some error
+	// responses, so callers treat zero as "unreported".
+	UsageMetadata struct {
+		PromptTokenCount     int `json:"promptTokenCount"`
+		CandidatesTokenCount int `json:"candidatesTokenCount"`
+		ThoughtsTokenCount   int `json:"thoughtsTokenCount"`
+		TotalTokenCount      int `json:"totalTokenCount"`
+	} `json:"usageMetadata"`
 }
 
 // geminiGroundingChunk is one source the grounding tool used. Domain, when
@@ -179,6 +277,15 @@ type geminiStreamResponse struct {
 	PromptFeedback struct {
 		BlockReason string `json:"blockReason"`
 	} `json:"promptFeedback"`
+	// UsageMetadata is the token accounting for the call, attached to the final
+	// candidate chunk. Same shape as geminiResponse's so usageFromResponse maps
+	// it onto the backend Usage shape for analytics.
+	UsageMetadata struct {
+		PromptTokenCount     int `json:"promptTokenCount"`
+		CandidatesTokenCount int `json:"candidatesTokenCount"`
+		ThoughtsTokenCount   int `json:"thoughtsTokenCount"`
+		TotalTokenCount      int `json:"totalTokenCount"`
+	} `json:"usageMetadata"`
 	Error struct {
 		Code    int    `json:"code"`
 		Status  string `json:"status"`
@@ -211,13 +318,450 @@ func (b *GeminiBackend) Cleanup(ctx context.Context, prompt string) (string, err
 		return "", fmt.Errorf("marshal gemini request: %w", err)
 	}
 
-	c, cancel := context.WithTimeout(ctx, b.Timeout)
+	return b.callOneShot(ctx, body, b.Model, b.Timeout)
+}
+
+// PlanAction implements backend.ControlBackend (Suno Control): the one-shot
+// call with the screen image riding as its own inline part before the prompt
+// text — the same image-first order the answer path uses, which is what Gemini
+// expects for interleaved text-and-image contents.
+func (b *GeminiBackend) PlanAction(ctx context.Context, prompt string, imageJPEG []byte) (string, Usage, error) {
+	content := geminiContent{Role: "user"}
+	if len(imageJPEG) > 0 {
+		content.Parts = append(content.Parts, geminiPart{
+			InlineData: &geminiInline{
+				MimeType: "image/jpeg",
+				Data:     base64.StdEncoding.EncodeToString(imageJPEG),
+			},
+		})
+	}
+	content.Parts = append(content.Parts, geminiPart{Text: prompt})
+
+	reqBody := geminiRequest{
+		Contents:         []geminiContent{content},
+		GenerationConfig: geminiGenConfig{Temperature: 0.0},
+	}
+	// The media-resolution bucket only matters when an image rides — it caps
+	// the image's token cost (same lever as the answer screenshot).
+	if len(imageJPEG) > 0 && b.ControlMediaResolution != "" {
+		reqBody.GenerationConfig.MediaResolution = b.ControlMediaResolution
+	}
+	// planningThinking resolves the thinking level one PlanAction call should
+	// send: the control-specific override (ControlThinkingLevel) when set,
+	// falling back to the shared cleanup level (ThinkingLevel).
+	planningThinking := b.ControlThinkingLevel
+	if planningThinking == "" {
+		planningThinking = b.ThinkingLevel
+	}
+	if planningThinking != "" {
+		reqBody.GenerationConfig.ThinkingConfig = &geminiThinkingConfig{
+			ThinkingLevel: planningThinking,
+		}
+	}
+	// Tool mode: declare the native computer_use tool. The model then answers
+	// with a function_call action (0-999 coords) instead of our JSON schema,
+	// and PlanAction maps that back to the same flat action JSON below.
+	if b.ControlUseTool {
+		env := b.ControlEnvironment
+		if env == "" {
+			env = "ENVIRONMENT_DESKTOP"
+		}
+		reqBody.Tools = []geminiToolDecl{{ComputerUse: &geminiComputerUse{
+			Environment:                    env,
+			EnablePromptInjectionDetection: true,
+		}}}
+	}
+	// Control-only safety thresholds: ordinary desktop automation reads to
+	// Gemini's default filter like social/purchasing automation and gets
+	// blocked step 0 (live 2026-09-08, Instagram goal). BLOCK_ONLY_HIGH keeps
+	// hard blocks blocked — both attempts — while letting normal goals run.
+	reqBody.SafetySettings = controlSafetySettings
+
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", Usage{}, fmt.Errorf("marshal gemini request: %w", err)
+	}
+
+	timeout := b.Timeout
+	if b.ControlTimeout > 0 {
+		timeout = b.ControlTimeout
+	}
+
+	// Both paths read the raw response so the call's token usage travels back to
+	// the handler (control analytics) alongside the action.
+	//
+	// The prompt-level safety filter is nondeterministic on image+text requests
+	// (the same goal passed at one screenshot and blocked at another on
+	// 2026-09-08), and a block fails fast — the model never generates. So one
+	// immediate retry is cheap and usually clears a marginal block, while
+	// BLOCK_ONLY_HIGH keeps genuine hard blocks blocked on both attempts.
+	// Deliberately NOT a general network retry: this is the planner path, and a
+	// retried step could double-execute on a changed screen — the retry fires
+	// only on ErrSafetyBlock, where nothing was produced to execute.
+	started := time.Now()
+	out, err := b.callOneShotRaw(ctx, body, b.controlModel(), timeout)
+	if errors.Is(err, ErrSafetyBlock) {
+		if remain := timeout - time.Since(started); remain > 2*time.Second {
+			out, err = b.callOneShotRaw(ctx, body, b.controlModel(), remain)
+		}
+	}
+	if err != nil {
+		return "", Usage{}, err
+	}
+	if b.ControlUseTool {
+		js, err := actionJSONFromResponse(out, b.ControlAutoProceedGuarded)
+		return js, usageFromResponse(out), err
+	}
+	text, err := textFromResponse(out)
+	return text, usageFromResponse(out), err
+}
+
+// computerUseArgs decodes the args of a computer_use function_call. Fields are
+// pointers/slices so an absent one is distinguishable from a zero value; both
+// the Gemini 3.x names and the 2.5-era fallbacks (magnitude) are accepted.
+type computerUseArgs struct {
+	X               *int                  `json:"x"`
+	Y               *int                  `json:"y"`
+	StartX          *int                  `json:"start_x"`
+	StartY          *int                  `json:"start_y"`
+	EndX            *int                  `json:"end_x"`
+	EndY            *int                  `json:"end_y"`
+	Text            *string               `json:"text"`
+	PressEnter      *bool                 `json:"press_enter"`
+	Key             *string               `json:"key"`
+	Keys            []string              `json:"keys"`
+	Direction       *string               `json:"direction"`
+	MagnitudePixels *int                  `json:"magnitude_in_pixels"`
+	Magnitude       *int                  `json:"magnitude"` // 2.5-era name
+	Seconds         *float64              `json:"seconds"`
+	Intent          string                `json:"intent"`
+	SafetyDecision  *geminiSafetyDecision `json:"safety_decision"`
+}
+
+// geminiSafetyDecision is the tool's guard on a risky action: when present with
+// a decision other than "allow", the model wants human confirmation before the
+// step runs.
+type geminiSafetyDecision struct {
+	Decision    string `json:"decision"`
+	Explanation string `json:"explanation"`
+}
+
+// actionJSONFromResponse turns a computer_use reply into the flat action JSON
+// the gateway already parses. The first function_call is the action; when the
+// model returns no function_call it has nothing left to do, which is the tool's
+// termination signal — mapped to "done" with any trailing text as the note.
+func actionJSONFromResponse(out *geminiResponse, autoProceedGuarded bool) (string, error) {
+	var fc *geminiFunctionCall
+	var textSB strings.Builder
+	for i := range out.Candidates[0].Content.Parts {
+		p := out.Candidates[0].Content.Parts[i]
+		if p.FunctionCall != nil {
+			if fc == nil {
+				fc = p.FunctionCall
+			}
+			continue
+		}
+		if p.Thought || p.Metadata.IsThinking {
+			continue
+		}
+		textSB.WriteString(p.Text)
+	}
+
+	var action map[string]any
+	if fc != nil {
+		var args computerUseArgs
+		if len(fc.Args) > 0 {
+			if err := json.Unmarshal(fc.Args, &args); err != nil {
+				return "", fmt.Errorf("decode computer_use args: %w", err)
+			}
+		}
+		action = mapComputerUseCall(fc.Name, args, autoProceedGuarded)
+	} else {
+		note := strings.TrimSpace(textSB.String())
+		if note == "" {
+			note = "Done."
+		}
+		action = map[string]any{"action": "done", "note": note}
+	}
+
+	buf, err := json.Marshal(action)
+	if err != nil {
+		return "", fmt.Errorf("marshal mapped action: %w", err)
+	}
+	return string(buf), nil
+}
+
+// hotkeyModifiers maps computer_use modifier-key names onto the executor's four
+// modifiers. The non-modifier key in a hotkey combination becomes the key.
+// The _l/_r entries are the X11 keysym names the computer_use protocol itself
+// speaks — the model emits "super_l" for the left Super/Command key. Without
+// them a hotkey like ["super_l","space"] loses its modifier entirely: the
+// keysym falls through as the key and "space" overwrites it, degrading ⌘Space
+// to a bare Space press (seen live 2026-09-08: three wasted Spotlight steps,
+// then a lone "super_l" the executor refused, killing the run).
+var hotkeyModifiers = map[string]string{
+	"cmd": "command", "command": "command", "meta": "command", "super": "command", "win": "command",
+	"cmd_l": "command", "cmd_r": "command",
+	"super_l": "command", "super_r": "command",
+	"meta_l": "command", "meta_r": "command",
+	"win_l": "command", "win_r": "command",
+	"ctrl": "control", "control": "control",
+	"ctrl_l": "control", "ctrl_r": "control",
+	"alt": "option", "opt": "option", "option": "option",
+	"alt_l": "option", "alt_r": "option",
+	"shift":   "shift",
+	"shift_l": "shift", "shift_r": "shift",
+}
+
+// keyNameAliases maps the X11 keysym names the computer_use protocol speaks
+// onto the executor's key names. Unlisted names pass through unchanged — the
+// executor's own key table then decides, and an unknown one is refused
+// honestly downstream.
+var keyNameAliases = map[string]string{
+	"esc":        "escape",
+	"back_space": "delete",
+	"backspace":  "delete",
+	"spacebar":   "space",
+	"pgup":       "pageup",
+	"page_up":    "pageup",
+	"pgdn":       "pagedown",
+	"page_down":  "pagedown",
+	"arrowup":    "up",
+	"arrowdown":  "down",
+	"arrowleft":  "left",
+	"arrowright": "right",
+	"uparrow":    "up",
+	"downarrow":  "down",
+	"leftarrow":  "left",
+	"rightarrow": "right",
+}
+
+// modifierKeyNames are the executor's modifier names. Pressed alone they do
+// nothing on the user's machine, and the executor's key table cannot perform
+// them — pressKey would refuse and kill the run. The tool emits a lone
+// modifier press when a hotkey step went wrong (seen live 2026-09-08:
+// press_key("super_l") after three degraded hotkey attempts); a short wait
+// keeps the loop alive and lets the model correct itself on the next
+// screenshot instead of stopping honestly on a step nothing could ever do.
+var modifierKeyNames = map[string]bool{
+	"command": true, "option": true, "control": true, "shift": true,
+}
+
+// normalizeKeyName maps one computer_use key name onto the executor's names.
+func normalizeKeyName(k string) string {
+	lowered := strings.ToLower(k)
+	// A bare space character is the space key, not an empty name.
+	if strings.TrimSpace(lowered) == "" && lowered != "" {
+		return "space"
+	}
+	kk := strings.TrimSpace(lowered)
+	if a, ok := keyNameAliases[kk]; ok {
+		return a
+	}
+	return kk
+}
+
+// keyOrWait maps a normalized key name to the flat key action, falling back to
+// a short wait when the name is a lone modifier (see modifierKeyNames) —
+// including the raw keysym names (super_l) the tool emits for a modifier
+// pressed by itself, which the executor's key table could never perform.
+func keyOrWait(key string, mods []string) map[string]any {
+	if modifierKeyNames[key] || hotkeyModifiers[key] != "" {
+		return map[string]any{"action": "wait", "seconds": 0.5}
+	}
+	m := map[string]any{"action": "key", "key": key}
+	if len(mods) > 0 {
+		m["modifiers"] = mods
+	}
+	return m
+}
+
+func splitHotkey(keys []string) (key string, mods []string) {
+	for _, k := range keys {
+		kk := strings.ToLower(strings.TrimSpace(k))
+		if kk == "" {
+			continue
+		}
+		if m, ok := hotkeyModifiers[kk]; ok {
+			mods = append(mods, m)
+		} else {
+			key = kk // the last non-modifier is the key being pressed
+		}
+	}
+	return key, mods
+}
+
+// scrollTicks converts a pixel scroll magnitude into the executor's wheel-tick
+// amount (~100px per tick, 1-10). Zero means "unspecified" — the action schema
+// then applies its own default.
+func scrollTicks(a computerUseArgs) int {
+	px := 0
+	switch {
+	case a.MagnitudePixels != nil:
+		px = *a.MagnitudePixels
+	case a.Magnitude != nil:
+		px = *a.Magnitude
+	}
+	if px <= 0 {
+		return 0
+	}
+	t := (px + 99) / 100
+	if t > 10 {
+		t = 10
+	}
+	return t
+}
+
+// mapComputerUseCall translates one computer_use function_call into the flat
+// action schema Suno Control validates and executes. Coordinates stay in the
+// tool's 0-999 space; the gateway handler denormalizes them to image pixels
+// (tool mode implies normalized coordinates). Actions the executor cannot
+// perform, and any action the model flagged for safety confirmation, map to
+// "failed" so the loop stops honestly rather than acting on a guess.
+func mapComputerUseCall(name string, args computerUseArgs, autoProceedGuarded bool) map[string]any {
+	note := strings.TrimSpace(args.Intent)
+	withNote := func(m map[string]any) map[string]any {
+		if _, ok := m["note"]; !ok && note != "" {
+			m["note"] = note
+		}
+		return m
+	}
+	// failed reports the diagnostic cause (why the step could not run), not the
+	// model's intent — that is what's useful in the capsule and the logs when
+	// something the executor can't do comes back.
+	failed := func(reason string) map[string]any {
+		return map[string]any{"action": "failed", "note": reason}
+	}
+	coord := func(action string, x, y *int) map[string]any {
+		if x == nil || y == nil {
+			return failed("missing coordinates for " + action)
+		}
+		return map[string]any{"action": action, "x": *x, "y": *y}
+	}
+
+	// The tool flagged this step (a sign-in, purchase, delete, message send…).
+	// A require_confirmation asks a human to okay a guarded action; the spoken
+	// goal is that okay — the framing only lets the model reach such a step when
+	// the goal explicitly asked — so with auto-proceed on we perform it, and the
+	// switch below maps the underlying action. Any OTHER decision (a hard block,
+	// or a prompt-injection flag) still stops: that is the on-screen-hijack case
+	// the guard exists for, and the goal never authorizes it.
+	if sd := args.SafetyDecision; sd != nil && sd.Decision != "" && !strings.EqualFold(sd.Decision, "allow") {
+		proceed := autoProceedGuarded && strings.EqualFold(sd.Decision, "require_confirmation")
+		if !proceed {
+			reason := strings.TrimSpace(sd.Explanation)
+			if reason == "" {
+				reason = "Stopped for safety: this step needs confirmation Suno Control can't give."
+			}
+			return map[string]any{"action": "failed", "note": reason}
+		}
+	}
+
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "click", "left_click", "click_at":
+		return withNote(coord("click", args.X, args.Y))
+	case "double_click", "double_click_at":
+		return withNote(coord("double_click", args.X, args.Y))
+	case "triple_click": // no triple in the executor — double is the closest
+		return withNote(coord("double_click", args.X, args.Y))
+	case "middle_click": // no middle button — best-effort left click
+		return withNote(coord("click", args.X, args.Y))
+	case "right_click", "right_click_at":
+		return withNote(coord("right_click", args.X, args.Y))
+	case "move", "mouse_move", "hover", "hover_at":
+		return withNote(coord("move", args.X, args.Y))
+	case "mouse_down": // rare; a full click is the best single-step stand-in
+		return withNote(coord("click", args.X, args.Y))
+	case "mouse_up":
+		return withNote(map[string]any{"action": "wait", "seconds": 0.3})
+	case "type", "type_text", "type_text_at":
+		if args.Text == nil {
+			return failed("nothing to type")
+		}
+		m := map[string]any{"action": "type", "text": *args.Text}
+		if args.PressEnter != nil && *args.PressEnter {
+			m["press_enter"] = true
+		}
+		return withNote(m)
+	case "drag_and_drop", "drag":
+		m := coord("drag", args.StartX, args.StartY)
+		if m["action"] == "failed" {
+			return withNote(m)
+		}
+		if args.EndX == nil || args.EndY == nil {
+			return failed("missing drag destination")
+		}
+		m["x2"], m["y2"] = *args.EndX, *args.EndY
+		return withNote(m)
+	case "scroll", "scroll_at", "scroll_document":
+		m := map[string]any{"action": "scroll"}
+		if args.Direction != nil {
+			m["direction"] = strings.ToLower(strings.TrimSpace(*args.Direction))
+		}
+		if args.X != nil && args.Y != nil {
+			m["x"], m["y"] = *args.X, *args.Y
+		}
+		if t := scrollTicks(args); t > 0 {
+			m["amount"] = t
+		}
+		return withNote(m)
+	case "wait":
+		m := map[string]any{"action": "wait"}
+		if args.Seconds != nil {
+			m["seconds"] = *args.Seconds
+		}
+		return withNote(m)
+	case "take_screenshot": // the loop always re-captures next step — just pause
+		return withNote(map[string]any{"action": "wait", "seconds": 0.5})
+	case "press_key", "key_press", "keypress":
+		if args.Key == nil || strings.TrimSpace(*args.Key) == "" {
+			return failed("no key to press")
+		}
+		return withNote(keyOrWait(normalizeKeyName(*args.Key), nil))
+	case "key_down":
+		if args.Key == nil || strings.TrimSpace(*args.Key) == "" {
+			return failed("no key")
+		}
+		return withNote(keyOrWait(normalizeKeyName(*args.Key), nil))
+	case "key_up":
+		return withNote(map[string]any{"action": "wait", "seconds": 0.3})
+	case "hotkey", "key_combination", "hotkey_at":
+		key, mods := splitHotkey(args.Keys)
+		if key == "" {
+			if len(mods) > 0 {
+				// A combination of only modifiers presses nothing — wait instead
+				// of failing the run.
+				return withNote(map[string]any{"action": "wait", "seconds": 0.5})
+			}
+			return failed("no key in the combination")
+		}
+		return withNote(keyOrWait(normalizeKeyName(key), mods))
+	default:
+		// Browser chrome (navigate/go_back/go_forward/open_web_page/search) and
+		// anything unknown: we drive the desktop, not a browser's UI, and won't
+		// fake it — stop honestly.
+		return failed("unsupported action: " + name)
+	}
+}
+
+// ErrSafetyBlock is returned when Gemini's prompt-level safety filter blocked
+// the request before any action was produced (PromptFeedback.BlockReason).
+// The /control handler maps it to a distinct 502 error code so the client can
+// say "the planner declined this goal" instead of reporting an outage.
+var ErrSafetyBlock = errors.New("gemini safety filter blocked the prompt")
+
+// callOneShotRaw POSTs a marshalled generateContent body to the given model
+// and returns the decoded response, after the shared error checks (HTTP status,
+// API error, safety block, no candidates). Text extraction (callOneShot) and
+// function-call extraction (the computer_use path) build on top of this.
+func (b *GeminiBackend) callOneShotRaw(ctx context.Context, body []byte, model string, timeout time.Duration) (*geminiResponse, error) {
+	c, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	url := fmt.Sprintf("%s/models/%s:generateContent", strings.TrimRight(b.BaseURL, "/"), b.Model)
+	url := fmt.Sprintf("%s/models/%s:generateContent", strings.TrimRight(b.BaseURL, "/"), model)
 	req, err := http.NewRequestWithContext(c, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return "", fmt.Errorf("build gemini request: %w", err)
+		return nil, fmt.Errorf("build gemini request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	// Header auth, not ?key= — keeps the credential out of URLs, and therefore
@@ -226,32 +770,50 @@ func (b *GeminiBackend) Cleanup(ctx context.Context, prompt string) (string, err
 
 	resp, err := b.Client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("gemini call: %w", err)
+		return nil, fmt.Errorf("gemini call: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		// Read a small amount for diagnostics; never log transcript content.
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return "", fmt.Errorf("gemini returned %d: %s", resp.StatusCode, string(snippet))
+		return nil, fmt.Errorf("gemini returned %d: %s", resp.StatusCode, string(snippet))
 	}
 
 	var out geminiResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return "", fmt.Errorf("decode gemini response: %w", err)
+		return nil, fmt.Errorf("decode gemini response: %w", err)
 	}
 	if out.Error.Code != 0 {
-		return "", fmt.Errorf("gemini error %d (%s)", out.Error.Code, out.Error.Status)
+		return nil, fmt.Errorf("gemini error %d (%s)", out.Error.Code, out.Error.Status)
 	}
-	// A safety block returns no candidates. Surface it as an error so the
-	// caller soft-fails to the raw transcript rather than pasting nothing.
+	// A safety block returns no candidates. Surface it as ErrSafetyBlock so the
+	// caller can distinguish it from a real outage (and the /control handler
+	// can report "the planner declined this goal" instead of one).
 	if out.PromptFeedback.BlockReason != "" {
-		return "", fmt.Errorf("gemini blocked the prompt: %s", out.PromptFeedback.BlockReason)
+		return nil, fmt.Errorf("%w: %s", ErrSafetyBlock, out.PromptFeedback.BlockReason)
 	}
 	if len(out.Candidates) == 0 {
-		return "", fmt.Errorf("gemini returned no candidates")
+		return nil, fmt.Errorf("gemini returned no candidates")
 	}
+	return &out, nil
+}
 
+// callOneShot POSTs a marshalled generateContent body and returns the
+// response's text. Shared by cleanup and the JSON-prompt control path; the
+// streaming answer path keeps its own reader. timeout governs the whole call.
+func (b *GeminiBackend) callOneShot(ctx context.Context, body []byte, model string, timeout time.Duration) (string, error) {
+	out, err := b.callOneShotRaw(ctx, body, model, timeout)
+	if err != nil {
+		return "", err
+	}
+	return textFromResponse(out)
+}
+
+// textFromResponse extracts the visible answer text from a decoded response,
+// skipping reasoning parts. Empty text is an error — a healthy one-shot call
+// always produces some output.
+func textFromResponse(out *geminiResponse) (string, error) {
 	var sb strings.Builder
 	for _, p := range out.Candidates[0].Content.Parts {
 		if p.Thought || p.Metadata.IsThinking {
@@ -265,6 +827,18 @@ func (b *GeminiBackend) Cleanup(ctx context.Context, prompt string) (string, err
 			out.Candidates[0].FinishReason)
 	}
 	return text, nil
+}
+
+// usageFromResponse maps the provider's usage metadata onto the backend Usage
+// shape. Safe on any decoded response — unreported counts come back zero.
+func usageFromResponse(out *geminiResponse) Usage {
+	u := out.UsageMetadata
+	return Usage{
+		PromptTokens:   u.PromptTokenCount,
+		OutputTokens:   u.CandidatesTokenCount,
+		ThinkingTokens: u.ThoughtsTokenCount,
+		TotalTokens:    u.TotalTokenCount,
+	}
 }
 
 // Name identifies the backend in logs and /ready.
@@ -374,8 +948,11 @@ func streamAnswerChunks(ctx context.Context, body io.Reader, out chan<- AnswerCh
 			sendChunk(ctx, out, AnswerChunk{Err: fmt.Errorf("gemini error %d (%s)", ev.Error.Code, ev.Error.Status)})
 			return
 		}
-		if ev.PromptFeedback.BlockReason != "" {
-			sendChunk(ctx, out, AnswerChunk{Err: fmt.Errorf("gemini blocked the prompt: %s", ev.PromptFeedback.BlockReason)})
+		if br := ev.PromptFeedback.BlockReason; br != "" {
+			// A prompt-level safety block is its own signal, not a backend error:
+			// emit it as metadata so the handler can record a distinct "blocked"
+			// outcome (and an error_code) instead of a generic "unavailable".
+			sendChunk(ctx, out, AnswerChunk{BlockReason: br})
 			return
 		}
 		if len(ev.Candidates) == 0 {
@@ -390,6 +967,19 @@ func streamAnswerChunks(ctx context.Context, body io.Reader, out chan<- AnswerCh
 			if len(domains) > 0 || queries > 0 {
 				sendChunk(ctx, out, AnswerChunk{Domains: domains, SearchQueries: queries})
 			}
+		}
+
+		// Token accounting rides the final candidate chunk (Gemini attaches
+		// usageMetadata there). Emit it as its own chunk so the handler can pass
+		// exact per-request usage on to analytics; a zero-total (not yet reported)
+		// chunk carries nothing useful and is skipped.
+		if u := ev.UsageMetadata; u.TotalTokenCount > 0 {
+			sendChunk(ctx, out, AnswerChunk{Usage: Usage{
+				PromptTokens:   u.PromptTokenCount,
+				OutputTokens:   u.CandidatesTokenCount,
+				ThinkingTokens: u.ThoughtsTokenCount,
+				TotalTokens:    u.TotalTokenCount,
+			}})
 		}
 
 		for _, p := range cand.Content.Parts {
@@ -508,6 +1098,15 @@ func (b *GeminiBackend) answerRequestBody(prompt string, imageJPEG []byte) answe
 func (b *GeminiBackend) answerModel() string {
 	if b.AnswerModel != "" {
 		return b.AnswerModel
+	}
+	return b.Model
+}
+
+// controlModel resolves which model control requests use (CONTROL_MODEL; falls
+// back to the cleanup model when unset).
+func (b *GeminiBackend) controlModel() string {
+	if b.ControlModel != "" {
+		return b.ControlModel
 	}
 	return b.Model
 }

@@ -135,6 +135,10 @@ def _keepalive_gateway_connection() -> None:
             _answer_session.get(GATEWAY_HEALTH_URL, timeout=5)
         except Exception:
             pass
+        try:
+            _control_session.get(GATEWAY_HEALTH_URL, timeout=5)
+        except Exception:
+            pass
 
 
 def ensure_ffmpeg_on_path() -> str:
@@ -1285,6 +1289,213 @@ MAX_HISTORY_TURNS = 16
 MAX_HISTORY_LEN = 4000
 MAX_DICT_ENTRIES = 64
 MAX_IMAGE_BYTES = 3 << 20
+
+
+# --- Suno Control (the agent loop) ---
+# Same-host /control endpoint, mirroring ANSWER_URL. Override with
+# SUNOFLOW_CONTROL_URL for dev.
+CONTROL_URL = os.environ.get(
+    "SUNOFLOW_CONTROL_URL", CLEANUP_URL.rsplit("/", 1)[0] + "/control"
+)
+# Total ceiling on one planning step: the gateway's own deadline is 30s
+# (CONTROL_TIMEOUT); the proxy waits slightly longer so the gateway's own error
+# body — which says something kinder than a socket error would — is what arrives.
+CONTROL_TIMEOUT = 35.0
+
+# The control path gets its OWN pool and its own keepalive warm-up, same
+# posture as answer. Its adapter carries NO retry (contrast the dictation
+# session's single retry): a retried plan would execute the same step twice
+# when the first attempt reached the gateway but the connection died — worse
+# than double-spend, because the second call's plan would land on a screen the
+# first call may already have changed.
+_CONTROL_ADAPTER = HTTPAdapter(max_retries=Retry(
+    total=0, connect=0, read=0, status=0, backoff_factor=0,
+))
+_control_session = requests.Session()
+_control_session.mount("https://", _CONTROL_ADAPTER)
+_control_session.mount("http://", _CONTROL_ADAPTER)
+
+MAX_GOAL_LEN = 2000
+MAX_CONTROL_STEPS = 100
+MAX_CONTROL_STEP_NOTE_LEN = 300
+
+_SAFETY_BLOCK_MESSAGE = (
+    "Suno Control's AI planner declined this goal. Try phrasing it differently."
+)
+
+
+def _control_planner_error(resp):
+    """Map a gateway 502/4xx planner failure to the sidecar's error envelope.
+
+    A `safety_block` passes through verbatim — the planner declined THIS goal,
+    not the service, so the app can say "rephrase" instead of "outage".
+    Everything else is a generic unavailable.
+    """
+    try:
+        body = resp.json()
+    except ValueError:
+        body = {}
+    if isinstance(body, dict) and body.get("error") == "safety_block":
+        return {
+            "error": "safety_block",
+            "message": str(body.get("message") or _SAFETY_BLOCK_MESSAGE),
+        }
+    if resp.status_code == 502:
+        return {"error": "unavailable", "message": "Suno Control couldn't decide the next step. Try again shortly."}
+    return {"error": "unavailable", "message": "Suno Control is unavailable right now. Try again shortly."}
+
+
+def plan_action(goal, steps=None, image_bytes=None, context=None, key="", dictionary=None):
+    """One Suno Control planning step: POST to the gateway, return its JSON.
+
+    Raises NotEntitled when the gateway refuses the device (the route turns
+    that into the same 402 /transcribe returns). Raises ValueError on a bad
+    goal/image from the app itself. On a limit, outage, or gateway 502/4xx it
+    returns {"error": ...} — the app's loop stops on anything that is not an
+    action.
+    """
+    if not key:
+        raise NotEntitled(_NOT_CONNECTED, code="not_connected")
+
+    goal = (goal or "").strip()[:MAX_GOAL_LEN]
+    if not goal:
+        raise ValueError("empty goal")
+
+    bounded = []
+    for s in list(steps or []):
+        if not isinstance(s, dict):
+            continue
+        action = str(s.get("action") or "").strip()[:32]
+        if not action:
+            continue
+        bounded.append({"action": action, "note": str(s.get("note") or "").strip()[:MAX_CONTROL_STEP_NOTE_LEN]})
+    bounded = bounded[-MAX_CONTROL_STEPS:]
+
+    dictionary = list(dictionary or [])[:MAX_DICT_ENTRIES]
+
+    payload = {
+        "goal": goal,
+        "steps": bounded,
+        "context": context or {},
+    }
+    if dictionary:
+        payload["dictionary"] = dictionary
+    if image_bytes:
+        if len(image_bytes) > MAX_IMAGE_BYTES:
+            raise ValueError("image too large")
+        payload["image"] = base64.b64encode(image_bytes).decode("ascii")
+
+    try:
+        resp = _control_session.post(
+            CONTROL_URL,
+            headers=_headers(key),
+            json=payload,
+            timeout=(10, CONTROL_TIMEOUT),
+        )
+    except Exception:
+        # Network-level failure before any byte: the loop stops cleanly.
+        return {"error": "unavailable", "message": "Suno Control is unavailable right now. Try again shortly."}
+
+    refusal, code = _refusal(resp)
+    if refusal:
+        raise NotEntitled(refusal, code=code or "not_entitled")
+
+    if resp.status_code == 429:
+        retry_after = resp.headers.get("Retry-After", "60")
+        if retry_after.strip() == "1":
+            return {
+                "error": "limit",
+                "message": "Suno Control is working as fast as it can — wait a few seconds and try again.",
+                "retry_after": 1,
+            }
+        return {
+            "error": "limit",
+            "message": "You've used all your Suno Control for today. It resets tomorrow.",
+            "retry_after": 60,
+        }
+
+    if resp.status_code == 502:
+        # A safety block is distinct — the planner declined THIS goal, not the
+        # service — so its code and message pass through verbatim and the app
+        # can say "rephrase" instead of "outage".
+        return _control_planner_error(resp)
+
+    if not resp.ok:
+        return _control_planner_error(resp)
+
+    try:
+        action = resp.json()
+    except ValueError:
+        return {"error": "unavailable", "message": "Suno Control is unavailable right now. Try again shortly."}
+
+    if not isinstance(action, dict) or not action.get("action"):
+        return {"error": "unavailable", "message": "Suno Control is unavailable right now. Try again shortly."}
+
+    return action
+
+
+@app.post("/control")
+async def control(
+    goal: str = Form(...),
+    steps: str = Form("[]"),
+    image: UploadFile = File(None),
+    context: str = Form("{}"),
+    device_key: str = Header("", alias="X-SunoFlow-Device-Key"),
+):
+    """Proxy one Suno Control planning step to the hosted gateway.
+
+    ``goal`` is the dictated goal for the run; ``steps`` is a JSON array of
+    prior ``{action, note}`` objects, oldest first; ``image`` is the current
+    screen as JPEG; ``context`` is a JSON object of observed state (app,
+    window, cursor_x, cursor_y, image_width, image_height). The gateway answers
+    with exactly one action, flat JSON — passed through verbatim.
+
+    Failures come back as 200 JSON {"error": ...} (limit, outage) so the app's
+    loop stops on one shape; a disconnected device raises NotEntitled → the
+    same 402 /transcribe returns.
+    """
+    key = device_key.removeprefix("Bearer ").strip()
+    try:
+        prior = json.loads(steps) if steps else []
+        if not isinstance(prior, list):
+            prior = []
+    except Exception:
+        prior = []
+    try:
+        ctx = json.loads(context) if context else {}
+        if not isinstance(ctx, dict):
+            ctx = {}
+    except Exception:
+        ctx = {}
+
+    image_bytes = b""
+    if image is not None:
+        image_bytes = await image.read()
+
+    # Correct the dictated goal against the user's dictionary BEFORE the
+    # gateway sees it: a goal built from mis-heard words drives a mis-heard
+    # plan. Corrections only, exactly like /transcribe and /answer —
+    # expansions are never substituted blind.
+    corrected = goal.strip()[:MAX_QUERY_LEN]
+    if corrected:
+        corrected = apply_corrections(corrected).strip()[:MAX_QUERY_LEN] or corrected
+
+    try:
+        relevant = await run_in_threadpool(relevant_corrections, goal, 40)
+        result = await run_in_threadpool(
+            plan_action, corrected or goal, prior, image_bytes, ctx, key, relevant
+        )
+    except NotEntitled as exc:
+        # Same refusal shape as /transcribe: the app's account sheet renders it.
+        print(f"Refusing Suno Control — {exc}")
+        return NotEntitledResponse(str(exc), getattr(exc, "code", "not_entitled"))
+    except ValueError as exc:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "malformed request", "message": str(exc)},
+        )
+
+    return JSONResponse(status_code=200, content=result)
 
 
 def _sse_bytes(event: str, payload: dict) -> bytes:

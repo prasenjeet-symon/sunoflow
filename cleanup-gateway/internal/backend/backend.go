@@ -64,6 +64,16 @@ type AnswerChunk struct {
 	// Err, on the final value before the channel closes, ends the stream with
 	// an error after some text may already have been emitted.
 	Err error
+	// BlockReason reports the provider's prompt-level safety block (Gemini's
+	// PromptFeedback.BlockReason). Set on its own chunk, without Text or Err,
+	// so the handler can surface a distinct "blocked" outcome in analytics
+	// instead of folding it into a generic error.
+	BlockReason string
+	// Usage reports the provider's token accounting for the call. It rides a
+	// chunk near the end of the stream (Gemini attaches usageMetadata to the
+	// final candidate chunk); zero fields mean the provider did not report a
+	// count. Kept per-request so Suno Answer cost is measured, not estimated.
+	Usage Usage
 }
 
 // AnswerBackend is the optional streaming seam for Suno Answer (D6). Backends
@@ -80,6 +90,31 @@ type AnswerBackend interface {
 	// stream: the caller's deadline (or a client disconnect, if propagated)
 	// must abort the upstream request.
 	StreamAnswer(ctx context.Context, prompt string, imageJPEG []byte) (<-chan AnswerChunk, error)
+}
+
+// ControlBackend is the optional one-shot computer-control seam (Suno
+// Control). Backends that cannot plan actions simply don't implement it; the
+// /control route is wired only when a backend supports it, so cleanup's
+// Backend stays untouched.
+type ControlBackend interface {
+	// PlanAction sends the built control prompt (plus the current screen
+	// image, which may be nil) and returns the model's raw text — one JSON
+	// object choosing the next action — together with the call's token usage.
+	// One-shot, like Cleanup, with an image: the loop is a series of these
+	// calls, each a fresh decision from the screen as it is now.
+	PlanAction(ctx context.Context, prompt string, imageJPEG []byte) (string, Usage, error)
+}
+
+// Usage is the token accounting for one backend call, lifted from the
+// provider's usage metadata. A zero field means the provider did not report
+// that count (so it is safe to record even when usage is unavailable). Thinking
+// tokens are billed as output but reported separately, so they are kept
+// separate here for per-step cost visibility.
+type Usage struct {
+	PromptTokens   int // input tokens (prompt text + image)
+	OutputTokens   int // visible answer tokens (candidates)
+	ThinkingTokens int // reasoning tokens (billed as output)
+	TotalTokens    int // provider's total for the call
 }
 
 // STTBackend is the optional cloud speech-to-text seam (the warm-start
