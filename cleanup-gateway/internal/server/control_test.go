@@ -62,7 +62,7 @@ func newControlServer(t *testing.T, cb backend.Backend) (*httptest.Server, strin
 	}
 	limiter := ratelimit.New(st, 1000, 100000, nil)
 	controlLimiter := ratelimit.NewControl(st, 20, 200, 300, nil)
-	ts := httptest.NewServer(NewMux(srv, limiter, nil, nil, controlLimiter, "admin-secret", nil))
+	ts := httptest.NewServer(NewMux(srv, limiter, nil, nil, controlLimiter, nil, "admin-secret", nil))
 	t.Cleanup(ts.Close)
 	return ts, plaintext
 }
@@ -394,7 +394,7 @@ func TestControl_NormalizedCoords(t *testing.T) {
 	}
 	limiter := ratelimit.New(st, 1000, 100000, nil)
 	controlLimiter := ratelimit.NewControl(st, 1000, 100000, 1000000, nil)
-	ts := httptest.NewServer(NewMux(srv, limiter, nil, nil, controlLimiter, "admin-secret", nil))
+	ts := httptest.NewServer(NewMux(srv, limiter, nil, nil, controlLimiter, nil, "admin-secret", nil))
 	t.Cleanup(ts.Close)
 
 	// 1x1 PNG so an image rides (the coordinate rule is only emitted with one);
@@ -444,7 +444,7 @@ func TestControl_ToolMode(t *testing.T) {
 	}
 	limiter := ratelimit.New(st, 1000, 100000, nil)
 	controlLimiter := ratelimit.NewControl(st, 1000, 100000, 1000000, nil)
-	ts := httptest.NewServer(NewMux(srv, limiter, nil, nil, controlLimiter, "admin-secret", nil))
+	ts := httptest.NewServer(NewMux(srv, limiter, nil, nil, controlLimiter, nil, "admin-secret", nil))
 	t.Cleanup(ts.Close)
 
 	img := "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
@@ -497,7 +497,7 @@ func newControlServerWithQuotas(t *testing.T, cb backend.Backend, rpm, daily, ha
 	}
 	limiter := ratelimit.New(st, 1000, 100000, nil)
 	controlLimiter := ratelimit.NewControl(st, rpm, daily, hard, nil)
-	ts := httptest.NewServer(NewMux(srv, limiter, nil, nil, controlLimiter, "admin-secret", nil))
+	ts := httptest.NewServer(NewMux(srv, limiter, nil, nil, controlLimiter, nil, "admin-secret", nil))
 	t.Cleanup(ts.Close)
 	return ts, plaintext
 }

@@ -69,6 +69,14 @@ func main() {
 			ControlEnvironment:        cfg.ControlEnvironment,
 			ControlAutoProceedGuarded: cfg.ControlAutoProceedGuarded,
 			ControlThinkingLevel:      cfg.ControlThinking,
+
+			// Suno Try-on: separate image model + deadline, same seam pattern.
+			// Empty TryonModel disables the seam (/tryon answers 501) — there is
+			// no fallback, the cleanup model cannot emit images.
+			TryonModel:       cfg.TryonModel,
+			TryonTimeout:     cfg.TryonTimeout,
+			TryonImageSize:   cfg.TryonImageSize,
+			TryonAspectRatio: cfg.TryonAspectRatio,
 		}
 	default:
 		logger.Error("unsupported backend", "backend", cfg.Backend)
@@ -99,12 +107,17 @@ func main() {
 		ControlModel:      cfg.ControlModel,
 		ControlCoordSpace: cfg.ControlCoordSpace,
 		ControlUseTool:    cfg.ControlUseTool,
+		TryonModel:        cfg.TryonModel,
 	}
 	limiter := ratelimit.New(st, cfg.QuotaRPM, cfg.QuotaDaily, logger)
 	// Suno Answer has its own meter: separate ledger, separate allowances (D5).
 	answerLimiter := ratelimit.NewAnswer(st, cfg.AnswerQuotaRPM, cfg.AnswerQuotaDaily, cfg.AnswerHardDaily, logger)
 	// Suno Control has its own meter too: one run is a burst of planning calls.
 	controlLimiter := ratelimit.NewControl(st, cfg.ControlQuotaRPM, cfg.ControlQuotaDaily, cfg.ControlHardDaily, logger)
+	// Suno Try-on has its own meter: one call is one paid composed image, the
+	// most expensive request the gateway serves, so its allowances are the
+	// tightest.
+	tryonLimiter := ratelimit.NewTryon(st, cfg.TryonQuotaRPM, cfg.TryonQuotaDaily, cfg.TryonHardDaily, logger)
 
 	// Cloud STT (the warm-start dictation path). Defaults to "groq"; config.Load
 	// has validated the provider name. A groq/openrouter provider with no
@@ -197,7 +210,7 @@ func main() {
 		logger.Warn("FIREBASE_PROJECT not set — subscriptions are NOT enforced")
 	}
 
-	handler := server.NewMux(srv, limiter, answerLimiter, sttLimiter, controlLimiter, cfg.AdminToken, accounts)
+	handler := server.NewMux(srv, limiter, answerLimiter, sttLimiter, controlLimiter, tryonLimiter, cfg.AdminToken, accounts)
 
 	httpServer := &http.Server{
 		Addr:              cfg.GatewayAddr,

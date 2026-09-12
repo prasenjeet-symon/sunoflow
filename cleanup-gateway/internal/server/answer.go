@@ -55,6 +55,11 @@ type answerRequest struct {
 	// Dictionary is the user's own terms relevant to this query, selected by
 	// the sidecar from its local corrections file.
 	Dictionary []cleanup.Entry `json:"dictionary"`
+	// Tryon is the client's report that a person photo is on file (the
+	// try-on feature is armed this turn). It only arms the marker directive in
+	// the prompt — the model still decides whether the question is a try-on
+	// ask. Older clients never send it and the feature stays dormant.
+	Tryon bool `json:"tryon"`
 }
 
 // Server accessors the answer route needs, defined here rather than widening
@@ -112,6 +117,7 @@ func (s *Server) handleAnswer(w http.ResponseWriter, r *http.Request) {
 		Query:      query,
 		History:    req.History,
 		Dictionary: dict,
+		Tryon:      req.Tryon,
 	}
 	if len(image) > 0 {
 		prompt.Image = true
@@ -155,8 +161,68 @@ func (s *Server) handleAnswer(w http.ResponseWriter, r *http.Request) {
 		streamErr   error
 		blockReason string
 		usage       backend.Usage
+		// Try-on intent signal state (see feedTryon below). pending buffers
+		// the stream's first line until we know whether it is the marker;
+		// once decided (marker found or not) it is empty forever.
+		pending    strings.Builder
+		markState  int // 0 undecided, 1 marker seen, 2 no marker
+		tryonItem  string
+		tryonEmitt bool
 	)
 	ttfb := time.Duration(0)
+
+	// tryonMarker is the coordination line the answer model leads a try-on
+	// reply with (armed by the prompt's try-on directive). The gateway holds
+	// it back from the user-visible stream and signals it as its own SSE
+	// event — the user never sees the raw marker; the app sees the event and
+	// composes the try-on image. Uppercase, exact two-bracket form.
+	const tryonMarker = "[[TRYON]]"
+
+	// feedTryon runs the marker hold-back over each text chunk. Until the
+	// first newline arrives, text is buffered: the marker is a whole FIRST
+	// line, so the decision cannot be made earlier. Once decided, text passes
+	// straight through. Returns the text to emit now ("" when buffered).
+	feedTryon := func(text string) string {
+		switch markState {
+		case 2:
+			return text
+		case 1:
+			// Marker already emitted; everything after it is content.
+			return text
+		}
+		pending.WriteString(text)
+		buf := pending.String()
+		nl := strings.IndexByte(buf, '\n')
+		if nl < 0 {
+			// Still inside the first line. If it cannot possibly become the
+			// marker (too long), decide now; otherwise keep buffering. The
+			// marker plus a short item label is well under maxScan.
+			const maxScan = len("[[TRYON]] ") + 500
+			if len(buf) > maxScan {
+				markState = 2
+				return buf
+			}
+			return ""
+		}
+		first, rest := buf[:nl], buf[nl+1:]
+		line := strings.TrimSpace(first)
+		if !strings.HasPrefix(line, tryonMarker) {
+			markState = 2
+			return buf // not a try-on turn: emit everything buffered
+		}
+		// Marker confirmed. The item label is whatever follows it on the
+		// same line, stripped.
+		item := strings.TrimSpace(strings.TrimPrefix(line, tryonMarker))
+		item = strings.Trim(item, "*_`") // the model may bold or quote the label
+		// Emit the tryon event once, before any visible text.
+		if !tryonEmitt {
+			tryonEmitt = true
+			tryonItem = item
+			writeEvent("tryon", marshalJSON(map[string]string{"item": item}))
+		}
+		markState = 1
+		return rest
+	}
 
 	for chunk := range chunks {
 		if ttfb == 0 && (chunk.Text != "" || chunk.Err != nil) {
@@ -183,9 +249,20 @@ func (s *Server) handleAnswer(w http.ResponseWriter, r *http.Request) {
 		case chunk.BlockReason != "":
 			blockReason = chunk.BlockReason
 		case chunk.Text != "":
+			// The hold-back only gates what is EMITTED; every character still
+			// counts toward answer_chars so cost stays measured.
 			textLen += len(chunk.Text)
-			writeEvent("delta", marshalJSON(map[string]string{"text": chunk.Text}))
+			if out := feedTryon(chunk.Text); out != "" {
+				writeEvent("delta", marshalJSON(map[string]string{"text": out}))
+			}
 		}
+	}
+	// Stream ended while still undecided (model emitted no newline at all):
+	// whatever was buffered was never the marker — flush it as one delta so
+	// the reply is not truncated.
+	if markState == 0 && pending.Len() > 0 {
+		writeEvent("delta", marshalJSON(map[string]string{"text": pending.String()}))
+		pending.Reset()
 	}
 
 	// Aborted: the client (sidecar) gave up — deadline or disconnect. Nothing
@@ -257,6 +334,13 @@ func (s *Server) handleAnswer(w http.ResponseWriter, r *http.Request) {
 	}
 	if blockReason != "" {
 		props["block_reason"] = blockReason
+	}
+	if tryonEmitt {
+		// Try-on intent signalled this turn: the app is about to compose an
+		// image. Item length only — the label is the model's words, not the
+		// user's.
+		props["had_tryon"] = true
+		props["tryon_item_length"] = len(tryonItem)
 	}
 	if aborted {
 		props["aborted_at_ms"] = time.Since(started).Milliseconds()

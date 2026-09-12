@@ -108,6 +108,21 @@ type Config struct {
 	// reasoning IS the dominant per-call cost, so it can want a different floor.
 	ControlThinking string
 
+	// Suno Try-on (the virtual try-on image feature). Its own model + deadline
+	// + quota: one call is one composed image (the most expensive request type
+	// the gateway serves), and the image models are a different family from the
+	// text models. TryonModel has NO fallback — unlike the other seams, leaving
+	// it empty disables the /tryon route (the handler 501s), because the
+	// cleanup model cannot emit images. Quota defaults are deliberately tight:
+	// paid images per person per day.
+	TryonModel       string
+	TryonTimeout     time.Duration // total deadline per try-on call
+	TryonQuotaRPM    int           // default per-account try-on images/minute
+	TryonQuotaDaily  int           // default per-account try-on images/day
+	TryonHardDaily   int           // gateway-side hard ceiling on images/day
+	TryonImageSize   string        // imageConfig.imageSize bucket ("512"|"1K"|"2K"|"4K"); empty = model default
+	TryonAspectRatio string        // imageConfig.aspectRatio (e.g. "3:4"); empty = model default
+
 	// Cloud STT (the warm-start dictation path): a new install can dictate
 	// immediately over the cloud while its local model downloads in the
 	// background, then the sidecar cuts over to on-device and stops calling here.
@@ -189,6 +204,14 @@ func Load() (Config, error) {
 		ControlEnvironment:        envStr("CONTROL_ENVIRONMENT", "ENVIRONMENT_DESKTOP"),
 		ControlAutoProceedGuarded: envBool("CONTROL_AUTOPROCEED_GUARDED", false),
 		ControlThinking:           envStr("CONTROL_THINKING_LEVEL", ""),
+
+		TryonModel:       envStr("TRYON_MODEL", "gemini-3.1-flash-image-preview"),
+		TryonTimeout:     envDuration("TRYON_TIMEOUT", 50*time.Second),
+		TryonQuotaRPM:    envInt("TRYON_QUOTA_RPM", 3),
+		TryonQuotaDaily:  envInt("TRYON_QUOTA_DAILY", 20),
+		TryonHardDaily:   envInt("TRYON_HARD_DAILY", 40),
+		TryonImageSize:   envStr("TRYON_IMAGE_SIZE", "1K"),
+		TryonAspectRatio: envStr("TRYON_ASPECT_RATIO", "3:4"),
 
 		STTProvider:   envStr("STT_PROVIDER", "groq"),
 		STTAPIKey:     envStr("STT_API_KEY", ""),

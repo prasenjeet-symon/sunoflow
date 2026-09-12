@@ -58,6 +58,11 @@ type Server struct {
 	// sends the tool-mode prompt and the backend answers with function_call
 	// actions. Tool coordinates are always 0-999, so this implies normalized.
 	ControlUseTool bool
+
+	// --- Suno Try-on (separate seam) ---
+	// TryonModel names the image model for analytics only (the backend
+	// resolves the real model from its own config); "" reports "unknown".
+	TryonModel string
 }
 
 // clientHeader is how a sidecar says what it is: "<os>/<version>", e.g.
@@ -165,7 +170,7 @@ type cleanupResponse struct {
 // answers 501 from its handler when no STT provider is wired. controlLimiter
 // meters Suno Control the same way; nil skips its middleware, and /control
 // still answers 501 from its handler when no control-capable backend is wired.
-func NewMux(s *Server, limiter *ratelimit.Limiter, answerLimiter *ratelimit.AnswerLimiter, sttLimiter *ratelimit.STTLimiter, controlLimiter *ratelimit.ControlLimiter, adminToken string, accounts *account.Resolver) http.Handler {
+func NewMux(s *Server, limiter *ratelimit.Limiter, answerLimiter *ratelimit.AnswerLimiter, sttLimiter *ratelimit.STTLimiter, controlLimiter *ratelimit.ControlLimiter, tryonLimiter *ratelimit.TryonLimiter, adminToken string, accounts *account.Resolver) http.Handler {
 	mux := http.NewServeMux()
 
 	// Unauthenticated endpoints.
@@ -227,6 +232,18 @@ func NewMux(s *Server, limiter *ratelimit.Limiter, answerLimiter *ratelimit.Answ
 		controlMiddlewares = append(controlMiddlewares, controlLimiter.Middleware)
 	}
 	mux.Handle("POST /control", chain(http.HandlerFunc(s.handleControl), controlMiddlewares...))
+
+	// Suno Try-on (virtual try-on images). Same auth/verdict as /cleanup — a
+	// paid feature on the same entitlement — but its own quota meter: one call
+	// is one paid composed image, the most expensive request this gateway
+	// serves, so its allowances are independent (and tight). A nil limiter
+	// still registers the route: the handler 501s when no image backend is
+	// configured, and quota defaults apply from config when it is.
+	tryonMiddlewares := []func(http.Handler) http.Handler{keyCheck}
+	if tryonLimiter != nil {
+		tryonMiddlewares = append(tryonMiddlewares, tryonLimiter.Middleware)
+	}
+	mux.Handle("POST /tryon", chain(http.HandlerFunc(s.handleTryon), tryonMiddlewares...))
 
 	// Admin endpoints (separate admin token).
 	adminAuth := auth.AdminMiddleware(adminToken)

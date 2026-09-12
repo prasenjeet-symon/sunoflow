@@ -132,3 +132,20 @@ type STTBackend interface {
 	// STTName identifies the provider for logging and analytics ("groq"/"gemini").
 	STTName() string
 }
+
+// TryonBackend is the optional one-shot image seam for Suno Try-on. Like the
+// control and STT seams, it is its own interface: the /tryon route is wired
+// only when a backend supports it, so a backend without image generation keeps
+// cleanup, answer and control untouched.
+type TryonBackend interface {
+	// TryOn composes a virtual try-on image. prompt is the built prompt text
+	// (framing + item + request, from the tryon package); personJPEG is the
+	// user's stored photo (always JPEG) and garmentJPEG the garment screenshot
+	// from the current screen. The returned bytes are the composed image
+	// (mimeType reports its actual encoding — providers emit PNG). It returns
+	// a hard error on failure; there is no degraded mode for a photo, so the
+	// caller surfaces the error rather than falling back.
+	TryOn(ctx context.Context, prompt string, personJPEG, garmentJPEG []byte) (image []byte, mimeType string, usage Usage, err error)
+	// TryonName identifies the provider for logging and analytics.
+	TryonName() string
+}

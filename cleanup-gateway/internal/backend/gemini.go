@@ -89,6 +89,23 @@ type GeminiBackend struct {
 	// Empty falls back to ThinkingLevel.
 	ControlThinkingLevel string
 
+	// --- Suno Try-on (separate seam) ---
+	// TryonModel is the image model try-on requests go to (TRYON_MODEL; the
+	// Nano Banana 2 preview, gemini-3.1-flash-image-preview). Unlike the other
+	// seams there is NO fallback to Model: the cleanup model cannot emit
+	// images, so a deployment that wants try-on must set the field
+	// explicitly. Empty disables the /tryon route (the handler 501s).
+	TryonModel string
+	// TryonTimeout is the total deadline for one try-on call (TRYON_TIMEOUT).
+	// Zero falls back to Timeout.
+	TryonTimeout time.Duration
+	// TryonImageSize is the imageConfig.imageSize bucket the request asks the
+	// model for (TRYON_IMAGE_SIZE: "512"|"1K"|"2K"|"4K"). Empty omits it.
+	TryonImageSize string
+	// TryonAspectRatio is the imageConfig.aspectRatio (TRYON_ASPECT_RATIO,
+	// e.g. "3:4" — a portrait that suits a person photo). Empty omits it.
+	TryonAspectRatio string
+
 	// answerClient wraps b.Client's transport (built once) for the streaming
 	// answer path — see answerHTTPClient.
 	answerClientOnce sync.Once
@@ -213,6 +230,20 @@ type geminiRespPart struct {
 	// computer_use tool answers here (Suno Control tool mode) rather than in
 	// Text. Nil on ordinary text/reasoning parts.
 	FunctionCall *geminiFunctionCall `json:"functionCall,omitempty"`
+	// InlineData carries a generated image (Suno Try-on): the image models
+	// answer with an inlineData part next to any caption text. Nil on
+	// text/thinking parts. NOTE: camelCase, unlike the request-side
+	// geminiInline (mime_type/data) — the RESPONSE is plain JSON the gateway
+	// itself unmarshals, so only the exact wire spelling parses; the request
+	// side tolerates snake_case only because protobuf JSON accepts both.
+	InlineData *geminiRespInline `json:"inlineData,omitempty"`
+}
+
+// geminiRespInline is one inline (base64) data part in a RESPONSE. Tags are
+// camelCase — see the note on geminiRespPart.InlineData.
+type geminiRespInline struct {
+	MimeType string `json:"mimeType"`
+	Data     string `json:"data"` // base64
 }
 
 // geminiFunctionCall is one tool invocation. Args stays raw so the caller
@@ -839,6 +870,130 @@ func usageFromResponse(out *geminiResponse) Usage {
 		ThinkingTokens: u.ThoughtsTokenCount,
 		TotalTokens:    u.TotalTokenCount,
 	}
+}
+
+// geminiTryonRequest is the generateContent body for Suno Try-on. A dedicated
+// shape rather than geminiRequest, for two reasons: image generation takes
+// generationConfig fields the text models do not (responseModalities,
+// imageConfig), and it must NOT carry a temperature — image models are
+// tuned at their default temperature and pinning cleanup's 0.0 visibly
+// degrades composition.
+type geminiTryonRequest struct {
+	Contents         []geminiContent      `json:"contents"`
+	GenerationConfig geminiTryonGenConfig `json:"generationConfig"`
+}
+
+// geminiTryonGenConfig is the generationConfig image generation understands.
+// ResponseModalities must name both TEXT and IMAGE: the models may emit a
+// caption part next to the image, and an IMAGE-only value is rejected.
+type geminiTryonGenConfig struct {
+	ResponseModalities []string           `json:"responseModalities"`
+	ImageConfig        *geminiImageConfig `json:"imageConfig,omitempty"`
+}
+
+// geminiImageConfig sizes the composed image: aspectRatio ("3:4"…) and
+// imageSize ("512"|"1K"|"2K"|"4K"). Both optional; empty fields omitted.
+type geminiImageConfig struct {
+	AspectRatio string `json:"aspectRatio,omitempty"`
+	ImageSize   string `json:"imageSize,omitempty"`
+}
+
+// TryOn implements backend.TryonBackend (Suno Try-on): one generateContent
+// call to the image model with the person photo and garment screenshot riding
+// as inline parts before the prompt text — the same image-first order the
+// answer and control paths use, which is what Gemini expects for interleaved
+// text-and-image contents.
+func (b *GeminiBackend) TryOn(ctx context.Context, prompt string, personJPEG, garmentJPEG []byte) ([]byte, string, Usage, error) {
+	if len(personJPEG) == 0 || len(garmentJPEG) == 0 {
+		return nil, "", Usage{}, fmt.Errorf("tryon requires a person photo and a garment image")
+	}
+	content := geminiContent{
+		Role: "user",
+		Parts: []geminiPart{
+			{InlineData: &geminiInline{
+				MimeType: "image/jpeg",
+				Data:     base64.StdEncoding.EncodeToString(personJPEG),
+			}},
+			{InlineData: &geminiInline{
+				MimeType: "image/jpeg",
+				Data:     base64.StdEncoding.EncodeToString(garmentJPEG),
+			}},
+			{Text: prompt},
+		},
+	}
+	reqBody := geminiTryonRequest{
+		Contents: []geminiContent{content},
+		GenerationConfig: geminiTryonGenConfig{
+			ResponseModalities: []string{"TEXT", "IMAGE"},
+		},
+	}
+	// Size the composed image only when the deployment asked for a bucket;
+	// sending an empty imageConfig is equivalent to omitting it, but omitting
+	// keeps the wire minimal.
+	if b.TryonAspectRatio != "" || b.TryonImageSize != "" {
+		reqBody.GenerationConfig.ImageConfig = &geminiImageConfig{
+			AspectRatio: b.TryonAspectRatio,
+			ImageSize:   b.TryonImageSize,
+		}
+	}
+
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, "", Usage{}, fmt.Errorf("marshal gemini request: %w", err)
+	}
+
+	out, err := b.callOneShotRaw(ctx, body, b.tryonModel(), b.tryonTimeout())
+	if err != nil {
+		return nil, "", Usage{}, err
+	}
+	return imageFromResponse(out)
+}
+
+// imageFromResponse extracts the first generated image from a decoded
+// response. The image models answer with an inlineData part, possibly next to
+// a caption text part; reasoning parts never carry the image.
+func imageFromResponse(out *geminiResponse) ([]byte, string, Usage, error) {
+	for _, p := range out.Candidates[0].Content.Parts {
+		if p.Thought || p.Metadata.IsThinking {
+			continue
+		}
+		if p.InlineData == nil || p.InlineData.Data == "" {
+			continue
+		}
+		data, err := base64.StdEncoding.DecodeString(p.InlineData.Data)
+		if err != nil {
+			return nil, "", Usage{}, fmt.Errorf("decode tryon image: %w", err)
+		}
+		mime := p.InlineData.MimeType
+		if mime == "" {
+			mime = "image/png" // the models emit PNG when they don't say
+		}
+		return data, mime, usageFromResponse(out), nil
+	}
+	return nil, "", Usage{}, fmt.Errorf("gemini returned no image (finish reason %q)",
+		out.Candidates[0].FinishReason)
+}
+
+// tryonName identifies the image provider for logging and analytics.
+func (b *GeminiBackend) TryonName() string { return "gemini" }
+
+// tryonModel resolves which model try-on requests use (TRYON_MODEL). Unlike
+// the other seams there is no fallback: Model is a text model and cannot
+// emit images. The caller only reaches here when TryonModel was set.
+func (b *GeminiBackend) tryonModel() string {
+	if b.TryonModel != "" {
+		return b.TryonModel
+	}
+	return b.Model
+}
+
+// tryonTimeout is the total deadline for one try-on call. Zero falls back to
+// Timeout.
+func (b *GeminiBackend) tryonTimeout() time.Duration {
+	if b.TryonTimeout != 0 {
+		return b.TryonTimeout
+	}
+	return b.Timeout
 }
 
 // Name identifies the backend in logs and /ready.

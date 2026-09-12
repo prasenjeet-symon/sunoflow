@@ -81,6 +81,12 @@ CREATE TABLE IF NOT EXISTS control_usage (
   count       INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (key_id, day)
 );
+CREATE TABLE IF NOT EXISTS tryon_usage (
+  key_id      TEXT NOT NULL,
+  day         TEXT NOT NULL,
+  count       INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (key_id, day)
+);
 `)
 	if err != nil {
 		return fmt.Errorf("migrate: %w", err)
@@ -282,6 +288,41 @@ func (s *Store) IncrementControlUsage(ctx context.Context, keyID string) error {
 		keyID, day)
 	if err != nil {
 		return fmt.Errorf("increment control usage: %w", err)
+	}
+	return nil
+}
+
+// TryonUsageForToday returns how many Suno Try-on images the given meter key
+// has started today (UTC), over the tryon ledger. One try-on call is one paid
+// composed image — the most expensive request the gateway serves — so it is
+// metered separately with its own (tight) quota.
+func (s *Store) TryonUsageForToday(ctx context.Context, keyID string) (int, error) {
+	day := time.Now().UTC().Format("2006-01-02")
+	var count int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT count FROM tryon_usage WHERE key_id = ? AND day = ?`,
+		keyID, day,
+	).Scan(&count)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("tryon usage lookup: %w", err)
+	}
+	return count, nil
+}
+
+// IncrementTryonUsage bumps the per-key per-day tryon counter. Best-effort at
+// the call site: a failed write must not fail a request the backend is about
+// to compose.
+func (s *Store) IncrementTryonUsage(ctx context.Context, keyID string) error {
+	day := time.Now().UTC().Format("2006-01-02")
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO tryon_usage (key_id, day, count) VALUES (?, ?, 1)
+		 ON CONFLICT(key_id, day) DO UPDATE SET count = count + 1`,
+		keyID, day)
+	if err != nil {
+		return fmt.Errorf("increment tryon usage: %w", err)
 	}
 	return nil
 }

@@ -63,7 +63,7 @@ func newTestServer(t *testing.T, fb *fakeBackend) (*httptest.Server, *store.Stor
 		QuotaDaily: 100000,
 	}
 	limiter := ratelimit.New(st, 1000, 100000, nil)
-	handler := NewMux(srv, limiter, nil, nil, nil, "admin-secret", nil)
+	handler := NewMux(srv, limiter, nil, nil, nil, nil, "admin-secret", nil)
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
 	return ts, st, plaintext
@@ -307,7 +307,7 @@ func newTestServerWithBackend(t *testing.T, be interface {
 	}
 	srv := &Server{Backend: be, Store: st, Logger: testLogger(), QuotaRPM: 1000, QuotaDaily: 100000}
 	limiter := ratelimit.New(st, 1000, 100000, nil)
-	handler := NewMux(srv, limiter, nil, nil, nil, "admin-secret", nil)
+	handler := NewMux(srv, limiter, nil, nil, nil, nil, "admin-secret", nil)
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
 	return ts, plaintext

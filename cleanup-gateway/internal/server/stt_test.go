@@ -66,7 +66,7 @@ func newSTTServer(t *testing.T, stt backend.STTBackend) (*httptest.Server, strin
 	if stt != nil {
 		sttLimiter = ratelimit.NewSTT(st, 5, 50, 100, nil)
 	}
-	ts := httptest.NewServer(NewMux(srv, limiter, nil, sttLimiter, nil, "admin-secret", nil))
+	ts := httptest.NewServer(NewMux(srv, limiter, nil, sttLimiter, nil, nil, "admin-secret", nil))
 	t.Cleanup(ts.Close)
 	return ts, plaintext
 }

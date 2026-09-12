@@ -68,7 +68,7 @@ func newAnswerServer(t *testing.T, ab backend.Backend) (*httptest.Server, string
 	}
 	limiter := ratelimit.New(st, 1000, 100000, nil)
 	answerLimiter := ratelimit.NewAnswer(st, 5, 50, 100, nil)
-	ts := httptest.NewServer(NewMux(srv, limiter, answerLimiter, nil, nil, "admin-secret", nil))
+	ts := httptest.NewServer(NewMux(srv, limiter, answerLimiter, nil, nil, nil, "admin-secret", nil))
 	t.Cleanup(ts.Close)
 	return ts, plaintext
 }
@@ -309,7 +309,7 @@ func TestAnswer_AnalyticsRecordsTokenUsage(t *testing.T) {
 	}
 	limiter := ratelimit.New(st, 1000, 100000, nil)
 	answerLimiter := ratelimit.NewAnswer(st, 5, 50, 100, nil)
-	ts := httptest.NewServer(NewMux(srv, limiter, answerLimiter, nil, nil, "admin-secret", nil))
+	ts := httptest.NewServer(NewMux(srv, limiter, answerLimiter, nil, nil, nil, "admin-secret", nil))
 	t.Cleanup(ts.Close)
 
 	resp := postAnswer(t, ts, plaintext, answerBody("q", 0, false))
@@ -412,7 +412,7 @@ func TestAnswer_AnalyticsRecordsContextProps(t *testing.T) {
 	}
 	limiter := ratelimit.New(st, 1000, 100000, nil)
 	answerLimiter := ratelimit.NewAnswer(st, 5, 50, 100, nil)
-	ts := httptest.NewServer(NewMux(srv, limiter, answerLimiter, nil, nil, "admin-secret", nil))
+	ts := httptest.NewServer(NewMux(srv, limiter, answerLimiter, nil, nil, nil, "admin-secret", nil))
 	t.Cleanup(ts.Close)
 
 	// Carry one prior turn and a one-entry dictionary.
@@ -508,7 +508,7 @@ func TestAnswer_AnalyticsBlockedOutcome(t *testing.T) {
 	}
 	limiter := ratelimit.New(st, 1000, 100000, nil)
 	answerLimiter := ratelimit.NewAnswer(st, 5, 50, 100, nil)
-	ts := httptest.NewServer(NewMux(srv, limiter, answerLimiter, nil, nil, "admin-secret", nil))
+	ts := httptest.NewServer(NewMux(srv, limiter, answerLimiter, nil, nil, nil, "admin-secret", nil))
 	t.Cleanup(ts.Close)
 
 	resp := postAnswer(t, ts, plaintext, answerBody("bad thing", 0, false))
